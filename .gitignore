@@ -1,0 +1,85 @@
+# =============================================================================
+# .gitignore - Files to exclude from version control
+# =============================================================================
+
+# Environment variables (NEVER commit API keys!)
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+patent_venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Output files
+output/
+reports/
+converted_access_data/
+*.log
+*.csv
+*.json
+
+# Database files (sensitive data)
+*.mdb
+*.accdb
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+__pycache__/
+converted_access_data/
+Office20/
+output/
+patent_system/
+reports/
+USPC_Download/
+
+ipg250812.xml
+
+converted_databases/
+patent_env/
+front-end/node_modules/
+txt_queries/

@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Patent Processing Pipeline</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(45deg, #2c3e50, #3498db);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        
+        .content {
+            padding: 30px;
+        }
+        
+        .status-bar {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            border-left: 5px solid #3498db;
+        }
+        
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .status-item {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        
+        .status-item h4 {
+            color: #2c3e50;
+            margin-bottom: 8px;
+        }
+        
+        .status-item .count {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #3498db;
+        }
+        
+        .pipeline-steps {
+            display: grid;
+            gap: 25px;
+        }
+        
+        .step {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 25px;
+            border-left: 5px solid #ddd;
+            transition: all 0.3s ease;
+        }
+        
+        .step.step-coming-soon {
+            background: #f8f9fa;
+            border-left-color: #bdc3c7;
+            opacity: 0.7;
+        }
+        
+        .step.step-coming-soon .step-title {
+            color: #7f8c8d;
+        }
+        
+        .step.step-coming-soon .step-description {
+            color: #95a5a6;
+        }
+        
+        .status-coming-soon {
+            background: #ecf0f1;
+            color: #7f8c8d;
+            font-style: italic;
+        }
+        
+        .step.completed {
+            border-left-color: #27ae60;
+            background: #f0f8f5;
+        }
+        
+        .step.running {
+            border-left-color: #f39c12;
+            background: #fef9e7;
+        }
+        
+        .step-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        .step-title {
+            font-size: 1.3em;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        
+        .step-status {
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: bold;
+        }
+        
+        .status-ready {
+            background: #e8f4f8;
+            color: #2980b9;
+        }
+        
+        .status-completed {
+            background: #d5f4e6;
+            color: #27ae60;
+        }
+        
+        .status-running {
+            background: #fef3cd;
+            color: #f39c12;
+        }
+        
+        .step-description {
+            color: #666;
+            margin-bottom: 20px;
+            line-height: 1.6;
+        }
+        
+        .step-actions {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        
+        .btn {
+            padding: 12px 25px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            text-decoration: none;
+            display: inline-block;
+            transition: all 0.3s ease;
+            font-size: 0.95em;
+        }
+        
+        .btn-primary {
+            background: #3498db;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #2980b9;
+            transform: translateY(-2px);
+        }
+        
+        .btn-test {
+            background: #f39c12;
+            color: white;
+        }
+        
+        .btn-test:hover {
+            background: #e67e22;
+            transform: translateY(-2px);
+        }
+        
+        .btn-secondary {
+            background: #95a5a6;
+            color: white;
+        }
+        
+        .btn-secondary:hover {
+            background: #7f8c8d;
+        }
+        
+        .btn:disabled {
+            background: #bdc3c7;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .file-info {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+            border: 1px solid #ecf0f1;
+        }
+        
+        .file-info h4 {
+            color: #2c3e50;
+            margin-bottom: 10px;
+        }
+        
+        .file-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+            font-size: 0.9em;
+        }
+        
+        .file-stat {
+            display: flex;
+            justify-content: space-between;
+        }
+        
+        .output-section {
+            margin-top: 20px;
+            padding: 15px;
+            background: #2c3e50;
+            color: #ecf0f1;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            font-size: 0.85em;
+            line-height: 1.4;
+        }
+        
+        .sample-data {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        
+        .sample-data pre {
+            font-size: 0.8em;
+            color: #2c3e50;
+        }
+        
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #3498db;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔬 Patent Processing Pipeline</h1>
+            <p>Process patent data through integration, extraction, and enrichment steps</p>
+        </div>
+        
+        <div class="content">
+            <!-- Status Overview -->
+            <div class="status-bar">
+                <h3>📊 Current Status</h3>
+                <div class="status-grid" id="statusGrid">
+                    <!-- Status items will be populated by JavaScript -->
+                </div>
+            </div>
+            
+            <!-- Pipeline Steps -->
+            <div class="pipeline-steps">
+                <!-- Step 0: Integrate Existing Data -->
+                <div class="step" id="step0">
+                    <div class="step-header">
+                        <div class="step-title">Step 0: Integrate Existing Data</div>
+                        <div class="step-status status-ready" id="step0Status">Ready</div>
+                    </div>
+                    <div class="step-description">
+                        Load XML patent files and compare against existing CSV databases to identify new patents and people that need processing. This step prevents duplicate work and saves API costs.
+                    </div>
+                    <div class="step-actions">
+                        <button class="btn btn-primary" onclick="runStep0()" id="step0Btn">
+                            🔄 Run Integration
+                        </button>
+                        <button class="btn btn-secondary" onclick="showSample('step0-people')" id="step0SamplePeople">
+                            👥 View Sample People
+                        </button>
+                        <button class="btn btn-secondary" onclick="showSample('step0-patents')" id="step0SamplePatents">
+                            📋 View Sample Patents
+                        </button>
+                    </div>
+                    <div class="file-info hidden" id="step0Files">
+                        <!-- File information will be populated by JavaScript -->
+                    </div>
+                    <div class="output-section hidden" id="step0Output"></div>
+                    <div class="sample-data hidden" id="step0Sample"></div>
+                </div>
+                
+                <!-- Step 1: Extract Patents -->
+                <div class="step" id="step1">
+                    <div class="step-header">
+                        <div class="step-title">Step 1: Extract Patents (USPTO API)</div>
+                        <div class="step-status status-ready" id="step1Status">Ready</div>
+                    </div>
+                    <div class="step-description">
+                        Extract recent patent data from the USPTO PatentsView API. This step is only needed if Step 0 didn't find sufficient XML data. It will fetch patents from the last 7 days by default.
+                    </div>
+                    <div class="step-actions">
+                        <button class="btn btn-primary" onclick="runStep1()" id="step1Btn">
+                            🔍 Extract Patents
+                        </button>
+                        <button class="btn btn-secondary" onclick="showSample('step1')" id="step1Sample">
+                            📋 View Sample
+                        </button>
+                    </div>
+                    <div class="file-info hidden" id="step1Files">
+                        <!-- File information will be populated by JavaScript -->
+                    </div>
+                    <div class="output-section hidden" id="step1Output"></div>
+                    <div class="sample-data hidden" id="step1SampleData"></div>
+                </div>
+                
+                <!-- Step 2: Data Enrichment -->
+                <div class="step" id="step2">
+                    <div class="step-header">
+                        <div class="step-title">Step 2: Data Enrichment</div>
+                        <div class="step-status status-ready" id="step2Status">Ready</div>
+                    </div>
+                    <div class="step-description">
+                        Enrich patent inventor and assignee data using PeopleDataLabs API. This adds email addresses, LinkedIn profiles, current job information, and more contact details.
+                    </div>
+                    <div class="step-actions">
+                        <button class="btn btn-test" onclick="runStep2(true)" id="step2TestBtn">
+                            🧪 Test Enrichment (2 people)
+                        </button>
+                        <button class="btn btn-primary" onclick="runStep2(false)" id="step2Btn" disabled>
+                            💎 Full Enrichment
+                        </button>
+                        <button class="btn btn-secondary" onclick="showSample('step2')" id="step2Sample">
+                            👥 View Enriched Sample
+                        </button>
+                    </div>
+                    <div class="file-info hidden" id="step2Files">
+                        <!-- File information will be populated by JavaScript -->
+                    </div>
+                    <div class="output-section hidden" id="step2Output"></div>
+                    <div class="sample-data hidden" id="step2SampleData"></div>
+                </div>
+                
+                <!-- Step 3: Integration with Microsoft Dynamics CRM -->
+                <div class="step step-coming-soon" id="step3">
+                    <div class="step-header">
+                        <div class="step-title">Step 3: Integration with Microsoft Dynamics CRM</div>
+                        <div class="step-status status-coming-soon">Coming Soon</div>
+                    </div>
+                    <div class="step-description">
+                        Automatically import enriched patent data and contact information into Microsoft Dynamics CRM. Create leads, contacts, and opportunities for business development outreach.
+                    </div>
+                    <div class="step-actions">
+                        <button class="btn btn-primary" disabled>
+                            🔗 Import to Dynamics
+                        </button>
+                        <button class="btn btn-secondary" disabled>
+                            ⚙️ Configure CRM
+                        </button>
+                        <button class="btn btn-secondary" disabled>
+                            📊 View CRM Data
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Step 4: Automating Email Outreach -->
+                <div class="step step-coming-soon" id="step4">
+                    <div class="step-header">
+                        <div class="step-title">Step 4: Automating Email Outreach</div>
+                        <div class="step-status status-coming-soon">Coming Soon</div>
+                    </div>
+                    <div class="step-description">
+                        Send personalized outreach emails to patent inventors and assignees. Automatically compose emails based on patent details and enriched contact information for business development opportunities.
+                    </div>
+                    <div class="step-actions">
+                        <button class="btn btn-test" disabled>
+                            📧 Send Test Email
+                        </button>
+                        <button class="btn btn-primary" disabled>
+                            📬 Send Bulk Outreach
+                        </button>
+                        <button class="btn btn-secondary" disabled>
+                            ✏️ Edit Templates
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Step 5: Reporting -->
+                <div class="step step-coming-soon" id="step5">
+                    <div class="step-header">
+                        <div class="step-title">Step 5: Reporting</div>
+                        <div class="step-status status-coming-soon">Coming Soon</div>
+                    </div>
+                    <div class="step-description">
+                        Generate comprehensive reports on patent processing pipeline performance, enrichment success rates, CRM integration metrics, and email outreach campaign results.
+                    </div>
+                    <div class="step-actions">
+                        <button class="btn btn-primary" disabled>
+                            📈 Generate Report
+                        </button>
+                        <button class="btn btn-secondary" disabled>
+                            📊 View Analytics
+                        </button>
+                        <button class="btn btn-secondary" disabled>
+                            📋 Export Data
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Global state
+        let currentStatus = {};
+        
+        // Initialize page
+        document.addEventListener('DOMContentLoaded', function() {
+            updateStatus();
+            // Refresh status every 30 seconds
+            setInterval(updateStatus, 30000);
+        });
+        
+        // Update status from server
+        async function updateStatus() {
+            try {
+                const response = await fetch('/api/status');
+                currentStatus = await response.json();
+                updateStatusDisplay();
+            } catch (error) {
+                console.error('Error updating status:', error);
+            }
+        }
+        
+        // Update status display
+        function updateStatusDisplay() {
+            const statusGrid = document.getElementById('statusGrid');
+            statusGrid.innerHTML = `
+                <div class="status-item">
+                    <h4>New People Found</h4>
+                    <div class="count">${currentStatus.counts?.newPeople || 0}</div>
+                    <small>${currentStatus.step0?.newPeople?.exists ? 'Available' : 'Not found'}</small>
+                </div>
+                <div class="status-item">
+                    <h4>New Patents Found</h4>
+                    <div class="count">${currentStatus.counts?.newPatents || 0}</div>
+                    <small>${currentStatus.step0?.newPatents?.exists ? 'Available' : 'Not found'}</small>
+                </div>
+                <div class="status-item">
+                    <h4>Raw Patents</h4>
+                    <div class="count">${currentStatus.counts?.rawPatents || 0}</div>
+                    <small>${currentStatus.step1?.rawPatents?.exists ? 'Available' : 'Not found'}</small>
+                </div>
+                <div class="status-item">
+                    <h4>Enriched Data</h4>
+                    <div class="count">${currentStatus.counts?.enrichedData || 0}</div>
+                    <small>${currentStatus.step2?.enrichedData?.exists ? 'Available' : 'Not found'}</small>
+                </div>
+            `;
+            
+            // Update step statuses
+            updateStepStatus('step0', currentStatus.step0?.integrationResults?.exists);
+            updateStepStatus('step1', currentStatus.step1?.rawPatents?.exists);
+            updateStepStatus('step2', currentStatus.step2?.enrichedData?.exists);
+        }
+        
+        // Update individual step status
+        function updateStepStatus(stepId, hasResults) {
+            const step = document.getElementById(stepId);
+            const statusEl = document.getElementById(stepId + 'Status');
+            
+            if (hasResults) {
+                step.classList.add('completed');
+                statusEl.textContent = 'Completed';
+                statusEl.className = 'step-status status-completed';
+            } else {
+                step.classList.remove('completed');
+                statusEl.textContent = 'Ready';
+                statusEl.className = 'step-status status-ready';
+            }
+        }
+        
+        // Set step as running
+        function setStepRunning(stepId) {
+            const step = document.getElementById(stepId);
+            const statusEl = document.getElementById(stepId + 'Status');
+            const btn = document.getElementById(stepId + 'Btn');
+            
+            step.classList.add('running');
+            statusEl.innerHTML = '<div class="loading"></div> Running';
+            statusEl.className = 'step-status status-running';
+            btn.disabled = true;
+        }
+        
+        // Set step as completed
+        function setStepCompleted(stepId, success = true) {
+            const step = document.getElementById(stepId);
+            const statusEl = document.getElementById(stepId + 'Status');
+            const btn = document.getElementById(stepId + 'Btn');
+            
+            step.classList.remove('running');
+            btn.disabled = false;
+            
+            if (success) {
+                step.classList.add('completed');
+                statusEl.textContent = 'Completed';
+                statusEl.className = 'step-status status-completed';
+            } else {
+                statusEl.textContent = 'Error';
+                statusEl.className = 'step-status status-ready';
+            }
+        }
+        
+        // Run Step 0
+        async function runStep0() {
+            setStepRunning('step0');
+            
+            try {
+                const response = await fetch('/api/step0', { method: 'POST' });
+                const result = await response.json();
+                
+                if (result.success) {
+                    setStepCompleted('step0', true);
+                    showOutput('step0', result.output);
+                    showFileInfo('step0', result.files);
+                    updateStatus(); // Refresh status
+                } else {
+                    setStepCompleted('step0', false);
+                    showOutput('step0', `Error: ${result.error}\n\n${result.stderr || ''}`);
+                }
+            } catch (error) {
+                setStepCompleted('step0', false);
+                showOutput('step0', `Network error: ${error.message}`);
+            }
+        }
+        
+        // Run Step 1
+        async function runStep1() {
+            setStepRunning('step1');
+            
+            try {
+                const response = await fetch('/api/step1', { method: 'POST' });
+                const result = await response.json();
+                
+                if (result.success) {
+                    setStepCompleted('step1', true);
+                    showOutput('step1', result.output);
+                    showFileInfo('step1', result.files);
+                    updateStatus(); // Refresh status
+                } else {
+                    setStepCompleted('step1', false);
+                    showOutput('step1', `Error: ${result.error}\n\n${result.stderr || ''}`);
+                }
+            } catch (error) {
+                setStepCompleted('step1', false);
+                showOutput('step1', `Network error: ${error.message}`);
+            }
+        }
+        
+        // Run Step 2
+        async function runStep2(testMode = false) {
+            const stepId = 'step2';
+            const btnId = testMode ? 'step2TestBtn' : 'step2Btn';
+            
+            setStepRunning(stepId);
+            document.getElementById(btnId).disabled = true;
+            
+            try {
+                const response = await fetch('/api/step2', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ testMode })
+                });
+                const result = await response.json();
+                
+                if (result.success) {
+                    setStepCompleted(stepId, true);
+                    showOutput(stepId, result.output);
+                    showFileInfo(stepId, result.files);
+                    updateStatus(); // Refresh status
+                } else {
+                    setStepCompleted(stepId, false);
+                    showOutput(stepId, `Error: ${result.error}\n\n${result.stderr || ''}`);
+                }
+            } catch (error) {
+                setStepCompleted(stepId, false);
+                showOutput(stepId, `Network error: ${error.message}`);
+            }
+            
+            document.getElementById(btnId).disabled = false;
+        }
+        
+        // Show output
+        function showOutput(stepId, output) {
+            const outputEl = document.getElementById(stepId + 'Output');
+            outputEl.textContent = output;
+            outputEl.classList.remove('hidden');
+        }
+        
+        // Show file information
+        function showFileInfo(stepId, files) {
+            const fileInfoEl = document.getElementById(stepId + 'Files');
+            
+            let html = '<h4>📁 Generated Files</h4><div class="file-stats">';
+            
+            Object.entries(files).forEach(([key, fileInfo]) => {
+                if (fileInfo.stats && fileInfo.stats.exists) {
+                    html += `
+                        <div class="file-stat">
+                            <span>${key}:</span>
+                            <span>${fileInfo.count || 'N/A'} records (${fileInfo.stats.sizeKB} KB)</span>
+                        </div>
+                    `;
+                }
+            });
+            
+            html += '</div>';
+            fileInfoEl.innerHTML = html;
+            fileInfoEl.classList.remove('hidden');
+        }
+        
+        // Show sample data
+        async function showSample(sampleType) {
+            try {
+                const response = await fetch(`/api/sample/${sampleType}`);
+                const result = await response.json();
+                
+                let stepId;
+                let sampleEl;
+                
+                if (sampleType.startsWith('step0')) {
+                    stepId = 'step0';
+                    sampleEl = document.getElementById('step0Sample');
+                } else if (sampleType.startsWith('step1')) {
+                    stepId = 'step1';
+                    sampleEl = document.getElementById('step1SampleData');
+                } else if (sampleType.startsWith('step2')) {
+                    stepId = 'step2';
+                    sampleEl = document.getElementById('step2SampleData');
+                }
+                
+                if (sampleEl) {
+                    // Format the sample data nicely like Step 0
+                    let content = `<h4>📋 Sample Data - ${sampleType}</h4>`;
+                    
+                    if (result.sample && result.sample.note) {
+                        // Special handling for Step 1 when skipped
+                        content += `<div style="background: #e8f4f8; padding: 10px; border-radius: 5px; margin-bottom: 15px; border-left: 4px solid #3498db;">`;
+                        content += `<strong>ℹ️ ${result.sample.note}</strong><br>`;
+                        content += `<small>📄 Source: ${result.sample.source}</small>`;
+                        content += `</div>`;
+                        
+                        // Show the actual data in a clean format
+                        if (result.sample.data && result.sample.data.length > 0) {
+                            content += `<div style="background: white; padding: 15px; border-radius: 5px; border: 1px solid #ddd;">`;
+                            result.sample.data.slice(0, 3).forEach((item, index) => {
+                                content += `<div style="margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px solid #eee;">`;
+                                content += `<strong>Patent ${index + 1}:</strong><br>`;
+                                content += `📋 Number: ${item.patent_number || 'Unknown'}<br>`;
+                                content += `📝 Title: ${item.patent_title || 'Unknown'}<br>`;
+                                content += `📅 Date: ${item.patent_date || 'Unknown'}<br>`;
+                                
+                                if (item.inventors && item.inventors.length > 0) {
+                                    content += `👨‍🔬 Inventors: `;
+                                    const inventorNames = item.inventors.map(inv => 
+                                        `${inv.first_name || ''} ${inv.last_name || ''}`.trim()
+                                    ).filter(name => name);
+                                    content += inventorNames.join(', ') + '<br>';
+                                }
+                                content += `</div>`;
+                            });
+                            content += `</div>`;
+                        }
+                    } else {
+                        // Regular sample data display
+                        content += `<pre style="background: white; padding: 15px; border-radius: 5px; border: 1px solid #ddd; white-space: pre-wrap; max-height: 400px; overflow-y: auto;">${JSON.stringify(result.sample, null, 2)}</pre>`;
+                    }
+                    
+                    sampleEl.innerHTML = content;
+                    sampleEl.classList.remove('hidden');
+                }
+            } catch (error) {
+                console.error('Error fetching sample:', error);
+            }
+        }
+    </script>
+</body>
+</html>
