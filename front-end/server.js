@@ -7,7 +7,10 @@ const fs = require('fs');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
+
+// Global state for tracking running processes
+const runningProcesses = new Map();
 
 // Middleware
 app.use(express.json());
@@ -18,8 +21,8 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// Helper function to run Python scripts
-function runPythonScript(scriptPath, args = []) {
+// Helper function to run Python scripts asynchronously
+function runPythonScriptAsync(scriptPath, args = [], stepId) {
     return new Promise((resolve, reject) => {
         console.log(`Running: python ${scriptPath} ${args.join(' ')}`);
         
@@ -29,7 +32,7 @@ function runPythonScript(scriptPath, args = []) {
             PYTHONPATH: path.join(__dirname, '..'),
             // Pass API keys from frontend .env to Python
             PEOPLEDATALABS_API_KEY: process.env.PEOPLEDATALABS_API_KEY || 'YOUR_PDL_API_KEY',
-            PATENTSVIEW_API_KEY: process.env.PATENTSVIEW_API_KEY || 'YOUR_API_KEY',
+            PATENTSVIEW_API_KEY: process.env.PATENTSVIEW_API_KEY || 'oq371zFI.BjeAbayJsdHdvEgbei0vskz5bTK3KM1S',
             MAX_ENRICHMENT_COST: process.env.MAX_ENRICHMENT_COST || '1000',
             DAYS_BACK: process.env.DAYS_BACK || '7',
             MAX_RESULTS: process.env.MAX_RESULTS || '1000'
@@ -43,22 +46,68 @@ function runPythonScript(scriptPath, args = []) {
         let stdout = '';
         let stderr = '';
         
+        // Store process info for status tracking
+        runningProcesses.set(stepId, {
+            process: python,
+            startTime: new Date(),
+            progress: 'Starting...',
+            stdout: '',
+            stderr: ''
+        });
+        
         python.stdout.on('data', (data) => {
-            stdout += data.toString();
-            console.log(data.toString());
+            const output = data.toString();
+            stdout += output;
+            console.log(output);
+            
+            // Update progress from output
+            const processInfo = runningProcesses.get(stepId);
+            if (processInfo) {
+                processInfo.stdout += output;
+                
+                // Extract progress information from output
+                if (output.includes('PROGRESS:')) {
+                    const progressMatch = output.match(/PROGRESS: (.+)/);
+                    if (progressMatch) {
+                        processInfo.progress = progressMatch[1];
+                    }
+                } else if (output.includes('Processing')) {
+                    processInfo.progress = 'Processing data...';
+                } else if (output.includes('Loading')) {
+                    processInfo.progress = 'Loading databases...';
+                } else if (output.includes('Downloading')) {
+                    processInfo.progress = 'Downloading patents from API...';
+                } else if (output.includes('Enhanced filtering')) {
+                    processInfo.progress = 'Filtering and matching data...';
+                }
+            }
         });
         
         python.stderr.on('data', (data) => {
-            stderr += data.toString();
-            console.error(data.toString());
+            const output = data.toString();
+            stderr += output;
+            console.error(output);
+            
+            const processInfo = runningProcesses.get(stepId);
+            if (processInfo) {
+                processInfo.stderr += output;
+            }
         });
         
         python.on('close', (code) => {
+            // Remove from running processes
+            runningProcesses.delete(stepId);
+            
             if (code === 0) {
                 resolve({ success: true, output: stdout, stderr });
             } else {
                 reject({ success: false, error: `Process exited with code ${code}`, stderr, stdout });
             }
+        });
+        
+        python.on('error', (error) => {
+            runningProcesses.delete(stepId);
+            reject({ success: false, error: error.message, stderr, stdout });
         });
     });
 }
@@ -98,6 +147,18 @@ function readJsonFile(filePath) {
     }
 }
 
+// Helper function to write JSON files
+function writeJsonFile(filePath, data) {
+    try {
+        const fullPath = path.join(__dirname, '..', filePath);
+        fs.writeFileSync(fullPath, JSON.stringify(data, null, 2));
+        return true;
+    } catch (error) {
+        console.error(`Error writing ${filePath}:`, error);
+        return false;
+    }
+}
+
 // Helper function to get file stats
 function getFileStats(filePath) {
     try {
@@ -117,140 +178,627 @@ function getFileStats(filePath) {
     }
 }
 
-// Step 0: Integrate Existing Data
+// NEW Step 0: Download Patents from PatentsView API
 app.post('/api/step0', async (req, res) => {
-    try {
-        console.log('Starting Step 0: Integrate Existing Data');
-        
-        const result = await runPythonScript('front-end/run_step0_wrapper.py');
-        
-        // Read the results
-        const integrationResults = readJsonFile('output/integration_results.json');
-        const newPeople = readJsonFile('output/new_people_for_enrichment.json');
-        const newPatents = readJsonFile('output/filtered_new_patents.json');
-        
-        res.json({
-            success: true,
-            message: 'Step 0 completed successfully',
-            results: integrationResults,
-            files: {
-                newPeople: {
-                    count: newPeople ? newPeople.length : 0,
-                    stats: getFileStats('output/new_people_for_enrichment.json')
-                },
-                newPatents: {
-                    count: newPatents ? newPatents.length : 0,
-                    stats: getFileStats('output/filtered_new_patents.json')
-                },
-                integrationResults: getFileStats('output/integration_results.json')
-            },
-            output: result.output
-        });
-        
-    } catch (error) {
-        console.error('Step 0 error:', error);
-        res.status(500).json({
+    const stepId = 'step0';
+    
+    // Check if already running
+    if (runningProcesses.has(stepId)) {
+        return res.json({
             success: false,
-            error: error.error || error.message,
-            stderr: error.stderr,
-            stdout: error.stdout
+            error: 'Step 0 is already running'
         });
     }
-});
-
-// Step 1: Extract Patents (only if needed)
-app.post('/api/step1', async (req, res) => {
-    try {
-        console.log('Starting Step 1: Extract Patents from USPTO API');
-        
-        const result = await runPythonScript('front-end/run_step1_wrapper.py');
-        
-        // Check if Step 1 was skipped (using XML data instead)
-        const extractionResults = readJsonFile('output/extraction_results.json');
-        
-        let files;
-        if (extractionResults && extractionResults.skipped_api) {
-            // Step 1 was skipped, point to Step 0 data instead
-            const newPatents = readJsonFile('output/filtered_new_patents.json');
-            files = {
-                rawPatents: {
-                    count: newPatents ? newPatents.length : 0,
-                    stats: getFileStats('output/filtered_new_patents.json'),
-                    source: 'xml_data_from_step0'
-                },
-                rawPatentsCsv: { 
-                    exists: false, 
-                    note: 'Using XML data from Step 0 instead' 
-                }
-            };
-        } else {
-            // Normal API extraction occurred
-            const rawPatents = readJsonFile('output/raw_patents.json');
-            files = {
-                rawPatents: {
-                    count: rawPatents ? rawPatents.length : 0,
-                    stats: getFileStats('output/raw_patents.json')
-                },
-                rawPatentsCsv: getFileStats('output/raw_patents.csv')
-            };
-        }
-        
-        res.json({
-            success: true,
-            message: extractionResults && extractionResults.skipped_api 
-                ? 'Step 1 skipped - using XML data from Step 0' 
-                : 'Step 1 completed successfully',
-            files: files,
-            output: result.output
-        });
-        
-    } catch (error) {
-        console.error('Step 1 error:', error);
-        res.status(500).json({
-            success: false,
-            error: error.error || error.message,
-            stderr: error.stderr,
-            stdout: error.stdout
-        });
-    }
-});
-
-// Step 2: Data Enrichment
-app.post('/api/step2', async (req, res) => {
-    const { testMode = false } = req.body;
     
     try {
-        console.log(`Starting Step 2: Data Enrichment${testMode ? ' (TEST MODE)' : ''}`);
+        console.log('Starting Step 0: Download Patents from PatentsView API (Async)');
         
-        const args = testMode ? ['--test'] : [];
-        const result = await runPythonScript('front-end/run_step2_wrapper.py', args);
+        // Get options from request body
+        const { 
+            mode = 'smart', // 'smart' or 'manual'
+            startDate = null, 
+            endDate = null,
+            daysBack = 7,
+            maxResults = 1000
+        } = req.body;
         
-        // Read the results
-        const enrichedData = readJsonFile('output/enriched_patents.json');
-        const enrichmentResults = readJsonFile('output/enrichment_results.json');
+        // Prepare arguments for Python script
+        const args = [];
+        if (mode === 'manual' && startDate && endDate) {
+            args.push('--mode', 'manual', '--start-date', startDate, '--end-date', endDate);
+        } else {
+            args.push('--mode', 'smart', '--days-back', daysBack.toString());
+        }
+        args.push('--max-results', maxResults.toString());
         
+        // Start the process asynchronously
+        runPythonScriptAsync('front-end/run_step0_wrapper.py', args, stepId)
+            .then((result) => {
+                console.log('Step 0 completed successfully');
+                
+                // Store completion result for status endpoint
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: true,
+                    output: result.output,
+                    completedAt: new Date(),
+                    files: getStep0Files()
+                });
+            })
+            .catch((error) => {
+                console.error('Step 0 failed:', error);
+                
+                // Store error result for status endpoint
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: false,
+                    error: error.error || error.message,
+                    stderr: error.stderr,
+                    stdout: error.stdout,
+                    completedAt: new Date()
+                });
+            });
+        
+        // Return immediately with "started" status
         res.json({
             success: true,
-            message: `Step 2 completed successfully${testMode ? ' (test mode)' : ''}`,
-            results: enrichmentResults,
-            files: {
-                enrichedData: {
-                    count: enrichedData ? enrichedData.length : 0,
-                    stats: getFileStats('output/enriched_patents.json')
-                },
-                enrichedCsv: getFileStats('output/enriched_patents.csv'),
-                enrichmentResults: getFileStats('output/enrichment_results.json')
-            },
-            output: result.output
+            status: 'started',
+            processing: true,
+            message: 'Step 0 started successfully. Use /api/step0/status to check progress.',
+            config: { mode, startDate, endDate, daysBack, maxResults }
         });
         
     } catch (error) {
-        console.error('Step 2 error:', error);
+        console.error('Step 0 startup error:', error);
         res.status(500).json({
             success: false,
-            error: error.error || error.message,
-            stderr: error.stderr,
-            stdout: error.stdout
+            error: error.message
+        });
+    }
+});
+
+// Helper functions for Step 0 completion data
+function getStep0Files() {
+    const downloadedPatents = readJsonFile('output/downloaded_patents.json');
+    
+    return {
+        downloadedPatents: {
+            count: downloadedPatents ? downloadedPatents.length : 0,
+            stats: getFileStats('output/downloaded_patents.json')
+        },
+        downloadResults: getFileStats('output/download_results.json')
+    };
+}
+
+// Step 0 Status endpoint for polling
+app.get('/api/step0/status', (req, res) => {
+    const stepId = 'step0';
+    
+    // Check if completed
+    const completedInfo = runningProcesses.get(stepId + '_completed');
+    if (completedInfo) {
+        // Remove completed info after returning it
+        runningProcesses.delete(stepId + '_completed');
+        
+        return res.json({
+            completed: true,
+            success: completedInfo.success,
+            output: completedInfo.output,
+            error: completedInfo.error,
+            stderr: completedInfo.stderr,
+            stdout: completedInfo.stdout,
+            files: completedInfo.files
+        });
+    }
+    
+    // Check if still running
+    const runningInfo = runningProcesses.get(stepId);
+    if (runningInfo) {
+        const elapsed = Math.round((new Date() - runningInfo.startTime) / 1000);
+        return res.json({
+            completed: false,
+            running: true,
+            progress: runningInfo.progress,
+            elapsedSeconds: elapsed
+        });
+    }
+    
+    // Not running and not completed
+    res.json({
+        completed: false,
+        running: false,
+        error: 'Step 0 has not been started or status was already retrieved'
+    });
+});
+
+// Step 1: Integrate Existing Data (was Step 0)
+app.post('/api/step1', async (req, res) => {
+    const stepId = 'step1';
+    
+    // Check if already running
+    if (runningProcesses.has(stepId)) {
+        return res.json({
+            success: false,
+            error: 'Step 1 is already running'
+        });
+    }
+    
+    try {
+        console.log('Starting Step 1: Integrate Existing Data (Async)');
+        
+        // Start the process asynchronously
+        runPythonScriptAsync('front-end/run_step1_wrapper.py', [], stepId)
+            .then((result) => {
+                console.log('Step 1 completed successfully');
+                
+                // Store completion result for status endpoint
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: true,
+                    output: result.output,
+                    completedAt: new Date(),
+                    files: getStep1Files(),
+                    potentialMatches: getStep1PotentialMatches()
+                });
+            })
+            .catch((error) => {
+                console.error('Step 1 failed:', error);
+                
+                // Store error result for status endpoint
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: false,
+                    error: error.error || error.message,
+                    stderr: error.stderr,
+                    stdout: error.stdout,
+                    completedAt: new Date()
+                });
+            });
+        
+        // Return immediately with "started" status
+        res.json({
+            success: true,
+            status: 'started',
+            processing: true,
+            message: 'Step 1 started successfully. Use /api/step1/status to check progress.'
+        });
+        
+    } catch (error) {
+        console.error('Step 1 startup error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Helper functions for Step 1 completion data
+function getStep1Files() {
+    const newPeople = readJsonFile('output/new_people_for_enrichment.json');
+    const newPatents = readJsonFile('output/filtered_new_patents.json');
+    
+    return {
+        newPeople: {
+            count: newPeople ? newPeople.length : 0,
+            stats: getFileStats('output/new_people_for_enrichment.json')
+        },
+        newPatents: {
+            count: newPatents ? newPatents.length : 0,
+            stats: getFileStats('output/filtered_new_patents.json')
+        },
+        integrationResults: getFileStats('output/integration_results.json')
+    };
+}
+
+function getStep1PotentialMatches() {
+    const newPeople = readJsonFile('output/new_people_for_enrichment.json');
+    
+    if (!newPeople) return [];
+    
+    return newPeople.filter(person => 
+        person.match_score >= 10 && person.match_score < 25 && 
+        person.match_status === 'needs_review'
+    );
+}
+
+// Step 1 Status endpoint for polling
+app.get('/api/step1/status', (req, res) => {
+    const stepId = 'step1';
+    
+    // Check if completed
+    const completedInfo = runningProcesses.get(stepId + '_completed');
+    if (completedInfo) {
+        // Remove completed info after returning it
+        runningProcesses.delete(stepId + '_completed');
+        
+        return res.json({
+            completed: true,
+            success: completedInfo.success,
+            output: completedInfo.output,
+            error: completedInfo.error,
+            stderr: completedInfo.stderr,
+            stdout: completedInfo.stdout,
+            files: completedInfo.files,
+            potentialMatches: completedInfo.potentialMatches
+        });
+    }
+    
+    // Check if still running
+    const runningInfo = runningProcesses.get(stepId);
+    if (runningInfo) {
+        const elapsed = Math.round((new Date() - runningInfo.startTime) / 1000);
+        return res.json({
+            completed: false,
+            running: true,
+            progress: runningInfo.progress,
+            elapsedSeconds: elapsed
+        });
+    }
+    
+    // Not running and not completed
+    res.json({
+        completed: false,
+        running: false,
+        error: 'Step 1 has not been started or status was already retrieved'
+    });
+});
+
+// Step 2 Status endpoint for polling
+app.get('/api/step2/status', (req, res) => {
+    const stepId = 'step2';
+    
+    // Check if completed
+    const completedInfo = runningProcesses.get(stepId + '_completed');
+    if (completedInfo) {
+        runningProcesses.delete(stepId + '_completed');
+        
+        return res.json({
+            completed: true,
+            success: completedInfo.success,
+            output: completedInfo.output,
+            error: completedInfo.error,
+            files: completedInfo.files
+        });
+    }
+    
+    // Check if still running
+    const runningInfo = runningProcesses.get(stepId);
+    if (runningInfo) {
+        const elapsed = Math.round((new Date() - runningInfo.startTime) / 1000);
+        return res.json({
+            completed: false,
+            running: true,
+            progress: runningInfo.progress,
+            elapsedSeconds: elapsed
+        });
+    }
+    
+    res.json({
+        completed: false,
+        running: false,
+        error: 'Step 2 has not been started or status was already retrieved'
+    });
+});
+
+// Step 3 Status endpoint for polling
+app.get('/api/step3/status', (req, res) => {
+    const stepId = 'step3';
+    
+    // Check if completed
+    const completedInfo = runningProcesses.get(stepId + '_completed');
+    if (completedInfo) {
+        runningProcesses.delete(stepId + '_completed');
+        
+        return res.json({
+            completed: true,
+            success: completedInfo.success,
+            output: completedInfo.output,
+            error: completedInfo.error,
+            files: completedInfo.files
+        });
+    }
+    
+    // Check if still running
+    const runningInfo = runningProcesses.get(stepId);
+    if (runningInfo) {
+        const elapsed = Math.round((new Date() - runningInfo.startTime) / 1000);
+        return res.json({
+            completed: false,
+            running: true,
+            progress: runningInfo.progress,
+            elapsedSeconds: elapsed
+        });
+    }
+    
+    res.json({
+        completed: false,
+        running: false,
+        error: 'Step 3 has not been started or status was already retrieved'
+    });
+});
+
+// Get verification data (people needing review)
+app.get('/api/verification-data', (req, res) => {
+    try {
+        const newPeople = readJsonFile('output/new_people_for_enrichment.json');
+        
+        if (!newPeople) {
+            return res.json({
+                success: false,
+                error: 'No people data found. Run Step 1 first.'
+            });
+        }
+        
+        // Filter people with potential matches (scores 10-24) for verification
+        const potentialMatches = newPeople.filter(person => 
+            person.match_score >= 10 && person.match_score < 25 && 
+            person.match_status === 'needs_review'
+        );
+        
+        res.json({
+            success: true,
+            potentialMatches: potentialMatches,
+            totalCount: potentialMatches.length
+        });
+        
+    } catch (error) {
+        console.error('Error getting verification data:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Finalize verification decisions
+app.post('/api/finalize-verification', (req, res) => {
+    try {
+        const { decisions } = req.body;
+        
+        if (!decisions) {
+            return res.status(400).json({
+                success: false,
+                error: 'No decisions provided'
+            });
+        }
+        
+        // Read current people data
+        const newPeople = readJsonFile('output/new_people_for_enrichment.json');
+        if (!newPeople) {
+            return res.status(400).json({
+                success: false,
+                error: 'No people data found'
+            });
+        }
+        
+        // Create updated lists based on decisions
+        const updatedEnrichmentList = [];
+        const existingPeopleList = [];
+        
+        newPeople.forEach(person => {
+            const decision = decisions[person.person_id];
+            
+            if (decision) {
+                if (decision.decision === 'new') {
+                    // Add to enrichment list (remove needs_review flag)
+                    updatedEnrichmentList.push({
+                        ...person,
+                        match_status: 'verified_new',
+                        verification_decision: 'user_approved_for_enrichment'
+                    });
+                } else if (decision.decision === 'existing') {
+                    // Move to existing people list
+                    existingPeopleList.push({
+                        ...person,
+                        match_status: 'verified_existing',
+                        verification_decision: 'user_marked_as_existing'
+                    });
+                } else if (decision.decision === 'skip') {
+                    // Keep in enrichment list but mark as skipped
+                    updatedEnrichmentList.push({
+                        ...person,
+                        match_status: 'verification_skipped',
+                        verification_decision: 'user_skipped'
+                    });
+                }
+            } else {
+                // No decision made, keep as is
+                updatedEnrichmentList.push(person);
+            }
+        });
+        
+        // Save updated enrichment list
+        const success = writeJsonFile('output/new_people_for_enrichment.json', updatedEnrichmentList);
+        
+        if (success) {
+            // Also save the existing people list for reference
+            const existingPeopleFound = readJsonFile('output/existing_people_found.json') || [];
+            const combinedExisting = [...existingPeopleFound, ...existingPeopleList];
+            writeJsonFile('output/existing_people_found.json', combinedExisting);
+            
+            // Update integration results with new counts
+            const integrationResults = readJsonFile('output/integration_results.json') || {};
+            integrationResults.verified_new_people_count = updatedEnrichmentList.length;
+            integrationResults.verified_existing_people_count = existingPeopleList.length;
+            integrationResults.verification_completed = true;
+            integrationResults.verification_timestamp = new Date().toISOString();
+            writeJsonFile('output/integration_results.json', integrationResults);
+            
+            res.json({
+                success: true,
+                message: 'Verification decisions saved successfully',
+                stats: {
+                    enrichmentListCount: updatedEnrichmentList.length,
+                    existingPeopleCount: existingPeopleList.length,
+                    decisionsProcessed: Object.keys(decisions).length
+                }
+            });
+        } else {
+            res.status(500).json({
+                success: false,
+                error: 'Failed to save verification decisions'
+            });
+        }
+        
+    } catch (error) {
+        console.error('Error finalizing verification:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Step 2: Extract Additional Patents (was Step 1)
+app.post('/api/step2', async (req, res) => {
+    const stepId = 'step2';
+    
+    if (runningProcesses.has(stepId)) {
+        return res.json({
+            success: false,
+            error: 'Step 2 is already running'
+        });
+    }
+    
+    try {
+        console.log('Starting Step 2: Extract Additional Patents from USPTO API (Async)');
+        
+        // Start the process asynchronously
+        runPythonScriptAsync('front-end/run_step2_wrapper.py', [], stepId)
+            .then((result) => {
+                console.log('Step 2 completed successfully');
+                
+                // Check if Step 2 was skipped (using downloaded data instead)
+                const extractionResults = readJsonFile('output/extraction_results.json');
+                
+                let files;
+                if (extractionResults && extractionResults.skipped_api) {
+                    const downloadedPatents = readJsonFile('output/downloaded_patents.json');
+                    files = {
+                        rawPatents: {
+                            count: downloadedPatents ? downloadedPatents.length : 0,
+                            stats: getFileStats('output/downloaded_patents.json'),
+                            source: 'downloaded_data_from_step0'
+                        },
+                        rawPatentsCsv: { 
+                            exists: false, 
+                            note: 'Using downloaded data from Step 0 instead' 
+                        }
+                    };
+                } else {
+                    const rawPatents = readJsonFile('output/raw_patents.json');
+                    files = {
+                        rawPatents: {
+                            count: rawPatents ? rawPatents.length : 0,
+                            stats: getFileStats('output/raw_patents.json')
+                        },
+                        rawPatentsCsv: getFileStats('output/raw_patents.csv')
+                    };
+                }
+                
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: true,
+                    output: result.output,
+                    files: files,
+                    completedAt: new Date()
+                });
+            })
+            .catch((error) => {
+                console.error('Step 2 failed:', error);
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: false,
+                    error: error.error || error.message,
+                    stderr: error.stderr,
+                    stdout: error.stdout,
+                    completedAt: new Date()
+                });
+            });
+        
+        res.json({
+            success: true,
+            status: 'started',
+            processing: true,
+            message: 'Step 2 started successfully. Use /api/step2/status to check progress.'
+        });
+        
+    } catch (error) {
+        console.error('Step 2 startup error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Step 3: Data Enrichment (was Step 2)
+app.post('/api/step3', async (req, res) => {
+    const { testMode = false } = req.body;
+    const stepId = 'step3';
+    
+    if (runningProcesses.has(stepId)) {
+        return res.json({
+            success: false,
+            error: 'Step 3 is already running'
+        });
+    }
+    
+    try {
+        console.log(`Starting Step 3: Data Enrichment${testMode ? ' (TEST MODE)' : ''} (Async)`);
+        
+        const args = testMode ? ['--test'] : [];
+        
+        // Start the process asynchronously
+        runPythonScriptAsync('front-end/run_step3_wrapper.py', args, stepId)
+            .then((result) => {
+                console.log('Step 3 completed successfully');
+                
+                const enrichedData = readJsonFile('output/enriched_patents.json');
+                const enrichmentResults = readJsonFile('output/enrichment_results.json');
+                
+                const files = {
+                    enrichedData: {
+                        count: enrichedData ? enrichedData.length : 0,
+                        stats: getFileStats('output/enriched_patents.json')
+                    },
+                    enrichedCsv: getFileStats('output/enriched_patents.csv'),
+                    enrichmentResults: getFileStats('output/enrichment_results.json')
+                };
+                
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: true,
+                    output: result.output,
+                    files: files,
+                    results: enrichmentResults,
+                    completedAt: new Date()
+                });
+            })
+            .catch((error) => {
+                console.error('Step 3 failed:', error);
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: false,
+                    error: error.error || error.message,
+                    stderr: error.stderr,
+                    stdout: error.stdout,
+                    completedAt: new Date()
+                });
+            });
+        
+        res.json({
+            success: true,
+            status: 'started',
+            processing: true,
+            message: `Step 3 started successfully${testMode ? ' (test mode)' : ''}. Use /api/step3/status to check progress.`
+        });
+        
+    } catch (error) {
+        console.error('Step 3 startup error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
         });
     }
 });
@@ -259,50 +807,69 @@ app.post('/api/step2', async (req, res) => {
 app.get('/api/status', (req, res) => {
     const status = {
         step0: {
-            integrationResults: getFileStats('output/integration_results.json'),
-            newPeople: getFileStats('output/new_people_for_enrichment.json'),
-            newPatents: getFileStats('output/filtered_new_patents.json')
+            downloadResults: getFileStats('output/download_results.json'),
+            downloadedPatents: getFileStats('output/downloaded_patents.json'),
+            running: runningProcesses.has('step0')
         },
         step1: {
-            rawPatents: getFileStats('output/raw_patents.json'),
-            rawPatentsCsv: getFileStats('output/raw_patents.csv'),
-            // Also check if Step 1 was skipped
-            extractionResults: getFileStats('output/extraction_results.json')
+            integrationResults: getFileStats('output/integration_results.json'),
+            newPeople: getFileStats('output/new_people_for_enrichment.json'),
+            newPatents: getFileStats('output/filtered_new_patents.json'),
+            running: runningProcesses.has('step1')
         },
         step2: {
+            rawPatents: getFileStats('output/raw_patents.json'),
+            rawPatentsCsv: getFileStats('output/raw_patents.csv'),
+            extractionResults: getFileStats('output/extraction_results.json'),
+            running: runningProcesses.has('step2')
+        },
+        step3: {
             enrichedData: getFileStats('output/enriched_patents.json'),
             enrichedCsv: getFileStats('output/enriched_patents.csv'),
-            enrichmentResults: getFileStats('output/enrichment_results.json')
+            enrichmentResults: getFileStats('output/enrichment_results.json'),
+            running: runningProcesses.has('step3')
         }
     };
     
     // Add file counts
+    const downloadedPatents = readJsonFile('output/downloaded_patents.json');
     const newPeople = readJsonFile('output/new_people_for_enrichment.json');
     const newPatents = readJsonFile('output/filtered_new_patents.json');
     const enrichedData = readJsonFile('output/enriched_patents.json');
     
-    // For Step 1, check if it was skipped
+    // For Step 2, check if it was skipped
     const extractionResults = readJsonFile('output/extraction_results.json');
     let rawPatentsCount = 0;
     if (extractionResults && extractionResults.skipped_api) {
-        // Step 1 was skipped, use Step 0 data count
-        rawPatentsCount = newPatents ? newPatents.length : 0;
+        rawPatentsCount = downloadedPatents ? downloadedPatents.length : 0;
     } else {
-        // Normal API extraction
         const rawPatents = readJsonFile('output/raw_patents.json');
         rawPatentsCount = rawPatents ? rawPatents.length : 0;
     }
     
     status.counts = {
+        downloadedPatents: downloadedPatents ? downloadedPatents.length : 0,
         newPeople: newPeople ? newPeople.length : 0,
         newPatents: newPatents ? newPatents.length : 0,
         rawPatents: rawPatentsCount,
         enrichedData: enrichedData ? enrichedData.length : 0
     };
     
-    // Add Step 1 status info
-    status.step1.skipped = extractionResults && extractionResults.skipped_api;
-    status.step1.source = extractionResults && extractionResults.skipped_api ? 'xml_data' : 'api_data';
+    // Add verification info
+    const integrationResults = readJsonFile('output/integration_results.json');
+    if (integrationResults) {
+        status.verification = {
+            completed: integrationResults.verification_completed || false,
+            needsReview: newPeople ? newPeople.filter(p => 
+                p.match_score >= 10 && p.match_score < 25 && 
+                p.match_status === 'needs_review'
+            ).length : 0
+        };
+    }
+    
+    // Add Step 2 status info
+    status.step2.skipped = extractionResults && extractionResults.skipped_api;
+    status.step2.source = extractionResults && extractionResults.skipped_api ? 'downloaded_data' : 'api_data';
     
     res.json(status);
 });
@@ -314,36 +881,36 @@ app.get('/api/sample/:step', (req, res) => {
     
     try {
         switch(step) {
-            case 'step0-people':
+            case 'step0':
+                sampleData = readJsonFile('output/downloaded_patents.json');
+                if (sampleData) sampleData = sampleData.slice(0, 3);
+                break;
+            case 'step1-people':
                 sampleData = readJsonFile('output/new_people_for_enrichment.json');
                 if (sampleData) sampleData = sampleData.slice(0, 5);
                 break;
-            case 'step0-patents':
+            case 'step1-patents':
                 sampleData = readJsonFile('output/filtered_new_patents.json');
                 if (sampleData) sampleData = sampleData.slice(0, 3);
                 break;
-            case 'step1':
-                // Check if Step 1 was skipped and used XML data instead
+            case 'step2':
                 const extractionResults = readJsonFile('output/extraction_results.json');
                 if (extractionResults && extractionResults.skipped_api) {
-                    // Use XML data from Step 0
-                    sampleData = readJsonFile('output/filtered_new_patents.json');
+                    sampleData = readJsonFile('output/downloaded_patents.json');
                     if (sampleData) {
                         sampleData = sampleData.slice(0, 3);
-                        // Add a note that this is from XML, not API
                         sampleData = {
-                            note: "Step 1 was skipped - showing XML data from Step 0 instead",
-                            source: "filtered_new_patents.json (from Step 0)",
+                            note: "Step 2 was skipped - showing downloaded data from Step 0 instead",
+                            source: "downloaded_patents.json (from Step 0)",
                             data: sampleData
                         };
                     }
                 } else {
-                    // Normal API data
                     sampleData = readJsonFile('output/raw_patents.json');
                     if (sampleData) sampleData = sampleData.slice(0, 3);
                 }
                 break;
-            case 'step2':
+            case 'step3':
                 sampleData = readJsonFile('output/enriched_patents.json');
                 if (sampleData) sampleData = sampleData.slice(0, 3);
                 break;
@@ -361,4 +928,21 @@ app.get('/api/sample/:step', (req, res) => {
 app.listen(PORT, () => {
     console.log(`Server running at http://localhost:${PORT}`);
     console.log('Make sure you have activated your Python environment (patent_env)');
+    console.log('');
+    console.log('🚀 Patent Processing Pipeline Server Started (RESTRUCTURED PIPELINE)');
+    console.log('📁 Available endpoints:');
+    console.log('   POST /api/step0 - Download patents from PatentsView API (NEW)');
+    console.log('   GET  /api/step0/status - Check Step 0 progress');
+    console.log('   POST /api/step1 - Integrate with existing data (was Step 0)');
+    console.log('   GET  /api/step1/status - Check Step 1 progress');
+    console.log('   GET  /api/verification-data - Get people needing verification');
+    console.log('   POST /api/finalize-verification - Save verification decisions');
+    console.log('   POST /api/step2 - Extract additional patents (was Step 1)');
+    console.log('   GET  /api/step2/status - Check Step 2 progress');
+    console.log('   POST /api/step3 - Data enrichment (was Step 2)');
+    console.log('   GET  /api/step3/status - Check Step 3 progress');
+    console.log('   GET  /api/status - Get current pipeline status');
+    console.log('   GET  /api/sample/:step - Get sample data');
+    console.log('');
+    console.log('🔧 RESTRUCTURED: All steps moved up +1, new Step 0 for patent download!');
 });

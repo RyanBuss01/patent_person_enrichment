@@ -1,6 +1,6 @@
 # =============================================================================
 # runners/extract_patents.py - Fixed for New PatentsView API
-# Step 1: Data Extraction from the US Patent Office
+# Step 2: Data Extraction from the US Patent Office
 # =============================================================================
 import requests
 import pandas as pd

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Step 1 Wrapper: Uses existing extract_patents.py runner
-Lightweight wrapper to run Step 1 for the frontend
+Step 1 Wrapper: Enhanced with progress reporting for frontend polling
+Provides real-time updates during long-running data integration process
 """
 import sys
 import os
 import json
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -14,91 +15,174 @@ from dotenv import load_dotenv
 # Add the parent directory to sys.path so we can import our modules
 sys.path.append(str(Path(__file__).parent.parent))
 
-from runners.extract_patents import run_patent_extraction
+from runners.integrate_existing_data import run_existing_data_integration
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging
+# Configure logging with more detailed output
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('output/step1_progress.log', mode='w')
+    ]
 )
 logger = logging.getLogger(__name__)
 
 def load_config():
     """Load configuration exactly like main.py does"""
     return {
-        'PATENTSVIEW_API_KEY': os.getenv('PATENTSVIEW_API_KEY', "YOUR_API_KEY"),  # Changed default
-        'EXTRACT_BY_DATE': os.getenv('EXTRACT_BY_DATE', 'true').lower() == 'true',
-        'DAYS_BACK': int(os.getenv('DAYS_BACK', '7')),
-        'CPC_CODES': ['H04', 'G06'],  # Technology areas (electronics, computing)
-        'MAX_RESULTS': int(os.getenv('MAX_RESULTS', '1000')),
+        'ACCESS_DB_PATH': os.getenv('ACCESS_DB_PATH', "patent_system/Database.mdb"),
+        'USPC_DOWNLOAD_PATH': os.getenv('USPC_DOWNLOAD_PATH', "USPC_Download"),
+        'CSV_DATABASE_FOLDER': "converted_databases/csv",
+        'USE_EXISTING_DATA': os.getenv('USE_EXISTING_DATA', 'true').lower() == 'true',
+        'ENRICH_ONLY_NEW_PEOPLE': os.getenv('ENRICH_ONLY_NEW_PEOPLE', 'true').lower() == 'true',
+        'MAX_ENRICHMENT_COST': int(os.getenv('MAX_ENRICHMENT_COST', '1000')),
         'OUTPUT_DIR': os.getenv('OUTPUT_DIR', 'output'),
     }
 
-def check_if_step1_needed():
-    """Check if Step 1 is needed by looking at Step 0 results"""
+def write_progress_update(stage, details=""):
+    """Write progress updates that the server can read"""
+    progress_info = {
+        'timestamp': datetime.now().isoformat(),
+        'stage': stage,
+        'details': details
+    }
+    
+    # Print for immediate server capture
+    print(f"PROGRESS: {stage} - {details}")
+    sys.stdout.flush()
+    
+    # Also write to a progress file for persistence
     try:
-        results_file = 'output/integration_results.json'
-        if os.path.exists(results_file):
-            with open(results_file, 'r') as f:
-                step0_results = json.load(f)
-            
-            if step0_results.get('success') and step0_results.get('new_patents_count', 0) > 0:
-                print("ℹ️  Step 0 found XML patent data - Step 1 extraction not needed")
-                print(f"   Found {step0_results.get('new_patents_count', 0)} new patents from XML files")
-                print("   Skipping API extraction and using XML data instead.")
-                
-                # Create a mock successful result since we don't need API data
-                return False, {
-                    'success': True,
-                    'total_patents': step0_results.get('new_patents_count', 0),
-                    'source': 'xml_files',
-                    'skipped_api': True,
-                    'message': 'Used XML data from Step 0 instead of API extraction'
-                }
+        with open('output/step1_progress.json', 'w') as f:
+            json.dump(progress_info, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Could not write progress file: {e}")
+
+def analyze_and_log_match_scores():
+    """Fixed version: Analyze match scores from BOTH output files"""
+    try:
+        write_progress_update("Analyzing match scores", "Computing match statistics from all processed people")
         
-        print("No Step 0 data found, proceeding with API extraction...")
-        return True, None
+        # Read BOTH files to get complete picture
+        enrichment_file = 'output/new_people_for_enrichment.json'
+        existing_file = 'output/existing_people_found.json'
+        
+        all_people = []
+        
+        # Load people who will be enriched (scores <25)
+        if os.path.exists(enrichment_file):
+            with open(enrichment_file, 'r') as f:
+                enrichment_people = json.load(f)
+                all_people.extend(enrichment_people)
+                print(f"   📊 Loaded {len(enrichment_people):,} people from enrichment file")
+        else:
+            print(f"   ❓ No enrichment file found")
+            enrichment_people = []
+        
+        # Load people who were flagged as existing (scores ≥25)  
+        if os.path.exists(existing_file):
+            with open(existing_file, 'r') as f:
+                existing_people = json.load(f)
+                all_people.extend(existing_people)
+                print(f"   📊 Loaded {len(existing_people):,} people from existing file")
+        else:
+            print(f"   ❓ No existing people file found")
+            existing_people = []
+        
+        if not all_people:
+            print("   ❓ No people files found for score analysis")
+            return
+        
+        print(f"   📊 Total people analyzed: {len(all_people):,}")
+        
+        # Count people in different score ranges
+        score_ranges = {
+            'no_score': 0,      # No matching attempted or score = 0
+            '1-9': 0,          # Very low confidence matches  
+            '10-19': 0,        # Low confidence - needs review
+            '20-24': 0,        # Medium confidence - needs review
+            '25-49': 0,        # High confidence matches - considered existing
+            '50-74': 0,        # Very high confidence matches - considered existing
+            '75-89': 0,        # Near certain matches - considered existing
+            '90-100': 0,       # Exact matches - considered existing
+        }
+        
+        needs_review_count = 0
+        existing_count = 0
+        
+        for person in all_people:
+            score = person.get('match_score', 0)
+            match_status = person.get('match_status', '')
+            
+            if score == 0 or score is None:
+                score_ranges['no_score'] += 1
+            elif 1 <= score <= 9:
+                score_ranges['1-9'] += 1
+            elif 10 <= score <= 19:
+                score_ranges['10-19'] += 1
+                if match_status == 'needs_review':
+                    needs_review_count += 1
+            elif 20 <= score <= 24:
+                score_ranges['20-24'] += 1
+                if match_status == 'needs_review':
+                    needs_review_count += 1
+            elif 25 <= score <= 49:
+                score_ranges['25-49'] += 1
+                existing_count += 1
+            elif 50 <= score <= 74:
+                score_ranges['50-74'] += 1
+                existing_count += 1
+            elif 75 <= score <= 89:
+                score_ranges['75-89'] += 1
+                existing_count += 1
+            elif 90 <= score <= 100:
+                score_ranges['90-100'] += 1
+                existing_count += 1
+        
+        print(f"\n🎯 COMPLETE MATCH SCORE BREAKDOWN:")
+        print(f"   ❓ No Score/Score 0: {score_ranges['no_score']:,}")
+        print(f"   📊 Score 1-9 (Very Low): {score_ranges['1-9']:,}")
+        print(f"   🔍 Score 10-19 (Needs Review): {score_ranges['10-19']:,}")
+        print(f"   🔍 Score 20-24 (Needs Review): {score_ranges['20-24']:,}")
+        print(f"   ✅ Score 25-49 (High Conf): {score_ranges['25-49']:,}")
+        print(f"   ✅ Score 50-74 (Very High): {score_ranges['50-74']:,}")
+        print(f"   ✅ Score 75-89 (Near Certain): {score_ranges['75-89']:,}")
+        print(f"   ✅ Score 90-100 (Exact): {score_ranges['90-100']:,}")
+        
+        print(f"\n📊 PROCESSING DECISIONS:")
+        print(f"   🆕 Will be enriched: {len(enrichment_people):,}")
+        print(f"   ✅ Flagged as existing: {existing_count:,}")
+        print(f"   🔍 Need manual review: {needs_review_count:,}")
+        
+        if needs_review_count > 0:
+            print(f"\n⚠️  MANUAL REVIEW NEEDED:")
+            print(f"   🔍 {needs_review_count:,} potential matches need verification")
+            print(f"   💡 Look for 'Review Potential Matches' button in Step 1")
+            write_progress_update("Match analysis complete", f"{needs_review_count} matches need manual review")
+        else:
+            print(f"\n✅ NO MANUAL REVIEW NEEDED")
+            print(f"   🎯 All matches have clear confidence scores")
+            write_progress_update("Match analysis complete", "No manual review needed")
+        
+        # Verify our numbers add up
+        total_analyzed = sum(score_ranges.values())
+        print(f"\n🔢 VERIFICATION:")
+        print(f"   Total analyzed: {total_analyzed:,}")
+        print(f"   Should equal: {len(all_people):,}")
+        print(f"   ✅ Match: {total_analyzed == len(all_people)}")
         
     except Exception as e:
-        logger.warning(f"Could not check Step 0 results: {e}")
-        print("Could not check Step 0 results, proceeding with API extraction...")
-        return True, None
-
+        print(f"   ❌ Error analyzing match scores: {e}")
+        write_progress_update("Match analysis error", f"Error: {e}")
+        
 def main():
-    """Run Step 1 using existing runner"""
-    print("🚀 STARTING STEP 1: EXTRACT PATENTS FROM USPTO API")
+    """Run Step 1 using existing runner with enhanced progress reporting"""
+    print("🚀 STARTING STEP 1: INTEGRATE EXISTING DATA")
     print("=" * 60)
-    
-    # Check if this step is needed
-    should_run, mock_result = check_if_step1_needed()
-    
-    if not should_run:
-        # Save the mock result and return success
-        config = load_config()
-        os.makedirs(config['OUTPUT_DIR'], exist_ok=True)
-        
-        results_file = os.path.join(config['OUTPUT_DIR'], 'extraction_results.json')
-        with open(results_file, 'w') as f:
-            json.dump(mock_result, f, indent=2, default=str)
-        
-        print("\n✅ STEP 1 COMPLETED (SKIPPED - USING XML DATA)!")
-        print("=" * 60)
-        print(f"📊 DATA SOURCE SUMMARY:")
-        print(f"   📋 Patents available from XML: {mock_result.get('total_patents', 0):,}")
-        print(f"   📄 Source: XML files from Step 0")
-        print(f"   🚫 API extraction skipped (not needed)")
-        
-        print(f"\n📁 DATA LOCATION:")
-        print(f"   📋 Patent data: output/filtered_new_patents.json (from Step 0)")
-        print(f"   👥 People data: output/new_people_for_enrichment.json (from Step 0)")
-        
-        print(f"\n🔄 NEXT STEP:")
-        print(f"   Run Step 2 (Data Enrichment) to add contact information")
-        
-        return 0
     
     # Load configuration (same as main.py)
     config = load_config()
@@ -106,79 +190,91 @@ def main():
     # Create output directory
     os.makedirs(config['OUTPUT_DIR'], exist_ok=True)
     
+    # Initialize progress tracking
+    start_time = time.time()
+    write_progress_update("Initializing", "Loading configuration and preparing directories")
+    
     try:
-        # Run the extraction using existing runner
-        logger.info("Starting patent extraction from USPTO API...")
-        print(f"📡 Extracting patents from last {config['DAYS_BACK']} days")
-        print(f"📊 Maximum results: {config['MAX_RESULTS']:,}")
+        # Stage 1: Setup and initialization
+        logger.info("Starting existing data integration...")
+        write_progress_update("Starting integration", "Initializing data processing pipeline")
+        print("⏳ Processing patents... this may take several minutes for large datasets")
         
-        result = run_patent_extraction(config)
+        # Stage 2: Run the integration with progress monitoring
+        logger.info("Integration process starting...")
+        write_progress_update("Processing XML files", "Reading and parsing patent XML data")
+        
+        # This is where the long-running process happens
+        result = run_existing_data_integration(config)
+        
+        # Stage 3: Check results
+        if not result or not result.get('success'):
+            error_msg = result.get('error') if result else 'No result returned'
+            logger.error(f"Integration did not complete successfully: {error_msg}")
+            write_progress_update("Integration failed", error_msg)
+            print(f"\n❌ STEP 1 FAILED: {error_msg}")
+            return 1
+        
+        # Stage 4: Save results
+        write_progress_update("Saving results", "Writing integration results to output files")
+        logger.info("Integration completed, saving results...")
         
         # Save results to JSON file for frontend
-        results_file = os.path.join(config['OUTPUT_DIR'], 'extraction_results.json')
+        results_file = os.path.join(config['OUTPUT_DIR'], 'integration_results.json')
         with open(results_file, 'w') as f:
             json.dump(result, f, indent=2, default=str)
         
+        # Stage 5: Generate summary and analysis
+        write_progress_update("Generating summary", "Analyzing results and computing statistics")
+        logger.info("Results saved, generating summary...")
+        
         # Print summary exactly like main.py
-        if result.get('success'):
-            print("\n✅ STEP 1 COMPLETED SUCCESSFULLY!")
-            print("=" * 60)
-            print(f"📊 EXTRACTION SUMMARY:")
-            print(f"   📋 Total patents extracted: {result.get('total_patents', 0):,}")
-            
-            api_info = result.get('api_info', {})
-            if api_info:
-                print(f"   📡 API: {api_info.get('api_version', 'Unknown')}")
-                print(f"   📅 Date range: {api_info.get('date_range', 'Unknown')}")
-            
-            print(f"\n📁 OUTPUT FILES:")
-            for output_file in result.get('output_files', []):
-                if os.path.exists(output_file):
-                    file_size = os.path.getsize(output_file) / 1024  # KB
-                    print(f"   📄 {output_file} ({file_size:.1f} KB)")
-            
-            print(f"\n🔄 NEXT STEP:")
-            print(f"   Run Step 2 (Data Enrichment) to add contact information")
-            
-        else:
-            print(f"\n❌ STEP 1 FAILED: {result.get('error')}")
-            
-            # Show helpful troubleshooting info
-            if 'troubleshooting' in result:
-                print(f"\n🔧 TROUBLESHOOTING:")
-                for key, value in result['troubleshooting'].items():
-                    print(f"   • {key.replace('_', ' ').title()}: {value}")
-            
-            if 'help' in result:
-                print(f"\n💡 HELP: {result['help']}")
-            
-            # Suggest using XML data instead
-            step0_count = check_step0_patent_count()
-            if step0_count > 0:
-                print(f"\n💡 ALTERNATIVE:")
-                print(f"   Since Step 0 found {step0_count:,} patents from XML,")
-                print(f"   you can skip Step 1 and proceed directly to Step 2 (Enrichment)")
-            
-            return 1
+        elapsed_time = time.time() - start_time
+        print("\n✅ STEP 1 COMPLETED SUCCESSFULLY!")
+        print("=" * 60)
+        print(f"📊 INTEGRATION SUMMARY:")
+        print(f"   🗃️  Existing patents in DB: {result.get('existing_patents_count', 0):,}")
+        print(f"   👥 Existing people in DB: {result.get('existing_people_count', 0):,}")
+        print(f"   🆕 New patents found: {result.get('new_patents_count', 0):,}")
+        print(f"   🆕 New people found: {result.get('new_people_count', 0):,}")
+        print(f"   🔁 Duplicate patents avoided: {result.get('duplicate_patents_count', 0):,}")
+        print(f"   🔁 Duplicate people avoided: {result.get('duplicate_people_count', 0):,}")
+        print(f"   ⏱️  Total processing time: {elapsed_time/60:.1f} minutes")
+        
+        # Stage 6: Match score analysis
+        analyze_and_log_match_scores()
+        
+        # Stage 7: Cost analysis
+        write_progress_update("Computing cost savings", "Calculating API cost savings from duplicate detection")
+        total_xml_people = result.get('total_xml_people', 0)
+        new_people = result.get('new_people_count', 0)
+        if total_xml_people > 0:
+            saved_api_calls = total_xml_people - new_people
+            estimated_savings = saved_api_calls * 0.03
+            print(f"\n💰 COST SAVINGS:")
+            print(f"   📉 API calls avoided: {saved_api_calls:,}")
+            print(f"   💵 Estimated cost saved: ${estimated_savings:.2f}")
+            print(f"   💸 Cost for new people: ${new_people * 0.03:.2f}")
+        
+        print(f"\n📁 OUTPUT FILES:")
+        if result.get('new_patents_count', 0) > 0:
+            print(f"   📋 New patents: output/filtered_new_patents.json")
+            print(f"   👥 New people: output/new_people_for_enrichment.json")
+        print(f"   📊 Integration results: output/integration_results.json")
+        
+        # Final completion message
+        write_progress_update("Complete", f"Successfully processed {result.get('new_patents_count', 0)} new patents and {result.get('new_people_count', 0)} new people in {elapsed_time/60:.1f} minutes")
+        print(f"\n🎉 STEP 1 PROCESSING COMPLETE!")
+        logger.info("Step 1 wrapper completed successfully")
         
     except Exception as e:
-        logger.error(f"Step 1 failed with error: {e}")
+        error_msg = f"Step 1 failed with error: {e}"
+        logger.error(error_msg)
+        write_progress_update("Error", error_msg)
         print(f"\n❌ STEP 1 FAILED: {e}")
-        print(f"\n💡 SUGGESTION:")
-        print(f"   Since Step 0 found XML data, you can skip Step 1")
-        print(f"   and proceed directly to Step 2 (Enrichment)")
         return 1
     
     return 0
-
-def check_step0_patent_count():
-    """Helper to get patent count from Step 0"""
-    try:
-        with open('output/integration_results.json', 'r') as f:
-            step0_results = json.load(f)
-        return step0_results.get('new_patents_count', 0)
-    except:
-        return 0
 
 if __name__ == "__main__":
     exit_code = main()
