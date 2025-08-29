@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 # Add the parent directory to sys.path so we can import our modules
 sys.path.append(str(Path(__file__).parent.parent))
 
-from runners.enrich import run_enrichment
+from runners.enrich import run_sql_data_enrichment as run_enrichment
 
 # Load environment variables
 load_dotenv()
@@ -286,6 +286,16 @@ def main():
     
     return 0
 
+def _safe_join_list(data):
+    """Safely join list data, handling various data types"""
+    if not data:
+        return ''
+    if isinstance(data, list):
+        return ', '.join([item.get('address', str(item)) if isinstance(item, dict) and 'address' in item
+                         else item.get('number', str(item)) if isinstance(item, dict) and 'number' in item  
+                         else str(item) for item in data])
+    return str(data)
+
 def _export_combined_to_csv(enriched_data, filename):
     """Export combined enriched data to CSV (copied from enrich.py)"""
     import pandas as pd
@@ -318,8 +328,8 @@ def _export_combined_to_csv(enriched_data, filename):
             'enriched_full_name': pdl_data.get('full_name'),
             'enriched_first_name': pdl_data.get('first_name'),
             'enriched_last_name': pdl_data.get('last_name'),
-            'enriched_emails': ', '.join(pdl_data.get('emails', [])),
-            'enriched_phone_numbers': ', '.join(pdl_data.get('phone_numbers', [])),
+            'enriched_emails': _safe_join_list(pdl_data.get('emails')),
+            'enriched_phone_numbers': _safe_join_list(pdl_data.get('phone_numbers')),
             'enriched_linkedin_url': pdl_data.get('linkedin_url'),
             'enriched_current_title': pdl_data.get('job_title'),
             'enriched_current_company': pdl_data.get('job_company_name'),

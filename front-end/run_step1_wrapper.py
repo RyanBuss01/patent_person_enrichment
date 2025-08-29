@@ -178,7 +178,20 @@ def analyze_and_log_match_scores():
     except Exception as e:
         print(f"   ❌ Error analyzing match scores: {e}")
         write_progress_update("Match analysis error", f"Error: {e}")
-        
+
+def print_filtering_summary(result):
+    """Print US patent filtering summary"""
+    us_filter = result.get('us_filter_result', {})
+    if not us_filter:
+        return
+    
+    print(f"📊 FILTERING SUMMARY:")
+    print(f"   📋 Total XML patents processed: {result.get('original_patents_count', 0):,}")
+    print(f"   🇺🇸 US patents kept: {result.get('us_patents_count', 0):,}")
+    print(f"   🌍 Foreign patents filtered out: {result.get('foreign_patents_count', 0):,}")
+    print(f"   📈 US retention rate: {us_filter.get('us_retention_rate', 'N/A')}")
+    print()
+
 def main():
     """Run Step 1 using existing runner with enhanced progress reporting"""
     print("🚀 STARTING STEP 1: INTEGRATE EXISTING DATA")
@@ -232,6 +245,10 @@ def main():
         elapsed_time = time.time() - start_time
         print("\n✅ STEP 1 COMPLETED SUCCESSFULLY!")
         print("=" * 60)
+        
+        # NEW: Print filtering summary first
+        print_filtering_summary(result)
+        
         print(f"📊 INTEGRATION SUMMARY:")
         print(f"   🗃️  Existing patents in DB: {result.get('existing_patents_count', 0):,}")
         print(f"   👥 Existing people in DB: {result.get('existing_people_count', 0):,}")

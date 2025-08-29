@@ -30,7 +30,16 @@ function runPythonScriptAsync(scriptPath, args = [], stepId) {
         const env = {
             ...process.env,
             PYTHONPATH: path.join(__dirname, '..'),
-            // Pass API keys from frontend .env to Python
+            
+            // Database credentials - pass from Node.js to Python
+            DB_HOST: process.env.DB_HOST || 'localhost',
+            DB_PORT: process.env.DB_PORT || '3306',
+            DB_NAME: process.env.DB_NAME || 'patent_data',
+            DB_USER: process.env.DB_USER || 'root',
+            DB_PASSWORD: process.env.DB_PASSWORD || 'password',
+            DB_ENGINE: process.env.DB_ENGINE || 'mysql',
+            
+            // API keys
             PEOPLEDATALABS_API_KEY: process.env.PEOPLEDATALABS_API_KEY || 'YOUR_PDL_API_KEY',
             PATENTSVIEW_API_KEY: process.env.PATENTSVIEW_API_KEY || 'oq371zFI.BjeAbayJsdHdvEgbei0vskz5bTK3KM1S',
             MAX_ENRICHMENT_COST: process.env.MAX_ENRICHMENT_COST || '1000',
@@ -38,10 +47,15 @@ function runPythonScriptAsync(scriptPath, args = [], stepId) {
             MAX_RESULTS: process.env.MAX_RESULTS || '1000'
         };
         
-        const python = spawn('python', [scriptPath, ...args], {
-            cwd: path.join(__dirname, '..'), // Run from Patent_Grants directory
+        const pythonPath = path.join(__dirname, '..', 'patent_env', 'bin', 'python3');
+        
+        console.log(`Running: ${pythonPath} ${scriptPath} ${args.join(' ')}`);
+        
+        const python = spawn(pythonPath, [scriptPath, ...args], {
+            cwd: path.join(__dirname, '..'),
             env: env
         });
+
         
         let stdout = '';
         let stderr = '';
