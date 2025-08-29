@@ -1,7 +1,7 @@
 # =============================================================================
-# runners/download_patents.py
+# runners/download_patents.py - FIXED VERSION
 # Step 0 Runner: Download patents from PatentsView API
-# Core business logic for patent downloading with smart and manual modes
+# Fixed to use correct API and handle current data limitations
 # =============================================================================
 import requests
 import time
@@ -15,11 +15,12 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 class PatentsViewAPIClient:
-    """Enhanced API client for PatentsView with rate limiting and error handling"""
+    """Fixed API client for PatentsView with current API endpoint and data limitations"""
     
     def __init__(self, api_key: str):
         self.api_key = api_key
-        self.base_url = "https://search.patentsview.org/api/v1/patent/"
+        # FIXED: Use the correct PatentSearch API endpoint
+        self.base_url = "https://search.patentsview.org/api/v1/patent"
         self.headers = {
             "X-Api-Key": api_key,
             "Accept": "application/json",
@@ -28,6 +29,8 @@ class PatentsViewAPIClient:
         self.rate_limit = 45  # requests per minute
         self.last_request_time = 0
         self.request_count = 0
+        # FIXED: Data limitation - PatentsView only has data through 2024-12-31
+        self.max_date = datetime(2024, 12, 31).date()
         
     def _respect_rate_limit(self):
         """Ensure we don't exceed API rate limits (45 requests/minute)"""
@@ -43,41 +46,76 @@ class PatentsViewAPIClient:
         self.last_request_time = time.time()
         self.request_count += 1
     
-    def fetch_patents(self, query: Dict, fields: List[str], max_results: int = 1000) -> List[Dict]:
-        """Fetch patents with pagination and rate limiting"""
-        all_patents = []
-        page = 1
-        per_page = min(100, max_results)  # API supports up to 1000, but 100 gives better progress tracking
+    def _validate_date_range(self, start_date: str, end_date: str) -> tuple:
+        """Validate and adjust dates to be within available data range"""
+        try:
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d').date()
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d').date()
+        except ValueError as e:
+            raise ValueError(f"Invalid date format. Use YYYY-MM-DD: {e}")
         
-        logger.info(f"Starting patent fetch - query: {query}, max_results: {max_results}")
+        # FIXED: Adjust dates to be within available data range
+        original_start = start_dt
+        original_end = end_dt
+        
+        if start_dt > self.max_date:
+            logger.warning(f"Start date {start_date} is beyond available data. Using {self.max_date}")
+            start_dt = self.max_date
+            
+        if end_dt > self.max_date:
+            logger.warning(f"End date {end_date} is beyond available data. Using {self.max_date}")
+            end_dt = self.max_date
+        
+        # If both dates are in the future, use recent data instead
+        if original_start > self.max_date and original_end > self.max_date:
+            logger.info("Both dates are in the future. Using recent data from past 30 days instead.")
+            end_dt = self.max_date
+            start_dt = self.max_date - timedelta(days=30)
+        
+        return start_dt.strftime('%Y-%m-%d'), end_dt.strftime('%Y-%m-%d')
+    
+    def fetch_patents(self, query: Dict, fields: List[str], max_results: int = 1000) -> List[Dict]:
+        """Fetch patents with pagination and rate limiting using GET method like the working example"""
+        all_patents = []
+        per_page = 100  # Use per_page like the working example
+        page = 1
+        
+        logger.info(f"Starting patent fetch with PatentSearch API (GET method) - query: {query}, max_results: {max_results}")
         
         while len(all_patents) < max_results:
             self._respect_rate_limit()
             
             logger.info(f"Fetching page {page}, current total: {len(all_patents)}")
             
-            # Prepare request payload
-            request_payload = {
-                "q": query,
-                "f": fields,
-                "o": {
-                    "size": per_page,
-                    "offset": (page - 1) * per_page
-                },
-                "s": [{"patent_date": "desc"}]  # Most recent first
+            # FIXED: Use GET method with URL parameters like the working example
+            params = {
+                "q": json.dumps(query),
+                "f": json.dumps(fields),
+                "per_page": per_page,
+                "page": page
             }
             
             try:
-                response = requests.post(
+                response = requests.get(
                     self.base_url,
                     headers=self.headers,
-                    json=request_payload,
+                    params=params,
                     timeout=30
                 )
                 
+                logger.debug(f"API Response Status: {response.status_code}")
+                
                 if response.status_code == 200:
                     data = response.json()
-                    patents = data.get("patents", [])
+                    
+                    # Check for API errors in response
+                    if data.get("error"):
+                        error_msg = data.get("message", "Unknown API error")
+                        logger.error(f"API returned error: {error_msg}")
+                        break
+                    
+                    # FIXED: Handle both possible response formats
+                    patents = data.get("data", {}).get("patents", []) or data.get("patents", [])
                     
                     if not patents:
                         logger.info("No more patents available from API")
@@ -87,14 +125,27 @@ class PatentsViewAPIClient:
                     logger.info(f"Retrieved {len(patents)} patents from page {page}")
                     
                     # Check if we have all available patents
-                    total_available = data.get("total_hits", 0)
-                    logger.info(f"Total available patents: {total_available}")
-                    
-                    if len(all_patents) >= total_available:
-                        logger.info(f"Retrieved all {total_available} available patents")
-                        break
+                    total_available = data.get("total_hits", 0) or data.get("data", {}).get("total_hits", 0)
+                    if total_available > 0:
+                        logger.info(f"Total available patents: {total_available}")
+                        
+                        if len(all_patents) >= total_available:
+                            logger.info(f"Retrieved all {total_available} available patents")
+                            break
                     
                     page += 1
+                    
+                elif response.status_code == 400:
+                    # FIXED: Better error handling for 400 errors
+                    try:
+                        error_data = response.json()
+                        error_msg = error_data.get("message", response.text)
+                    except:
+                        error_msg = response.text
+                    
+                    logger.error(f"API request failed (400 Bad Request): {error_msg}")
+                    logger.error(f"Query that failed: {params}")
+                    break
                     
                 elif response.status_code == 429:
                     logger.warning("Rate limit exceeded, waiting 60 seconds...")
@@ -114,10 +165,11 @@ class PatentsViewAPIClient:
         return final_patents
 
 class PatentDownloader:
-    """Main patent download orchestrator"""
+    """Main patent download orchestrator with fixes for current API"""
     
     def __init__(self, api_key: str):
         self.api_client = PatentsViewAPIClient(api_key)
+        # FIXED: Use correct nested field names like the working example
         self.standard_fields = [
             "patent_id",
             "patent_title", 
@@ -139,25 +191,28 @@ class PatentDownloader:
     
     def download_smart_mode(self, days_back: int = 7, max_results: int = 1000) -> List[Dict]:
         """
-        Smart mode: Intelligently searches for patents going back day by day
-        Handles the fact that patents aren't issued every day
+        FIXED Smart mode: Searches for patents going back from the latest available data
+        Handles the fact that PatentsView data only goes through 2024-12-31
         """
         logger.info(f"Starting smart mode download - {days_back} days back, max {max_results} results")
         
-        all_patents = []
-        current_date = datetime.now().date()
+        # FIXED: Start from the latest available data date, not current date
+        max_date = self.api_client.max_date
+        logger.info(f"Using latest available data date: {max_date}")
         
-        # Strategy 1: Try recent days one by one
+        all_patents = []
+        
+        # Strategy 1: Try recent days one by one from the latest available data
         for day_offset in range(days_back):
             if len(all_patents) >= max_results:
                 break
                 
-            target_date = current_date - timedelta(days=day_offset)
+            target_date = max_date - timedelta(days=day_offset)
             date_str = target_date.strftime('%Y-%m-%d')
             
             logger.info(f"Checking for patents on {date_str}")
             
-            # Query for patents on this specific date
+            # FIXED: Use correct query format for PatentSearch API
             query = {
                 "_and": [
                     {"_gte": {"patent_date": date_str}},
@@ -180,11 +235,11 @@ class PatentDownloader:
                     break
         
         # Strategy 2: If we didn't find enough patents, try a broader range
-        if len(all_patents) < min(max_results, 100):  # If we found very few patents
+        if len(all_patents) < min(max_results // 4, 100):  # If we found very few patents
             logger.info("Insufficient patents found in recent days, trying broader range")
             
-            end_date = current_date
-            start_date = current_date - timedelta(days=days_back * 2)  # Double the range
+            end_date = max_date
+            start_date = max_date - timedelta(days=days_back * 4)  # Broader range
             
             broader_query = {
                 "_and": [
@@ -199,24 +254,43 @@ class PatentDownloader:
                 max_results
             )
             
-            # Use broader results if they're better
-            if len(broader_patents) > len(all_patents):
-                logger.info(f"Broader search yielded more results: {len(broader_patents)} vs {len(all_patents)}")
-                all_patents = broader_patents
+            # FIXED: Also try a simple query without date restrictions to test the API
+        if len(all_patents) < min(max_results // 10, 50):  # If we found very few patents
+            logger.info("Still insufficient patents found, trying simple test query...")
+            
+            # Try a simple query for recent patents without specific date ranges
+            test_query = {"_gte": {"patent_date": "2024-01-01"}}  # Just get patents from 2024
+            
+            test_patents = self.api_client.fetch_patents(
+                test_query,
+                self.standard_fields,
+                max_results
+            )
+            
+            # Use test results if they're better
+            if len(test_patents) > len(all_patents):
+                logger.info(f"Simple test query yielded more results: {len(test_patents)} vs {len(all_patents)}")
+                all_patents = test_patents
         
         logger.info(f"Smart mode complete: {len(all_patents)} patents downloaded")
         return all_patents
     
     def download_manual_mode(self, start_date: str, end_date: str, max_results: int = 1000) -> List[Dict]:
         """
-        Manual mode: Downloads patents from specific date range
+        FIXED Manual mode: Downloads patents from specific date range with validation
         """
         logger.info(f"Starting manual mode download - {start_date} to {end_date}, max {max_results} results")
         
+        # FIXED: Validate and adjust date range
+        validated_start, validated_end = self.api_client._validate_date_range(start_date, end_date)
+        
+        if validated_start != start_date or validated_end != end_date:
+            logger.info(f"Adjusted date range from {start_date}-{end_date} to {validated_start}-{validated_end}")
+        
         query = {
             "_and": [
-                {"_gte": {"patent_date": start_date}},
-                {"_lte": {"patent_date": end_date}}
+                {"_gte": {"patent_date": validated_start}},
+                {"_lte": {"patent_date": validated_end}}
             ]
         }
         
@@ -226,19 +300,20 @@ class PatentDownloader:
         return patents
     
     def process_raw_patents(self, raw_patents: List[Dict]) -> List[Dict]:
-        """Process raw API response into standardized format"""
+        """Process raw API response into standardized format - handles nested inventor/assignee data"""
         logger.info(f"Processing {len(raw_patents)} raw patents into standard format")
         
         processed_patents = []
         
         for patent in raw_patents:
+            # FIXED: Handle None values in patent fields too
             processed_patent = {
-                'patent_number': patent.get('patent_id', ''),
-                'patent_title': patent.get('patent_title', ''),
-                'patent_date': patent.get('patent_date', ''),
-                'patent_abstract': patent.get('patent_abstract', ''),
-                'inventors': self._process_inventors(patent.get('inventors', [])),
-                'assignees': self._process_assignees(patent.get('assignees', []))
+                'patent_number': self._safe_strip(patent.get('patent_id')),
+                'patent_title': self._safe_strip(patent.get('patent_title')),
+                'patent_date': self._safe_strip(patent.get('patent_date')),
+                'patent_abstract': self._safe_strip(patent.get('patent_abstract')),
+                'inventors': self._process_inventors_nested(patent.get('inventors', [])),
+                'assignees': self._process_assignees_nested(patent.get('assignees', []))
             }
             
             processed_patents.append(processed_patent)
@@ -246,17 +321,18 @@ class PatentDownloader:
         logger.info(f"Processing complete: {len(processed_patents)} patents standardized")
         return processed_patents
     
-    def _process_inventors(self, raw_inventors: List[Dict]) -> List[Dict]:
-        """Process inventor data into standard format"""
+    def _process_inventors_nested(self, raw_inventors: List[Dict]) -> List[Dict]:
+        """Process nested inventor data from the API response - handles None values"""
         processed_inventors = []
         
         for inventor in raw_inventors:
+            # FIXED: Handle None values properly with safe_strip function
             processed_inventor = {
-                'first_name': inventor.get('inventor_name_first', '').strip(),
-                'last_name': inventor.get('inventor_name_last', '').strip(),
-                'city': inventor.get('inventor_city', '').strip(),
-                'state': inventor.get('inventor_state', '').strip(),
-                'country': inventor.get('inventor_country', '').strip()
+                'first_name': self._safe_strip(inventor.get('inventor_name_first')),
+                'last_name': self._safe_strip(inventor.get('inventor_name_last')),
+                'city': self._safe_strip(inventor.get('inventor_city')),
+                'state': self._safe_strip(inventor.get('inventor_state')),
+                'country': self._safe_strip(inventor.get('inventor_country'))
             }
             
             # Only add if we have at least a name
@@ -265,20 +341,26 @@ class PatentDownloader:
         
         return processed_inventors
     
-    def _process_assignees(self, raw_assignees: List[Dict]) -> List[Dict]:
-        """Process assignee data into standard format"""
+    def _safe_strip(self, value):
+        """Safely strip a value that might be None"""
+        if value is None:
+            return ''
+        return str(value).strip()
+    
+    def _process_assignees_nested(self, raw_assignees: List[Dict]) -> List[Dict]:
+        """Process nested assignee data from the API response - handles None values"""
         processed_assignees = []
         
         for assignee in raw_assignees:
-            assignee_type = assignee.get('assignee_type', '').lower()
+            assignee_type = self._safe_strip(assignee.get('assignee_type')).lower()
             
-            if 'company' in assignee_type or 'organization' in assignee_type:
-                # Company/Organization assignee
+            if 'company' in assignee_type or 'organization' in assignee_type or assignee.get('assignee_organization'):
+                # Organization assignee
                 processed_assignee = {
-                    'organization': assignee.get('assignee_organization', '').strip(),
-                    'city': assignee.get('assignee_city', '').strip(),
-                    'state': assignee.get('assignee_state', '').strip(),
-                    'country': assignee.get('assignee_country', '').strip(),
+                    'organization': self._safe_strip(assignee.get('assignee_organization')),
+                    'city': self._safe_strip(assignee.get('assignee_city')),
+                    'state': self._safe_strip(assignee.get('assignee_state')),
+                    'country': self._safe_strip(assignee.get('assignee_country')),
                     'type': 'organization'
                 }
                 
@@ -289,11 +371,11 @@ class PatentDownloader:
             else:
                 # Individual assignee
                 processed_assignee = {
-                    'first_name': assignee.get('assignee_individual_name_first', '').strip(),
-                    'last_name': assignee.get('assignee_individual_name_last', '').strip(),
-                    'city': assignee.get('assignee_city', '').strip(),
-                    'state': assignee.get('assignee_state', '').strip(),
-                    'country': assignee.get('assignee_country', '').strip(),
+                    'first_name': self._safe_strip(assignee.get('assignee_individual_name_first')),
+                    'last_name': self._safe_strip(assignee.get('assignee_individual_name_last')),
+                    'city': self._safe_strip(assignee.get('assignee_city')),
+                    'state': self._safe_strip(assignee.get('assignee_state')),
+                    'country': self._safe_strip(assignee.get('assignee_country')),
                     'type': 'individual'
                 }
                 
@@ -305,7 +387,7 @@ class PatentDownloader:
 
 def run_patent_download(config: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Main runner function for patent download
+    FIXED Main runner function for patent download
     
     Args:
         config: Configuration dictionary with download parameters
@@ -334,12 +416,15 @@ def run_patent_download(config: Dict[str, Any]) -> Dict[str, Any]:
         # Initialize downloader
         downloader = PatentDownloader(api_key)
         
+        # FIXED: Show data limitation warning
+        logger.warning(f"Note: PatentsView data is currently available through {downloader.api_client.max_date}")
+        
         # Download patents based on mode
         start_time = time.time()
         
         if mode == 'smart':
             days_back = config.get('days_back', 7)
-            logger.info(f"Using smart mode: {days_back} days back")
+            logger.info(f"Using smart mode: {days_back} days back from latest data")
             raw_patents = downloader.download_smart_mode(days_back, max_results)
             
         elif mode == 'manual':
@@ -370,9 +455,10 @@ def run_patent_download(config: Dict[str, Any]) -> Dict[str, Any]:
             return {
                 'success': True,
                 'patents_downloaded': 0,
-                'message': 'No patents found for the specified criteria',
+                'message': f'No patents found for the specified criteria. Note: Data only available through {downloader.api_client.max_date}',
                 'download_time_minutes': download_time / 60,
-                'mode': mode
+                'mode': mode,
+                'data_limitation': f'PatentsView data only available through {downloader.api_client.max_date}'
             }
         
         # Process patents into standard format
@@ -447,6 +533,7 @@ def run_patent_download(config: Dict[str, Any]) -> Dict[str, Any]:
             },
             'download_time_minutes': download_time / 60,
             'api_requests_made': downloader.api_client.request_count,
+            'data_limitation': f'PatentsView data available through {downloader.api_client.max_date}',
             'output_files': {
                 'json': str(patents_json_file),
                 'csv': str(patents_csv_file) if 'patents_csv_file' in locals() else None

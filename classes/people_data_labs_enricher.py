@@ -1,5 +1,5 @@
 # =============================================================================
-# classes/peopledatalabs_enricher.py - ENHANCED FOR ACCESS DB INTEGRATION
+# classes/people_data_labs_enricher.py - ENHANCED FOR ACCESS DB INTEGRATION
 # =============================================================================
 import time
 import logging
@@ -54,11 +54,11 @@ class PeopleDataLabsEnricher:
         for person in people_list:
             try:
                 # Extract person data
-                first_name = person.get('first_name', '')
-                last_name = person.get('last_name', '')
-                city = person.get('city', '')
-                state = person.get('state', '')
-                country = person.get('country', '')
+                first_name = (person.get('first_name') or '').strip().lower()
+                last_name = (person.get('last_name') or '').strip().lower()
+                city = (person.get('city') or '').strip().lower()
+                state = (person.get('state') or '').strip().lower()
+                country = (person.get('country') or '').strip().lower()
                 
                 # Prepare PeopleDataLabs parameters
                 params = {}

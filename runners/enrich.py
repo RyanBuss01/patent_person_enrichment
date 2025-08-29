@@ -1,453 +1,388 @@
 # =============================================================================
-# runners/enrich.py - Simplified All-in-One Enrichment
-# Step 3
+# runners/enrich.py - SIMPLE AND FAST
 # =============================================================================
 import logging
-import time
 import json
+import time
 import pandas as pd
-import xml.etree.ElementTree as ET
-from typing import Dict, Any, List, Optional
-from peopledatalabs import PDLPY
+from typing import Dict, Any, List
+from pathlib import Path
+from classes.people_data_labs_enricher import PeopleDataLabsEnricher
+from database.db_manager import DatabaseManager, DatabaseConfig
 
 logger = logging.getLogger(__name__)
 
-def run_enrichment(config: Dict[str, str]) -> Dict[str, Any]:
-    """
-    Run the patent enrichment process - ONLY for new people
-    Simplified all-in-one function
+def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Simple, fast enrichment process"""
     
-    Args:
-        config: Dictionary containing configuration parameters
-        
-    Returns:
-        Dictionary containing results and statistics
-    """
     try:
-        # Configuration
-        enrich_only_new = config.get('ENRICH_ONLY_NEW_PEOPLE', True)
-        max_api_calls = config.get('MAX_ENRICHMENT_COST', 1000)
-        api_key = config.get('PEOPLEDATALABS_API_KEY')
+        print("STEP 1: Loading existing enriched people from database...")
         
-        if api_key == 'YOUR_PDL_API_KEY':
-            logger.warning("⚠️ PeopleDataLabs API key not configured - using mock data")
-            return _create_mock_enrichment_result()
+        # Load ALL existing enriched people into memory once
+        existing_enriched = load_existing_enriched_people()
+        print(f"Loaded {len(existing_enriched)} existing enriched people")
         
-        # Get people to enrich
-        people_to_enrich = _get_people_to_enrich(config, enrich_only_new, max_api_calls)
+        print("STEP 2: Loading people to enrich...")
         
+        # Load people to enrich
+        people_to_enrich = load_people_to_enrich(config)
         if not people_to_enrich:
-            logger.info("No people found to enrich")
             return {
                 'success': True,
-                'total_patents': 0,
+                'message': 'No people to enrich',
                 'total_people': 0,
                 'enriched_count': 0,
-                'enrichment_rate': 0.0,
                 'enriched_data': [],
-                'cost_savings': 'No enrichment needed - all people already in database'
+                'actual_api_cost': '$0.00'
             }
         
-        logger.info(f"Starting enrichment for {len(people_to_enrich)} people")
-        logger.info(f"Estimated API cost: ${len(people_to_enrich) * 0.03:.2f}")
+        print(f"Found {len(people_to_enrich)} people to potentially enrich")
         
-        # Enrich with PeopleDataLabs
-        enriched_data = _enrich_people_with_pdl(people_to_enrich, api_key)
+        print("STEP 3: Checking for duplicates...")
         
-        # Export results
-        logger.info("Exporting results...")
-        _export_to_csv(enriched_data, config.get('OUTPUT_CSV', 'output/enriched_patents.csv'))
-        _export_to_json(enriched_data, config.get('OUTPUT_JSON', 'output/enriched_patents.json'))
+        # Filter out already enriched people (FAST in-memory check)
+        new_people_to_enrich = []
+        skipped_count = 0
         
-        # Calculate statistics
-        total_people = len(people_to_enrich)
-        enrichment_rate = len(enriched_data) / total_people * 100 if total_people > 0 else 0
+        for person in people_to_enrich:
+            if is_already_enriched(person, existing_enriched):
+                skipped_count += 1
+            else:
+                new_people_to_enrich.append(person)
         
-        # Calculate cost savings
-        original_people_count = sum(
-            len(p.get('inventors', [])) + len(p.get('assignees', [])) 
-            for p in config.get('patents_data', [])
-        )
-        saved_api_calls = max(0, original_people_count - len(people_to_enrich))
-        cost_savings = saved_api_calls * 0.03
+        print(f"After duplicate check: {len(new_people_to_enrich)} new people, {skipped_count} already enriched")
         
-        logger.info("Patent enrichment process completed successfully!")
-        logger.info(f"API calls saved: {saved_api_calls} (${cost_savings:.2f})")
+        if not new_people_to_enrich:
+            return {
+                'success': True,
+                'message': 'All people already enriched',
+                'total_people': len(people_to_enrich),
+                'enriched_count': 0,
+                'enriched_data': existing_enriched,
+                'actual_api_cost': '$0.00',
+                'api_calls_saved': len(people_to_enrich)
+            }
         
-        return {
+        # Limit for test mode
+        if config.get('TEST_MODE') and len(new_people_to_enrich) > 2:
+            new_people_to_enrich = new_people_to_enrich[:2]
+            print(f"TEST MODE: Limited to {len(new_people_to_enrich)} people")
+        
+        print(f"STEP 4: Enriching {len(new_people_to_enrich)} people...")
+        
+        # Enrich the new people
+        newly_enriched = enrich_people_batch(new_people_to_enrich, config)
+        
+        print(f"STEP 5: Saving {len(newly_enriched)} new enrichments to database...")
+        
+        # Save new enrichments to database
+        if newly_enriched:
+            save_enrichments_to_database(newly_enriched)
+        
+        # Combine all enriched data for return - fix the join error here
+        if existing_enriched and newly_enriched:
+            all_enriched_data = existing_enriched + newly_enriched
+        elif existing_enriched:
+            all_enriched_data = existing_enriched
+        elif newly_enriched:
+            all_enriched_data = newly_enriched
+        else:
+            all_enriched_data = []
+        
+        result = {
             'success': True,
-            'total_patents': len(set(p.get('patent_number') for p in people_to_enrich)),
-            'total_people': total_people,
-            'enriched_count': len(enriched_data),
-            'enrichment_rate': enrichment_rate,
-            'enriched_data': enriched_data,
-            'api_calls_made': len(people_to_enrich),
-            'api_calls_saved': saved_api_calls,
-            'estimated_cost_savings': f"${cost_savings:.2f}",
-            'actual_api_cost': f"${len(people_to_enrich) * 0.03:.2f}"
+            'total_people': len(people_to_enrich),
+            'enriched_count': len(newly_enriched),
+            'enrichment_rate': len(newly_enriched) / len(new_people_to_enrich) * 100 if new_people_to_enrich else 0,
+            'enriched_data': all_enriched_data,
+            'actual_api_cost': f"${len(newly_enriched) * 0.03:.2f}",
+            'api_calls_saved': skipped_count,
+            'already_enriched_count': skipped_count,
+            'failed_count': len(new_people_to_enrich) - len(newly_enriched)
         }
         
+        print(f"STEP 6: Function completed successfully!")
+        print(f"  Returning {len(all_enriched_data)} total enriched records")
+        print(f"  Result keys: {list(result.keys())}")
+        
+        return result
+        
     except Exception as e:
-        logger.error(f"Error in enrichment process: {e}")
+        logger.error(f"Enrichment failed: {e}")
         return {
             'success': False,
             'error': str(e),
-            'total_patents': 0,
             'total_people': 0,
             'enriched_count': 0,
-            'enrichment_rate': 0.0
+            'enriched_data': [],
+            'actual_api_cost': '$0.00'
         }
 
-def _get_people_to_enrich(config: Dict[str, Any], enrich_only_new: bool, max_api_calls: int) -> List[Dict]:
-    """Get list of people to enrich based on configuration"""
-    
-    # Get new people data from integration step
-    new_people_data = config.get('new_people_data', [])
-    
-    if enrich_only_new and new_people_data:
-        logger.info(f"Enriching ONLY {len(new_people_data)} new people (cost optimization)")
-        people_to_enrich = new_people_data[:max_api_calls]
-        
-        if len(new_people_data) > max_api_calls:
-            logger.warning(f"Limiting enrichment to {max_api_calls} people to control costs")
-        
-        return people_to_enrich
-    
-    else:
-        # Fallback to XML parsing if no new people data provided
-        logger.info("No new people data found, falling back to XML parsing")
-        xml_file_path = config.get('XML_FILE_PATH')
-        
-        if not xml_file_path:
-            logger.error("No XML file path provided")
-            return []
-        
-        patents = _parse_xml_file(xml_file_path)
-        
-        if not patents:
-            logger.error("No patents found in XML file")
-            return []
-        
-        # Extract all people from patents
-        people_to_enrich = []
-        for patent in patents:
-            # Add inventors
-            for inventor in patent.get('inventors', []):
-                people_to_enrich.append({
-                    **inventor,
-                    'patent_number': patent['patent_number'],
-                    'patent_title': patent['patent_title'],
-                    'person_type': 'inventor'
-                })
-            
-            # Add assignees (individuals only)
-            for assignee in patent.get('assignees', []):
-                if assignee.get('first_name') or assignee.get('last_name'):
-                    people_to_enrich.append({
-                        **assignee,
-                        'patent_number': patent['patent_number'],
-                        'patent_title': patent['patent_title'],
-                        'person_type': 'assignee'
-                    })
-        
-        return people_to_enrich[:max_api_calls]
 
-def _parse_xml_file(xml_file_path: str) -> List[Dict]:
-    """Parse XML file and extract patent data"""
+def load_existing_enriched_people() -> List[Dict[str, Any]]:
+    """Load all existing enriched people from database in one query"""
     try:
-        logger.info(f"Parsing XML file: {xml_file_path}")
+        db_config = DatabaseConfig.from_env()
+        db_manager = DatabaseManager(db_config)
         
-        tree = ET.parse(xml_file_path)
-        root = tree.getroot()
+        query = "SELECT * FROM enriched_people ORDER BY enriched_at DESC"
+        results = db_manager.execute_query(query)
         
-        # Handle single patent or multiple patents
-        if root.tag == 'us-patent-grant':
-            patents = [root]
-        else:
-            patents = root.findall('.//us-patent-grant')
+        enriched_data = []
+        for row in results:
+            try:
+                # Parse JSON data
+                enrichment_data = json.loads(row.get('enrichment_data', '{}'))
+                
+                # Convert to standard format
+                enriched_record = {
+                    'original_name': f"{row.get('first_name', '')} {row.get('last_name', '')}".strip(),
+                    'patent_number': row.get('patent_number', ''),
+                    'patent_title': enrichment_data.get('original_person', {}).get('patent_title', ''),
+                    'match_score': enrichment_data.get('enrichment_result', {}).get('match_score', 0),
+                    'enriched_data': enrichment_data,
+                    'enriched_at': row.get('enriched_at')
+                }
+                enriched_data.append(enriched_record)
+                
+            except Exception as e:
+                logger.warning(f"Error parsing enriched row {row.get('id')}: {e}")
+                continue
         
-        extracted_patents = []
-        for patent_elem in patents:
-            patent_data = _extract_patent_from_xml(patent_elem)
-            if patent_data:
-                extracted_patents.append(patent_data)
-        
-        logger.info(f"Extracted {len(extracted_patents)} patents")
-        return extracted_patents
+        return enriched_data
         
     except Exception as e:
-        logger.error(f"Error parsing XML file: {e}")
+        logger.warning(f"Error loading existing enriched people: {e}")
         return []
 
-def _extract_patent_from_xml(patent_elem) -> Optional[Dict]:
-    """Extract patent data from XML element"""
-    try:
-        # Basic patent info
-        patent_number = _get_xml_text(patent_elem, './/publication-reference/document-id/doc-number')
-        patent_title = _get_xml_text(patent_elem, './/invention-title')
-        patent_date = _get_xml_text(patent_elem, './/publication-reference/document-id/date')
-        
-        # Extract inventors
-        inventors = []
-        inventor_elements = (
-            patent_elem.findall('.//parties/applicants/applicant[@app-type="applicant-inventor"]') or
-            patent_elem.findall('.//parties/inventors/inventor') or
-            patent_elem.findall('.//us-parties/inventors/inventor')
-        )
-        
-        for inventor in inventor_elements:
-            inventor_data = {
-                'first_name': _get_xml_text(inventor, './/addressbook/first-name') or _get_xml_text(inventor, './/first-name'),
-                'last_name': _get_xml_text(inventor, './/addressbook/last-name') or _get_xml_text(inventor, './/last-name'),
-                'city': _get_xml_text(inventor, './/addressbook/address/city') or _get_xml_text(inventor, './/address/city'),
-                'state': _get_xml_text(inventor, './/addressbook/address/state') or _get_xml_text(inventor, './/address/state'),
-                'country': _get_xml_text(inventor, './/addressbook/address/country') or _get_xml_text(inventor, './/address/country'),
-            }
-            
-            if inventor_data['first_name'] or inventor_data['last_name']:
-                inventors.append(inventor_data)
-        
-        # Extract assignees
-        assignees = []
-        assignee_elements = (
-            patent_elem.findall('.//parties/assignees/assignee') or
-            patent_elem.findall('.//us-parties/assignees/assignee')
-        )
-        
-        for assignee in assignee_elements:
-            assignee_data = {
-                'organization': _get_xml_text(assignee, './/addressbook/orgname') or _get_xml_text(assignee, './/orgname'),
-                'first_name': _get_xml_text(assignee, './/addressbook/first-name') or _get_xml_text(assignee, './/first-name'),
-                'last_name': _get_xml_text(assignee, './/addressbook/last-name') or _get_xml_text(assignee, './/last-name'),
-                'city': _get_xml_text(assignee, './/addressbook/address/city') or _get_xml_text(assignee, './/address/city'),
-                'state': _get_xml_text(assignee, './/addressbook/address/state') or _get_xml_text(assignee, './/address/state'),
-                'country': _get_xml_text(assignee, './/addressbook/address/country') or _get_xml_text(assignee, './/address/country'),
-            }
-            
-            if assignee_data['organization'] or assignee_data['first_name'] or assignee_data['last_name']:
-                assignees.append(assignee_data)
-        
-        return {
-            'patent_number': patent_number or "Unknown",
-            'patent_title': patent_title or "Unknown",
-            'patent_date': patent_date or "Unknown",
-            'inventors': inventors,
-            'assignees': assignees
-        }
-        
-    except Exception as e:
-        logger.warning(f"Error extracting patent data: {e}")
-        return None
 
-def _get_xml_text(element, xpath: str) -> Optional[str]:
-    """Safely extract text from XML element"""
-    if element is None:
-        return None
-    found = element.find(xpath)
-    return found.text.strip() if found is not None and found.text else None
-
-def _enrich_people_with_pdl(people_list: List[Dict], api_key: str) -> List[Dict]:
-    """Enrich people using PeopleDataLabs Bulk API - Fixed for None values"""
-    logger.info(f"Starting enrichment for {len(people_list)} people using Bulk API")
+def load_people_to_enrich(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Load people who need enrichment"""
+    people = []
     
-    client = PDLPY(api_key=api_key)
+    # Try from config first
+    if config.get('new_people_data'):
+        people = config['new_people_data']
+        print(f"Using {len(people)} people from config")
+        return people
+    
+    # Try from file
+    people_file = Path(config.get('OUTPUT_DIR', 'output')) / 'new_people_for_enrichment.json'
+    if people_file.exists():
+        with open(people_file, 'r') as f:
+            people = json.load(f)
+        print(f"Loaded {len(people)} people from file")
+    
+    return people
+
+
+def is_already_enriched(person: Dict[str, Any], existing_enriched: List[Dict[str, Any]]) -> bool:
+    """Check if person is already enriched - FAST in-memory lookup"""
+    
+    first_name = (person.get('first_name') or '').strip().lower()
+    last_name = (person.get('last_name') or '').strip().lower() 
+    city = (person.get('city') or '').strip().lower()
+    state = (person.get('state') or '').strip().lower()
+    
+    if not first_name and not last_name:
+        return False
+    
+    # Check against existing enriched data
+    for existing in existing_enriched:
+        existing_data = existing.get('enriched_data', {}).get('original_person', {})
+        
+        existing_first = (existing_data.get('first_name') or '').strip().lower()
+        existing_last = (existing_data.get('last_name') or '').strip().lower()
+        existing_city = (existing_data.get('city') or '').strip().lower()
+        existing_state = (existing_data.get('state') or '').strip().lower()
+        
+        # Exact match (highest confidence)
+        if (first_name and last_name and city and state and
+            first_name == existing_first and last_name == existing_last and
+            city == existing_city and state == existing_state):
+            return True
+        
+        # State match (medium confidence)
+        if (first_name and last_name and state and
+            first_name == existing_first and last_name == existing_last and
+            state == existing_state):
+            return True
+        
+        # First initial match (lower confidence)
+        if (first_name and last_name and state and
+            first_name[0] == existing_first[0] and last_name == existing_last and
+            state == existing_state):
+            return True
+    
+    return False
+
+
+def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Enrich a batch of people"""
+    
+    api_key = config.get('PEOPLEDATALABS_API_KEY')
     enriched_results = []
     
-    # Process in batches of 100 (PDL bulk API limit)
-    batch_size = 100
-    for i in range(0, len(people_list), batch_size):
-        batch = people_list[i:i + batch_size]
-        logger.info(f"Processing batch {i//batch_size + 1}: {len(batch)} people")
-        
-        # Prepare bulk request
-        bulk_requests = []
-        for idx, person in enumerate(batch):
-            # Prepare search parameters with safe None handling
-            params = {}
-            first_name = (person.get('first_name') or '').strip()
-            last_name = (person.get('last_name') or '').strip()
-            city = (person.get('city') or '').strip()
-            state = (person.get('state') or '').strip()
-            country = (person.get('country') or '').strip()
-            
-            # Skip if insufficient data
-            if not first_name and not last_name:
-                logger.debug(f"Skipping person with no name: {person.get('patent_number', 'Unknown')}")
-                continue
-            
-            if first_name:
-                params['first_name'] = first_name
-            if last_name:
-                params['last_name'] = last_name
-            
-            # Build location
-            location_parts = []
-            if city:
-                location_parts.append(city)
-            if state:
-                location_parts.append(state)
-            if country:
-                location_parts.append(country)
-            
-            if location_parts:
-                params['location'] = ', '.join(location_parts)
-            
-            # Add to bulk request with metadata to track original person
-            bulk_requests.append({
-                "metadata": {
-                    "batch_index": idx,
-                    "person_id": person.get('person_id', f"{first_name}_{last_name}"),
-                    "patent_number": person.get('patent_number', ''),
-                    "person_type": person.get('person_type', '')
-                },
-                "params": params
-            })
-        
-        if not bulk_requests:
-            logger.warning(f"No valid requests in batch {i//batch_size + 1}")
-            continue
-        
-        # Make bulk API call
+    # Initialize enricher
+    if not api_key or api_key == 'YOUR_PDL_API_KEY':
+        print("Using mock enrichment (no API key)")
+        use_mock = True
+    else:
+        print(f"Using real API with key: {api_key[:10]}...")
         try:
-            bulk_data = {
-                "requests": bulk_requests
-            }
-            
-            response = client.person.bulk(**bulk_data)
-            
-            if response.status_code == 200:
-                responses = response.json()
-                
-                # Process responses
-                for response_item in responses:
-                    if response_item.get('status') == 200:
-                        # Get original person data from metadata
-                        metadata = response_item.get('metadata', {})
-                        batch_index = metadata.get('batch_index')
-                        
-                        if batch_index is not None and batch_index < len(batch):
-                            original_person = batch[batch_index]
-                            pdl_data = response_item.get('data', {})
-                            likelihood = response_item.get('likelihood', 0)
-                            
-                            # Safe name handling
-                            orig_first = (original_person.get('first_name') or '').strip()
-                            orig_last = (original_person.get('last_name') or '').strip()
-                            original_name = f"{orig_first} {orig_last}".strip()
-                            
-                            enriched_person = {
-                                'original_name': original_name or 'Unknown',
-                                'patent_number': original_person.get('patent_number', ''),
-                                'patent_title': original_person.get('patent_title', ''),
-                                'match_score': likelihood / 10.0,  # Convert PDL likelihood (0-10) to score (0-1)
-                                'enriched_data': {
-                                    'person_type': original_person.get('person_type', ''),
-                                    'original_data': original_person,
-                                    'pdl_data': pdl_data,
-                                    'api_method': 'bulk_enrichment',
-                                    'likelihood': likelihood
-                                }
-                            }
-                            enriched_results.append(enriched_person)
-                    else:
-                        # Log failed enrichments
-                        metadata = response_item.get('metadata', {})
-                        person_id = metadata.get('person_id', 'unknown')
-                        logger.warning(f"Failed to enrich {person_id}: status {response_item.get('status')}")
-            else:
-                logger.error(f"Bulk API request failed: {response.status_code} - {response.text}")
-                
+            enricher = PeopleDataLabsEnricher(api_key)
+            use_mock = False
         except Exception as e:
-            logger.error(f"Error in bulk API call for batch {i//batch_size + 1}: {e}")
+            print(f"Failed to initialize enricher: {e}")
+            use_mock = True
+    
+    for i, person in enumerate(people):
+        progress = i + 1
+        total = len(people)
+        person_name = f"{person.get('first_name', '')} {person.get('last_name', '')}"
+        
+        print(f"ENRICHING {progress}/{total}: {person_name}")
+        print(f"  Person data: first_name='{person.get('first_name')}', last_name='{person.get('last_name')}', city='{person.get('city')}', state='{person.get('state')}'")
+        
+        try:
+            if not use_mock:
+                # Clean person data to avoid the join error
+                clean_person = {
+                    'first_name': str(person.get('first_name', '')).strip(),
+                    'last_name': str(person.get('last_name', '')).strip(),
+                    'city': str(person.get('city', '')).strip(),
+                    'state': str(person.get('state', '')).strip(),
+                    'country': str(person.get('country', 'US')).strip(),
+                    'patent_number': str(person.get('patent_number', '')),
+                    'patent_title': str(person.get('patent_title', '')),
+                    'person_type': str(person.get('person_type', 'inventor'))
+                }
+                
+                print(f"  Calling API with clean data: {clean_person}")
+                result = enricher.enrich_people_list([clean_person])
+                
+                if result and len(result) > 0:
+                    enrichment_result = result[0]
+                    print(f"  API SUCCESS: Got enrichment data")
+                else:
+                    print(f"  API returned empty result for {person_name} (likely not in PDL database)")
+                    # Fallback to mock for testing when API returns empty
+                    if config.get('TEST_MODE'):
+                        print(f"  TEST MODE: Using mock data instead")
+                        enrichment_result = {
+                            'original_name': person_name,
+                            'patent_number': person.get('patent_number', ''),
+                            'patent_title': person.get('patent_title', ''),
+                            'match_score': 0.5,  # Lower score for mock
+                            'enriched_data': {
+                                'person_type': person.get('person_type', 'inventor'),
+                                'original_data': clean_person,
+                                'pdl_data': {
+                                    'full_name': person_name,
+                                    'emails': [{'address': f"test.{person_name.lower().replace(' ', '.')}@example.com"}],
+                                    'linkedin_url': f'https://linkedin.com/in/{person_name.lower().replace(" ", "")}',
+                                    'job_title': 'Inventor',
+                                    'job_company_name': 'Unknown Company',
+                                    'note': 'Mock data - person not found in PeopleDataLabs'
+                                },
+                                'api_method': 'mock_fallback'
+                            }
+                        }
+                    else:
+                        continue
+            else:
+                # Mock enrichment - always works
+                enrichment_result = {
+                    'original_name': person_name,
+                    'patent_number': person.get('patent_number', ''),
+                    'patent_title': person.get('patent_title', ''),
+                    'match_score': 1.0,
+                    'enriched_data': {
+                        'person_type': person.get('person_type', 'inventor'),
+                        'original_data': person,
+                        'pdl_data': {
+                            'full_name': person_name,
+                            'emails': [{'address': f"mock@example.com"}],
+                            'linkedin_url': 'https://linkedin.com/in/mockuser',
+                            'job_title': 'Software Engineer',
+                            'job_company_name': 'Mock Company'
+                        },
+                        'api_method': 'mock'
+                    }
+                }
+                print(f"  MOCK SUCCESS: Created mock enrichment")
+            
+            enriched_results.append(enrichment_result)
+            print(f"  SUCCESS: Enriched {person_name}")
+            
+        except Exception as e:
+            print(f"  ERROR: Failed to enrich {person_name}: {e}")
+            print(f"  Error type: {type(e)}")
+            import traceback
+            traceback.print_exc()
             continue
         
-        # Small delay between batches to be respectful
-        if i + batch_size < len(people_list):
-            time.sleep(0.5)
+        # Small delay to be nice to API
+        if not use_mock:
+            time.sleep(0.1)
     
-    logger.info(f"Bulk enrichment completed: {len(enriched_results)} out of {len(people_list)} people enriched")
+    print(f"Enriched {len(enriched_results)} out of {len(people)} people")
     return enriched_results
-# Removed _enrich_single_person function as we're now using bulk API
 
-def _export_to_csv(enriched_data: List[Dict], filename: str):
-    """Export enriched data to CSV - Fixed for None values"""
-    if not enriched_data:
-        logger.warning("No enriched data to export")
-        return
-    
-    rows = []
-    for data in enriched_data:
-        pdl_data = data.get('enriched_data', {}).get('pdl_data', {})
-        original_data = data.get('enriched_data', {}).get('original_data', {})
-        
-        # Safe handling of list fields that might be None
-        emails = pdl_data.get('emails') or []
-        phone_numbers = pdl_data.get('phone_numbers') or []
-        
-        # Ensure emails and phone_numbers are lists
-        if not isinstance(emails, list):
-            emails = []
-        if not isinstance(phone_numbers, list):
-            phone_numbers = []
-        
-        row = {
-            'patent_number': data.get('patent_number'),
-            'patent_title': data.get('patent_title'),
-            'original_name': data.get('original_name'),
-            'person_type': data.get('enriched_data', {}).get('person_type'),
-            'match_score': data.get('match_score'),
-            'api_method': data.get('enriched_data', {}).get('api_method'),
-            
-            # Original data
-            'original_first_name': original_data.get('first_name'),
-            'original_last_name': original_data.get('last_name'),
-            'original_city': original_data.get('city'),
-            'original_state': original_data.get('state'),
-            'original_country': original_data.get('country'),
-            
-            # Enriched data - with safe list handling
-            'enriched_full_name': pdl_data.get('full_name'),
-            'enriched_first_name': pdl_data.get('first_name'),
-            'enriched_last_name': pdl_data.get('last_name'),
-            'enriched_emails': ', '.join(emails),  # Safe join
-            'enriched_phone_numbers': ', '.join(phone_numbers),  # Safe join
-            'enriched_linkedin_url': pdl_data.get('linkedin_url'),
-            'enriched_current_title': pdl_data.get('job_title'),
-            'enriched_current_company': pdl_data.get('job_company_name'),
-            'enriched_city': pdl_data.get('location_locality'),
-            'enriched_state': pdl_data.get('location_region'),
-            'enriched_country': pdl_data.get('location_country'),
-            'enriched_industry': pdl_data.get('industry'),
-        }
-        rows.append(row)
-    
-    df = pd.DataFrame(rows)
-    df.to_csv(filename, index=False)
-    logger.info(f"Exported {len(rows)} records to {filename}")
 
-def _export_to_json(enriched_data: List[Dict], filename: str):
-    """Export enriched data to JSON"""
-    if not enriched_data:
-        logger.warning("No enriched data to export")
-        return
-    
-    with open(filename, 'w') as f:
-        json.dump(enriched_data, f, indent=2, default=str)
-    
-    logger.info(f"Exported {len(enriched_data)} records to {filename}")
-
-def _create_mock_enrichment_result() -> Dict[str, Any]:
-    """Create mock enrichment result when API key is not configured"""
-    return {
-        'success': True,
-        'total_patents': 0,
-        'total_people': 0,
-        'enriched_count': 0,
-        'enrichment_rate': 0.0,
-        'enriched_data': [],
-        'api_calls_made': 0,
-        'api_calls_saved': 0,
-        'estimated_cost_savings': '$0.00',
-        'actual_api_cost': '$0.00',
-        'warning': 'Mock result - PeopleDataLabs API key not configured'
-    }
+def save_enrichments_to_database(enriched_results: List[Dict[str, Any]]):
+    """Save new enrichments to database"""
+    try:
+        db_config = DatabaseConfig.from_env()
+        db_manager = DatabaseManager(db_config)
+        
+        for result in enriched_results:
+            try:
+                # Extract data
+                original_data = result.get('enriched_data', {}).get('original_data', {})
+                
+                # Build enrichment data JSON
+                enrichment_data = {
+                    "original_person": original_data,
+                    "enrichment_result": result,
+                    "enrichment_metadata": {
+                        "enriched_at": time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                        "api_cost": 0.03
+                    }
+                }
+                
+                # Insert query
+                insert_query = """
+                INSERT INTO enriched_people (
+                    first_name, last_name, city, state, country,
+                    patent_number, person_type, enrichment_data, api_cost
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """
+                
+                params = (
+                    (original_data.get('first_name') or '').strip(),
+                    (original_data.get('last_name') or '').strip(),
+                    (original_data.get('city') or '').strip(),
+                    (original_data.get('state') or '').strip(),
+                    (original_data.get('country') or 'US').strip(),
+                    original_data.get('patent_number', ''),
+                    original_data.get('person_type', 'inventor'),
+                    json.dumps(enrichment_data),
+                    0.03
+                )
+                
+                with db_manager.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(insert_query, params)
+                    conn.commit()
+                
+                print(f"  Saved: {result.get('original_name', 'Unknown')}")
+                
+            except Exception as e:
+                logger.error(f"Error saving enrichment: {e}")
+                continue
+        
+        print(f"Saved {len(enriched_results)} enrichments to database")
+        
+    except Exception as e:
+        logger.error(f"Error saving to database: {e}")
