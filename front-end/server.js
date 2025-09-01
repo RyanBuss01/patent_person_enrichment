@@ -24,22 +24,37 @@ app.get('/', (req, res) => {
 // Resolve a Python interpreter, preferring an active venv if provided
 function resolvePython() {
     const isWindows = process.platform === 'win32';
+    const canRun = (cmd) => {
+        try {
+            const res = spawnSync(cmd, ['-c', 'import sys; print("ok")'], { encoding: 'utf8', timeout: 2000 });
+            return res.status === 0 && (res.stdout || '').includes('ok');
+        } catch (_) { return false; }
+    };
 
     // 1) Explicit override via env var
     if (process.env.PYTHON_BIN && fs.existsSync(process.env.PYTHON_BIN)) {
-        return process.env.PYTHON_BIN;
+        if (canRun(process.env.PYTHON_BIN)) return process.env.PYTHON_BIN;
     }
 
     // 2) Venv path provided via env var
     const venvPath = process.env.VENV_PATH;
     if (venvPath) {
         const candidate = path.join(venvPath, isWindows ? 'Scripts' : 'bin', isWindows ? 'python.exe' : 'python3');
-        if (fs.existsSync(candidate)) return candidate;
+        if (fs.existsSync(candidate) && canRun(candidate)) return candidate;
         const candidatePy = path.join(venvPath, isWindows ? 'Scripts' : 'bin', isWindows ? 'python.exe' : 'python');
-        if (fs.existsSync(candidatePy)) return candidatePy;
+        if (fs.existsSync(candidatePy) && canRun(candidatePy)) return candidatePy;
     }
 
-    // 3) Project-local venv (avoid using an incompatible copied venv if not executable)
+    // 3) Active shell venv if server was started from it
+    if (process.env.VIRTUAL_ENV) {
+        const v = process.env.VIRTUAL_ENV;
+        const c1 = path.join(v, isWindows ? 'Scripts' : 'bin', isWindows ? 'python.exe' : 'python3');
+        const c2 = path.join(v, isWindows ? 'Scripts' : 'bin', isWindows ? 'python.exe' : 'python');
+        if (fs.existsSync(c1) && canRun(c1)) return c1;
+        if (fs.existsSync(c2) && canRun(c2)) return c2;
+    }
+
+    // 4) Project-local venv (avoid using an incompatible copied venv if not runnable)
     const projectVenv = path.join(__dirname, '..', 'patent_env');
     const projectCandidates = [
         path.join(projectVenv, isWindows ? 'Scripts' : 'bin', isWindows ? 'python.exe' : 'python3'),
@@ -47,26 +62,34 @@ function resolvePython() {
     ];
     for (const c of projectCandidates) {
         try {
-            if (fs.existsSync(c)) {
-                fs.accessSync(c, fs.constants.X_OK);
-                return c;
-            }
-        } catch (_) { /* not executable on this system */ }
+            if (fs.existsSync(c) && canRun(c)) return c;
+        } catch (_) { /* not runnable on this system */ }
     }
 
-    // 4) Fallback to system python3/python
+    // 5) Fallback to system python3/python
     const which = (cmd) => {
         try {
             const out = spawnSync(isWindows ? 'where' : 'which', [cmd], { encoding: 'utf8' });
             if (out.status === 0) {
                 const p = out.stdout.split(/\r?\n/).find(Boolean);
-                if (p && fs.existsSync(p)) return p.trim();
+                if (p && fs.existsSync(p) && canRun(p.trim())) return p.trim();
             }
         } catch (_) {}
         return null;
     };
     return which('python3') || which('python') || (isWindows ? 'python' : 'python3');
 }
+
+// Health endpoint to report selected Python
+app.get('/api/health', (req, res) => {
+    const pythonExec = resolvePython();
+    try {
+        const info = spawnSync(pythonExec, ['-c', 'import sys,sysconfig; import platform; print("executable=",sys.executable); print("version=",sys.version.split("\\n")[0]); print("platform=",platform.platform()); print("base_prefix=",getattr(sys,"base_prefix","") )'], { encoding: 'utf8', timeout: 2000 });
+        res.json({ python: pythonExec, status: info.status, stdout: info.stdout, stderr: info.stderr });
+    } catch (e) {
+        res.json({ python: pythonExec, error: e.message });
+    }
+});
 
 // Helper function to run Python scripts asynchronously
 function runPythonScriptAsync(scriptPath, args = [], stepId) {
