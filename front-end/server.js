@@ -1,5 +1,5 @@
 const express = require('express');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -21,10 +21,58 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
+// Resolve a Python interpreter, preferring an active venv if provided
+function resolvePython() {
+    const isWindows = process.platform === 'win32';
+
+    // 1) Explicit override via env var
+    if (process.env.PYTHON_BIN && fs.existsSync(process.env.PYTHON_BIN)) {
+        return process.env.PYTHON_BIN;
+    }
+
+    // 2) Venv path provided via env var
+    const venvPath = process.env.VENV_PATH;
+    if (venvPath) {
+        const candidate = path.join(venvPath, isWindows ? 'Scripts' : 'bin', isWindows ? 'python.exe' : 'python3');
+        if (fs.existsSync(candidate)) return candidate;
+        const candidatePy = path.join(venvPath, isWindows ? 'Scripts' : 'bin', isWindows ? 'python.exe' : 'python');
+        if (fs.existsSync(candidatePy)) return candidatePy;
+    }
+
+    // 3) Project-local venv (avoid using an incompatible copied venv if not executable)
+    const projectVenv = path.join(__dirname, '..', 'patent_env');
+    const projectCandidates = [
+        path.join(projectVenv, isWindows ? 'Scripts' : 'bin', isWindows ? 'python.exe' : 'python3'),
+        path.join(projectVenv, isWindows ? 'Scripts' : 'bin', isWindows ? 'python.exe' : 'python'),
+    ];
+    for (const c of projectCandidates) {
+        try {
+            if (fs.existsSync(c)) {
+                fs.accessSync(c, fs.constants.X_OK);
+                return c;
+            }
+        } catch (_) { /* not executable on this system */ }
+    }
+
+    // 4) Fallback to system python3/python
+    const which = (cmd) => {
+        try {
+            const out = spawnSync(isWindows ? 'where' : 'which', [cmd], { encoding: 'utf8' });
+            if (out.status === 0) {
+                const p = out.stdout.split(/\r?\n/).find(Boolean);
+                if (p && fs.existsSync(p)) return p.trim();
+            }
+        } catch (_) {}
+        return null;
+    };
+    return which('python3') || which('python') || (isWindows ? 'python' : 'python3');
+}
+
 // Helper function to run Python scripts asynchronously
 function runPythonScriptAsync(scriptPath, args = [], stepId) {
     return new Promise((resolve, reject) => {
-        console.log(`Running: python ${scriptPath} ${args.join(' ')}`);
+        const pythonExec = resolvePython();
+        console.log(`Running: ${pythonExec} ${scriptPath} ${args.join(' ')}`);
         
         // Pass frontend environment variables to Python
         const env = {
@@ -47,11 +95,7 @@ function runPythonScriptAsync(scriptPath, args = [], stepId) {
             MAX_RESULTS: process.env.MAX_RESULTS || '1000'
         };
         
-        const pythonPath = path.join(__dirname, '..', 'patent_env', 'bin', 'python3');
-        
-        console.log(`Running: ${pythonPath} ${scriptPath} ${args.join(' ')}`);
-        
-        const python = spawn(pythonPath, [scriptPath, ...args], {
+        const python = spawn(pythonExec, [scriptPath, ...args], {
             cwd: path.join(__dirname, '..'),
             env: env
         });
@@ -196,9 +240,7 @@ function getFileStats(filePath) {
 // Helper: get SQL counts via a small Python script
 function getSqlCounts() {
     try {
-        const path = require('path');
-        const { spawnSync } = require('child_process');
-        const pythonPath = path.join(__dirname, '..', 'patent_env', 'bin', 'python3');
+        const pythonPath = resolvePython();
         const scriptPath = path.join(__dirname, '..', 'scripts', 'get_sql_counts.py');
         const env = {
             ...process.env,
