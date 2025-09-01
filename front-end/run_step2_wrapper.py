@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Step 2 Wrapper: Uses existing extract_patents.py runner
-Lightweight wrapper to run Step 2 for the frontend
+Step 2 Wrapper: Data Enrichment (moved up from Step 3)
+Uses existing enrich.py runner with duplicate prevention and test mode
 """
 import sys
 import os
@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 # Add the parent directory to sys.path so we can import our modules
 sys.path.append(str(Path(__file__).parent.parent))
 
-from runners.extract_patents import run_patent_extraction
+from runners.enrich import run_sql_data_enrichment as run_enrichment
 
 # Load environment variables
 load_dotenv()
@@ -26,180 +26,210 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def load_config():
-    """Load configuration exactly like main.py does"""
+def load_config(test_mode=False):
+    """Load enrichment configuration like main.py"""
     return {
-        'PATENTSVIEW_API_KEY': os.getenv('PATENTSVIEW_API_KEY', "YOUR_API_KEY"),  # Changed default
-        'EXTRACT_BY_DATE': os.getenv('EXTRACT_BY_DATE', 'true').lower() == 'true',
-        'DAYS_BACK': int(os.getenv('DAYS_BACK', '7')),
-        'CPC_CODES': ['H04', 'G06'],  # Technology areas (electronics, computing)
-        'MAX_RESULTS': int(os.getenv('MAX_RESULTS', '1000')),
+        'PEOPLEDATALABS_API_KEY': os.getenv('PEOPLEDATALABS_API_KEY', "YOUR_PDL_API_KEY"),
+        'XML_FILE_PATH': "ipg250812.xml",
         'OUTPUT_DIR': os.getenv('OUTPUT_DIR', 'output'),
+        'OUTPUT_CSV': "output/enriched_patents.csv",
+        'OUTPUT_JSON': "output/enriched_patents.json",
+        'ENRICH_ONLY_NEW_PEOPLE': os.getenv('ENRICH_ONLY_NEW_PEOPLE', 'true').lower() == 'true',
+        'MAX_ENRICHMENT_COST': 2 if test_mode else int(os.getenv('MAX_ENRICHMENT_COST', '1000')),
+        'TEST_MODE': test_mode
     }
 
-def check_if_step2_needed():
-    """Check if Step 2 is needed by looking at Step 0 or Step 1 results"""
-    try:
-        # FIRST: Check if Step 0 downloaded data exists (NEW)
-        downloaded_patents_file = 'output/downloaded_patents.json'
-        if os.path.exists(downloaded_patents_file):
-            try:
-                with open(downloaded_patents_file, 'r') as f:
-                    downloaded_patents = json.load(f)
-                
-                print("ℹ️  Step 0 downloaded patent data found - Step 2 extraction not needed")
-                print(f"   Found {len(downloaded_patents)} downloaded patents")
-                print("   Skipping API extraction and using downloaded data instead.")
-                
-                return False, {
-                    'success': True,
-                    'total_patents': len(downloaded_patents),
-                    'source': 'step0_downloaded',
-                    'skipped_api': True,
-                    'message': 'Used downloaded data from Step 0 instead of API extraction'
-                }
-            except Exception as e:
-                print(f"Error reading downloaded patents: {e}")
-        
-        # SECOND: Check Step 1 XML data as fallback
-        results_file = 'output/integration_results.json'
-        if os.path.exists(results_file):
-            with open(results_file, 'r') as f:
-                step1_results = json.load(f)
-            
-            if step1_results.get('success') and step1_results.get('new_patents_count', 0) > 0:
-                print("ℹ️  Step 1 found XML patent data - Step 2 extraction not needed")
-                print(f"   Found {step1_results.get('new_patents_count', 0)} new patents from XML files")
-                print("   Skipping API extraction and using XML data instead.")
-                
-                return False, {
-                    'success': True,
-                    'total_patents': step1_results.get('new_patents_count', 0),
-                    'source': 'step1_xml_files',
-                    'skipped_api': True,
-                    'message': 'Used XML data from Step 1 instead of API extraction'
-                }
-        
-        print("No Step 0 downloaded data or Step 1 XML data found, proceeding with API extraction...")
-        return True, None
-        
-    except Exception as e:
-        logger.warning(f"Could not check previous step results: {e}")
-        print("Could not check previous step results, proceeding with API extraction...")
-        return True, None
+def load_existing_enrichment():
+    """Load existing enrichment data to avoid duplicates"""
+    enriched_file = 'output/enriched_patents.json'
+    enriched_people = set()
+    if os.path.exists(enriched_file):
+        try:
+            with open(enriched_file, 'r') as f:
+                enriched_data = json.load(f)
+            for person in enriched_data:
+                original_data = person.get('enriched_data', {}).get('original_data', {})
+                first_name = (original_data.get('first_name') or '').strip().lower()
+                last_name = (original_data.get('last_name') or '').strip().lower()
+                city = (original_data.get('city') or '').strip().lower()
+                state = (original_data.get('state') or '').strip().lower()
+                patent_number = (person.get('patent_number') or '').strip()
+                if first_name or last_name:
+                    person_id = f"{first_name}_{last_name}_{city}_{state}_{patent_number}"
+                    enriched_people.add(person_id)
+            logger.info(f"Found {len(enriched_people)} already enriched people")
+            return enriched_people, enriched_data
+        except Exception as e:
+            logger.warning(f"Error loading existing enrichment data: {e}")
+    return enriched_people, []
+
+def filter_already_enriched_people(people_data, already_enriched):
+    if not already_enriched:
+        return people_data
+    filtered_people = []
+    skipped_count = 0
+    for person in people_data:
+        first_name = (person.get('first_name') or '').strip().lower()
+        last_name = (person.get('last_name') or '').strip().lower()
+        city = (person.get('city') or '').strip().lower()
+        state = (person.get('state') or '').strip().lower()
+        patent_number = (person.get('patent_number') or '').strip()
+        if not first_name and not last_name:
+            skipped_count += 1
+            continue
+        person_id = f"{first_name}_{last_name}_{city}_{state}_{patent_number}"
+        if person_id not in already_enriched:
+            filtered_people.append(person)
+        else:
+            skipped_count += 1
+    if skipped_count > 0:
+        logger.info(f"Skipped {skipped_count} people (duplicates or missing names)")
+    return filtered_people
+def load_people_for_enrichment(config):
+    step1_people_file = 'output/new_people_for_enrichment.json'
+    if os.path.exists(step1_people_file):
+        try:
+            with open(step1_people_file, 'r') as f:
+                people_data = json.load(f)
+            logger.info(f"Loaded {len(people_data)} people from Step 1 results")
+            already_enriched, existing_data = load_existing_enrichment()
+            filtered_people = filter_already_enriched_people(people_data, already_enriched)
+            if len(filtered_people) < len(people_data):
+                logger.info(f"After filtering duplicates: {len(filtered_people)} people remain")
+            return filtered_people, existing_data
+        except Exception as e:
+            logger.error(f"Error loading people from Step 1: {e}")
+    logger.warning("No Step 1 people data found, will fall back to XML parsing")
+    return [], []
+
 def main():
-    """Run Step 2 using existing runner"""
-    print("🚀 STARTING STEP 2: ENRICH PATENT DATA")
+    """Run Step 2: Data Enrichment"""
+    # Support test mode via env or CLI flag (compat)
+    test_mode = os.getenv('STEP2_TEST_MODE', '').lower() == 'true' or ('--test' in sys.argv)
+    print("🚀 STARTING STEP 2: DATA ENRICHMENT" + (" (TEST MODE)" if test_mode else ""))
     print("=" * 60)
     
-    # Check if this step is needed
-    should_run, mock_result = check_if_step2_needed()
-    
-    if not should_run:
-        # Save the mock result and return success
-        config = load_config()
-        os.makedirs(config['OUTPUT_DIR'], exist_ok=True)
-        
-        results_file = os.path.join(config['OUTPUT_DIR'], 'extraction_results.json')
-        with open(results_file, 'w') as f:
-            json.dump(mock_result, f, indent=2, default=str)
-        
-        print("\n✅ STEP 2 COMPLETED (SKIPPED - USING XML DATA)!")
-        print("=" * 60)
-        print(f"📊 DATA SOURCE SUMMARY:")
-        print(f"   📋 Patents available from XML: {mock_result.get('total_patents', 0):,}")
-        print(f"   📄 Source: XML files from Step 1")
-        print(f"   🚫 API extraction skipped (not needed)")
-        
-        print(f"\n📁 DATA LOCATION:")
-        if mock_result.get('source') == 'step0_downloaded':
-            print(f"   📋 Patent data: output/downloaded_patents.json (from Step 0)")
-            print(f"   📄 Alternative: If Step 1 processed this data, also check output/filtered_new_patents.json")
-        else:
-            print(f"   📋 Patent data: output/filtered_new_patents.json (from Step 1)")
-            print(f"   👥 People data: output/new_people_for_enrichment.json (from Step 1)")
-        print(f"\n🔄 NEXT STEP:")
-        print(f"   Run Step 3 (Data Analysis) to interpret enriched data")
-        
-        return 0
-    
-    # Load configuration (same as main.py)
-    config = load_config()
-    
-    # Create output directory
+    config = load_config(test_mode)
     os.makedirs(config['OUTPUT_DIR'], exist_ok=True)
     
     try:
-        # Run the extraction using existing runner
-        logger.info("Starting patent extraction from USPTO API...")
-        print(f"📡 Extracting patents from last {config['DAYS_BACK']} days")
-        print(f"📊 Maximum results: {config['MAX_RESULTS']:,}")
+        people_to_enrich, existing_enriched_data = load_people_for_enrichment(config)
+        if people_to_enrich:
+            config['new_people_data'] = people_to_enrich
+            logger.info(f"Will enrich {len(people_to_enrich)} people")
         
-        result = run_patent_extraction(config)
+        # Backup existing enriched data if present
+        backup_existing_data = None
+        if os.path.exists(config['OUTPUT_JSON']):
+            with open(config['OUTPUT_JSON'], 'r') as f:
+                backup_existing_data = json.load(f)
+            logger.info(f"Backing up {len(backup_existing_data)} existing enriched records")
         
-        # Save results to JSON file for frontend
-        results_file = os.path.join(config['OUTPUT_DIR'], 'extraction_results.json')
+        # Run enrichment
+        logger.info("Starting data enrichment...")
+        print("💎 Enriching patent inventor and assignee data")
+        if config.get('PEOPLEDATALABS_API_KEY') == 'YOUR_PDL_API_KEY':
+            print("⚠️  Using mock data - configure PEOPLEDATALABS_API_KEY for real enrichment")
+        result = run_enrichment(config)
+        
+        # Merge with existing if needed
+        if result.get('success') and result.get('enriched_data'):
+            new_enriched_data = result['enriched_data']
+            if backup_existing_data:
+                combined_data = backup_existing_data + new_enriched_data
+                with open(config['OUTPUT_JSON'], 'w') as f:
+                    json.dump(combined_data, f, indent=2, default=str)
+                _export_combined_to_csv(combined_data, config['OUTPUT_CSV'])
+                result['total_enriched_records'] = len(combined_data)
+                result['new_records_added'] = len(new_enriched_data)
+                result['existing_records'] = len(backup_existing_data)
+            else:
+                result['total_enriched_records'] = len(new_enriched_data)
+                result['new_records_added'] = len(new_enriched_data)
+                result['existing_records'] = 0
+        
+        # Save results meta for frontend
+        results_file = os.path.join(config['OUTPUT_DIR'], 'enrichment_results.json')
         with open(results_file, 'w') as f:
             json.dump(result, f, indent=2, default=str)
         
-        # Print summary exactly like main.py
         if result.get('success'):
             print("\n✅ STEP 2 COMPLETED SUCCESSFULLY!")
             print("=" * 60)
-            print(f"📊 EXTRACTION SUMMARY:")
-            print(f"   📋 Total patents extracted: {result.get('total_patents', 0):,}")
-            
-            api_info = result.get('api_info', {})
-            if api_info:
-                print(f"   📡 API: {api_info.get('api_version', 'Unknown')}")
-                print(f"   📅 Date range: {api_info.get('date_range', 'Unknown')}")
-            
-            print(f"\n📁 OUTPUT FILES:")
-            for output_file in result.get('output_files', []):
-                if os.path.exists(output_file):
-                    file_size = os.path.getsize(output_file) / 1024  # KB
-                    print(f"   📄 {output_file} ({file_size:.1f} KB)")
-            
-            print(f"\n🔄 NEXT STEP:")
-            print(f"   Run Step 3 (Data Analysis) to interpret enriched data")
-            
+            print("📊 ENRICHMENT SUMMARY:")
+            print(f"   👥 People processed this run: {result.get('total_people', 0):,}")
+            print(f"   ✅ Successfully enriched this run: {result.get('enriched_count', 0):,}")
+            print(f"   📈 Enrichment rate: {result.get('enrichment_rate', 0):.1f}%")
+            if result.get('api_calls_saved'):
+                print(f"   💰 API calls saved by deduplication: {result.get('api_calls_saved', 0):,}")
+                print(f"   💵 Estimated cost savings: {result.get('estimated_cost_savings', '$0.00')}")
+            print(f"   💸 API cost for this run: {result.get('actual_api_cost', '$0.00')}")
+            if result.get('total_enriched_records'):
+                print(f"   📚 Total enriched records: {result.get('total_enriched_records', 0):,}")
+                print(f"   🆕 New records added: {result.get('new_records_added', 0):,}")
+                print(f"   📂 Existing records: {result.get('existing_records', 0):,}")
+            print("\n📁 OUTPUT FILES:")
+            if os.path.exists(config['OUTPUT_CSV']):
+                file_size = os.path.getsize(config['OUTPUT_CSV']) / 1024
+                print(f"   📄 {config['OUTPUT_CSV']} ({file_size:.1f} KB)")
+            if os.path.exists(config['OUTPUT_JSON']):
+                file_size = os.path.getsize(config['OUTPUT_JSON']) / 1024
+                print(f"   📄 {config['OUTPUT_JSON']} ({file_size:.1f} KB)")
         else:
             print(f"\n❌ STEP 2 FAILED: {result.get('error')}")
-            
-            # Show helpful troubleshooting info
-            if 'troubleshooting' in result:
-                print(f"\n🔧 TROUBLESHOOTING:")
-                for key, value in result['troubleshooting'].items():
-                    print(f"   • {key.replace('_', ' ').title()}: {value}")
-            
-            if 'help' in result:
-                print(f"\n💡 HELP: {result['help']}")
-            
-            # Suggest using XML data instead
-            step1_count = check_step0_patent_count()
-            if step1_count > 0:
-                print(f"\n💡 ALTERNATIVE:")
-                print(f"   Since Step 1 found {step1_count:,} patents from XML,")
-                print(f"   you can skip Step 2 and proceed directly to Step 3 (Data Analysis)")
-            
             return 1
-        
     except Exception as e:
         logger.error(f"Step 2 failed with error: {e}")
         print(f"\n❌ STEP 2 FAILED: {e}")
-        print(f"\n💡 SUGGESTION:")
-        print(f"   Since Step 1 found XML data, you can skip Step 2")
-        print(f"   and proceed directly to Step 3 (Data Analysis)")
         return 1
+    return 0
 
-def check_step1_patent_count():
-    """Helper to get patent count from Step 1"""
-    try:
-        with open('output/integration_results.json', 'r') as f:
-            step1_results = json.load(f)
-        return step1_results.get('new_patents_count', 0)
-    except:
-        return 0
+def _safe_join_list(data):
+    if not data:
+        return ''
+    if isinstance(data, list):
+        return ', '.join([item.get('address', str(item)) if isinstance(item, dict) and 'address' in item
+                         else item.get('number', str(item)) if isinstance(item, dict) and 'number' in item  
+                         else str(item) for item in data])
+    return str(data)
+
+def _export_combined_to_csv(enriched_data, filename):
+    import pandas as pd
+    if not enriched_data:
+        logger.warning("No enriched data to export")
+        return
+    rows = []
+    for data in enriched_data:
+        pdl_data = data.get('enriched_data', {}).get('pdl_data', {})
+        original_data = data.get('enriched_data', {}).get('original_data', {})
+        row = {
+            'patent_number': data.get('patent_number'),
+            'patent_title': data.get('patent_title'),
+            'original_name': data.get('original_name'),
+            'person_type': data.get('enriched_data', {}).get('person_type'),
+            'match_score': data.get('match_score'),
+            'api_method': data.get('enriched_data', {}).get('api_method'),
+            'original_first_name': original_data.get('first_name'),
+            'original_last_name': original_data.get('last_name'),
+            'original_city': original_data.get('city'),
+            'original_state': original_data.get('state'),
+            'original_country': original_data.get('country'),
+            'enriched_full_name': pdl_data.get('full_name'),
+            'enriched_first_name': pdl_data.get('first_name'),
+            'enriched_last_name': pdl_data.get('last_name'),
+            'enriched_emails': _safe_join_list(pdl_data.get('emails')),
+            'enriched_phone_numbers': _safe_join_list(pdl_data.get('phone_numbers')),
+            'enriched_linkedin_url': pdl_data.get('linkedin_url'),
+            'enriched_current_title': pdl_data.get('job_title'),
+            'enriched_current_company': pdl_data.get('job_company_name'),
+            'enriched_city': pdl_data.get('location_locality'),
+            'enriched_state': pdl_data.get('location_region'),
+            'enriched_country': pdl_data.get('location_country'),
+            'enriched_industry': pdl_data.get('industry'),
+        }
+        rows.append(row)
+    pd.DataFrame(rows).to_csv(filename, index=False)
+    logger.info(f"Exported {len(rows)} combined records to {filename}")
 
 if __name__ == "__main__":
     exit_code = main()

@@ -739,21 +739,24 @@
                     <div class="sample-data hidden" id="step1Sample"></div>
                 </div>
                 
-                <!-- Step 2: Extract Additional Patents (was Step 1) -->
+                <!-- Step 2: Data Enrichment -->
                 <div class="step" id="step2">
                     <div class="step-header">
-                        <div class="step-title">Step 2: Extract Additional Patents (USPTO API)</div>
+                        <div class="step-title">Step 2: Data Enrichment</div>
                         <div class="step-status status-ready" id="step2Status">Ready</div>
                     </div>
                     <div class="step-description">
-                        Extract additional patent data from the USPTO PatentsView API if needed. This step is only needed if Step 0 didn't download sufficient data. It will fetch patents from alternative sources or date ranges.
+                        Enrich patent inventor and assignee data using PeopleDataLabs API. This adds email addresses, LinkedIn profiles, current job information, and more contact details.
                     </div>
                     <div class="step-actions">
-                        <button class="btn btn-primary" onclick="runStep2()" id="step2Btn">
-                            🔍 Extract Additional Patents
+                        <button class="btn btn-test" onclick="runStep2(true)" id="step2TestBtn">
+                            🧪 Test Enrichment (2 people)
+                        </button>
+                        <button class="btn btn-primary" onclick="runStep2(false)" id="step2Btn" disabled>
+                            💎 Full Enrichment
                         </button>
                         <button class="btn btn-secondary" onclick="showSample('step2')" id="step2Sample">
-                            📋 View Sample
+                            👥 View Enriched Sample
                         </button>
                     </div>
                     
@@ -773,47 +776,10 @@
                     <div class="sample-data hidden" id="step2SampleData"></div>
                 </div>
                 
-                <!-- Step 3: Data Enrichment (was Step 2) -->
-                <div class="step" id="step3">
+                <!-- Step 3: Integration with Microsoft Dynamics CRM -->
+                <div class="step step-coming-soon" id="step3">
                     <div class="step-header">
-                        <div class="step-title">Step 3: Data Enrichment</div>
-                        <div class="step-status status-ready" id="step3Status">Ready</div>
-                    </div>
-                    <div class="step-description">
-                        Enrich patent inventor and assignee data using PeopleDataLabs API. This adds email addresses, LinkedIn profiles, current job information, and more contact details.
-                    </div>
-                    <div class="step-actions">
-                        <button class="btn btn-test" onclick="runStep3(true)" id="step3TestBtn">
-                            🧪 Test Enrichment (2 people)
-                        </button>
-                        <button class="btn btn-primary" onclick="runStep3(false)" id="step3Btn" disabled>
-                            💎 Full Enrichment
-                        </button>
-                        <button class="btn btn-secondary" onclick="showSample('step3')" id="step3Sample">
-                            👥 View Enriched Sample
-                        </button>
-                    </div>
-                    
-                    <!-- Progress display for Step 3 -->
-                    <div class="progress-info hidden" id="step3Progress">
-                        <div class="progress-message" id="step3ProgressMessage">Processing...</div>
-                        <div class="progress-bar">
-                            <div class="progress-fill" style="width: 0%" id="step3ProgressBar"></div>
-                        </div>
-                        <div class="elapsed-time" id="step3ElapsedTime">Elapsed: 0s</div>
-                    </div>
-                    
-                    <div class="file-info hidden" id="step3Files">
-                        <!-- File information will be populated by JavaScript -->
-                    </div>
-                    <div class="output-section hidden" id="step3Output"></div>
-                    <div class="sample-data hidden" id="step3SampleData"></div>
-                </div>
-                
-                <!-- Step 4: Integration with Microsoft Dynamics CRM -->
-                <div class="step step-coming-soon" id="step4">
-                    <div class="step-header">
-                        <div class="step-title">Step 4: Integration with Microsoft Dynamics CRM</div>
+                        <div class="step-title">Step 3: Integration with Microsoft Dynamics CRM</div>
                         <div class="step-status status-coming-soon">Coming Soon</div>
                     </div>
                     <div class="step-description">
@@ -832,10 +798,10 @@
                     </div>
                 </div>
                 
-                <!-- Step 5: Automating Email Outreach -->
-                <div class="step step-coming-soon" id="step5">
+                <!-- Step 4: Automating Email Outreach -->
+                <div class="step step-coming-soon" id="step4">
                     <div class="step-header">
-                        <div class="step-title">Step 5: Automating Email Outreach</div>
+                        <div class="step-title">Step 4: Automating Email Outreach</div>
                         <div class="step-status status-coming-soon">Coming Soon</div>
                     </div>
                     <div class="step-description">
@@ -854,10 +820,10 @@
                     </div>
                 </div>
                 
-                <!-- Step 6: Reporting -->
-                <div class="step step-coming-soon" id="step6">
+                <!-- Step 5: Reporting -->
+                <div class="step step-coming-soon" id="step5">
                     <div class="step-header">
-                        <div class="step-title">Step 6: Reporting</div>
+                        <div class="step-title">Step 5: Reporting</div>
                         <div class="step-status status-coming-soon">Coming Soon</div>
                     </div>
                     <div class="step-description">
@@ -918,11 +884,6 @@
             const statusGrid = document.getElementById('statusGrid');
             statusGrid.innerHTML = `
                 <div class="status-item">
-                    <h4>Downloaded Patents</h4>
-                    <div class="count">${currentStatus.counts?.downloadedPatents || 0}</div>
-                    <small>${currentStatus.step0?.downloadedPatents?.exists ? 'Available' : 'Not found'}</small>
-                </div>
-                <div class="status-item">
                     <h4>New People Found</h4>
                     <div class="count">${currentStatus.counts?.newPeople || 0}</div>
                     <small>${currentStatus.step1?.newPeople?.exists ? 'Available' : 'Not found'}</small>
@@ -935,15 +896,25 @@
                 <div class="status-item">
                     <h4>Enriched Data</h4>
                     <div class="count">${currentStatus.counts?.enrichedData || 0}</div>
-                    <small>${currentStatus.step3?.enrichedData?.exists ? 'Available' : 'Not found'}</small>
+                    <small>${currentStatus.step2?.enrichedData?.exists ? 'Available' : 'Not found'}</small>
                 </div>
             `;
             
             // Update step statuses - don't override running states
             updateStepStatus('step0', currentStatus.step0?.downloadedPatents?.exists, currentStatus.step0?.running);
             updateStepStatus('step1', currentStatus.step1?.integrationResults?.exists, currentStatus.step1?.running);
-            updateStepStatus('step2', currentStatus.step2?.rawPatents?.exists, currentStatus.step2?.running);
-            updateStepStatus('step3', currentStatus.step3?.enrichedData?.exists, currentStatus.step3?.running);
+            updateStepStatus('step2', currentStatus.step2?.enrichedData?.exists, currentStatus.step2?.running);
+
+            // Enable Step 2 buttons when Step 1 produced people
+            try {
+                const canEnrich = currentStatus.step1?.newPeople?.exists;
+                const step2Btn = document.getElementById('step2Btn');
+                const step2TestBtn = document.getElementById('step2TestBtn');
+                if (canEnrich) {
+                    if (step2Btn) step2Btn.disabled = false;
+                    if (step2TestBtn) step2TestBtn.disabled = false;
+                }
+            } catch (e) { /* no-op */ }
         }
         
         // Update individual step status
@@ -1424,51 +1395,23 @@
             }
         }
         
-        // Run Step 2 with proper async handling (was Step 1)
-        async function runStep2() {
-            setStepRunning('step2');
-            
-            try {
-                const response = await fetch('/api/step2', { method: 'POST' });
-                const result = await response.json();
-                
-                if (result.success && (result.status === 'started' || result.processing === true)) {
-                    console.log('Step 2 started, beginning polling...');
-                    startPolling('step2');
-                } else if (result.success) {
-                    setStepCompleted('step2', true);
-                    showOutput('step2', result.output);
-                    if (result.files) showFileInfo('step2', result.files);
-                    updateStatus();
-                } else {
-                    setStepCompleted('step2', false);
-                    showOutput('step2', `Error: ${result.error}`);
-                }
-            } catch (error) {
-                setStepCompleted('step2', false);
-                showOutput('step2', `Network error: ${error.message}`);
-            }
-        }
-        
-        // Run Step 3 with proper async handling (was Step 2)
-        async function runStep3(testMode = false) {
-            const stepId = 'step3';
-            const btnId = testMode ? 'step3TestBtn' : 'step3Btn';
-            
+        // Run Step 2 (Enrichment)
+        async function runStep2(testMode = false) {
+            const stepId = 'step2';
+            const btnId = testMode ? 'step2TestBtn' : 'step2Btn';
             setStepRunning(stepId);
-            document.getElementById(btnId).disabled = true;
-            
+            const btn = document.getElementById(btnId);
+            if (btn) btn.disabled = true;
             try {
-                const response = await fetch('/api/step3', {
+                const response = await fetch('/api/step2', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ testMode })
                 });
                 const result = await response.json();
-                
                 if (result.success && (result.status === 'started' || result.processing === true)) {
-                    console.log('Step 3 started, beginning polling...');
-                    startPolling('step3');
+                    console.log('Step 2 started, beginning polling...');
+                    startPolling('step2');
                 } else if (result.success) {
                     setStepCompleted(stepId, true);
                     showOutput(stepId, result.output);
@@ -1482,8 +1425,7 @@
                 setStepCompleted(stepId, false);
                 showOutput(stepId, `Network error: ${error.message}`);
             }
-            
-            document.getElementById(btnId).disabled = false;
+            if (btn) btn.disabled = false;
         }
         
         // Show output
@@ -1533,9 +1475,6 @@
                 } else if (sampleType.startsWith('step2')) {
                     stepId = 'step2';
                     sampleEl = document.getElementById('step2SampleData');
-                } else if (sampleType.startsWith('step3')) {
-                    stepId = 'step3';
-                    sampleEl = document.getElementById('step3SampleData');
                 }
                 
                 if (sampleEl) {

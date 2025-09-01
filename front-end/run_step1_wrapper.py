@@ -41,6 +41,7 @@ def load_config():
         'ENRICH_ONLY_NEW_PEOPLE': os.getenv('ENRICH_ONLY_NEW_PEOPLE', 'true').lower() == 'true',
         'MAX_ENRICHMENT_COST': int(os.getenv('MAX_ENRICHMENT_COST', '1000')),
         'OUTPUT_DIR': os.getenv('OUTPUT_DIR', 'output'),
+        'DEDUP_NEW_PEOPLE': os.getenv('DEDUP_NEW_PEOPLE', 'true').lower() == 'true',
     }
 
 def write_progress_update(stage, details=""):
@@ -179,6 +180,57 @@ def analyze_and_log_match_scores():
         print(f"   ❌ Error analyzing match scores: {e}")
         write_progress_update("Match analysis error", f"Error: {e}")
 
+def analyze_inventor_distribution():
+    """Post-run diagnostics: inventor-per-patent distribution and duplicates"""
+    try:
+        write_progress_update("Post-diagnostics", "Computing inventor distribution and duplicates")
+        patents_file = 'output/filtered_new_patents.json'
+        people_file = 'output/new_people_for_enrichment.json'
+        if not (os.path.exists(patents_file) and os.path.exists(people_file)):
+            print("   ❓ Skipping diagnostics: output files not found")
+            return
+        import json
+        with open(patents_file, 'r') as f:
+            patents = json.load(f)
+        with open(people_file, 'r') as f:
+            people = json.load(f)
+        # Inventors per patent distribution
+        inv_counts = {}
+        for p in patents:
+            c = len([i for i in p.get('inventors', [])])
+            inv_counts[c] = inv_counts.get(c, 0) + 1
+        total_patents = len(patents)
+        total_people = len(people)
+        avg_inv = (total_people / total_patents) if total_patents else 0
+        one_inv = inv_counts.get(1, 0)
+        two_inv = inv_counts.get(2, 0)
+        three_plus = sum(v for k, v in inv_counts.items() if k >= 3)
+        # Duplicate people (within new list) by name+city+state
+        def key(p):
+            return (
+                (p.get('first_name') or '').strip().lower(),
+                (p.get('last_name') or '').strip().lower(),
+                (p.get('city') or '').strip().lower(),
+                (p.get('state') or '').strip().lower(),
+            )
+        seen = set()
+        for p in people:
+            seen.add(key(p))
+        unique_people = len(seen)
+        dups = total_people - unique_people
+        print("\n📈 INVENTOR DISTRIBUTION (US patents only):")
+        print(f"   Patents analyzed: {total_patents:,}")
+        print(f"   Inventors found: {total_people:,}")
+        print(f"   Avg inventors per patent: {avg_inv:.2f}")
+        print(f"   Patents with 1 inventor: {one_inv:,}")
+        print(f"   Patents with 2 inventors: {two_inv:,}")
+        print(f"   Patents with 3+ inventors: {three_plus:,}")
+        print("\n👥 NEW PEOPLE DEDUP (name+city+state):")
+        print(f"   Unique people: {unique_people:,}")
+        print(f"   Duplicate entries: {dups:,} (same person across multiple patents)")
+    except Exception as e:
+        print(f"   ❌ Error computing inventor distribution: {e}")
+
 def print_filtering_summary(result):
     """Print US patent filtering summary"""
     us_filter = result.get('us_filter_result', {})
@@ -254,12 +306,15 @@ def main():
         print(f"   👥 Existing people in DB: {result.get('existing_people_count', 0):,}")
         print(f"   🆕 New patents found: {result.get('new_patents_count', 0):,}")
         print(f"   🆕 New people found: {result.get('new_people_count', 0):,}")
+        if result.get('dedup_new_people_removed') is not None:
+            print(f"   🔁 Duplicates removed (new people): {result.get('dedup_new_people_removed', 0):,}")
         print(f"   🔁 Duplicate patents avoided: {result.get('duplicate_patents_count', 0):,}")
         print(f"   🔁 Duplicate people avoided: {result.get('duplicate_people_count', 0):,}")
         print(f"   ⏱️  Total processing time: {elapsed_time/60:.1f} minutes")
         
         # Stage 6: Match score analysis
         analyze_and_log_match_scores()
+        analyze_inventor_distribution()
         
         # Stage 7: Cost analysis
         write_progress_update("Computing cost savings", "Calculating API cost savings from duplicate detection")

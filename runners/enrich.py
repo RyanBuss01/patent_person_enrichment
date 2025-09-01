@@ -1,5 +1,6 @@
 # =============================================================================
 # runners/enrich.py - SIMPLE AND FAST
+# Step 3: Data Enrichment using PeopleDataLabs API
 # =============================================================================
 import logging
 import json
@@ -63,21 +64,18 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
                 'api_calls_saved': len(people_to_enrich)
             }
         
-        # Limit for test mode
-        if config.get('TEST_MODE') and len(new_people_to_enrich) > 2:
+        # Limit for test mode (hard cap to 2 people)
+        if bool(config.get('TEST_MODE')) and len(new_people_to_enrich) > 2:
             new_people_to_enrich = new_people_to_enrich[:2]
             print(f"TEST MODE: Limited to {len(new_people_to_enrich)} people")
         
         print(f"STEP 4: Enriching {len(new_people_to_enrich)} people...")
         
-        # Enrich the new people
+        # Enrich the new people (now saves to SQL per record)
         newly_enriched = enrich_people_batch(new_people_to_enrich, config)
         
-        print(f"STEP 5: Saving {len(newly_enriched)} new enrichments to database...")
-        
-        # Save new enrichments to database
-        if newly_enriched:
-            save_enrichments_to_database(newly_enriched)
+        # Note: Each enrichment is now saved to SQL inside the loop
+        print(f"STEP 5: Saved {len(newly_enriched)} enrichments during processing")
         
         # Combine all enriched data for return - fix the join error here
         if existing_enriched and newly_enriched:
@@ -236,7 +234,28 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any]) ->
             print(f"Failed to initialize enricher: {e}")
             use_mock = True
     
+    # Prepare database connection for per-record saves
+    db_manager = None
+    conn_ctx = None
+    conn = None
+    cursor = None
+    try:
+        db_config = DatabaseConfig.from_env()
+        db_manager = DatabaseManager(db_config)
+        # Open a single connection for the loop
+        conn_ctx = db_manager.get_connection()
+        conn = conn_ctx.__enter__()
+        cursor = conn.cursor()
+    except Exception as e:
+        logger.warning(f"Could not open DB connection for per-record saves: {e}")
+        db_manager = None
+        conn = None
+        cursor = None
+
     for i, person in enumerate(people):
+        # Secondary safety: enforce test mode cap inside the loop
+        if bool(config.get('TEST_MODE')) and i >= 2:
+            break
         progress = i + 1
         total = len(people)
         person_name = f"{person.get('first_name', '')} {person.get('last_name', '')}"
@@ -314,6 +333,15 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any]) ->
             
             enriched_results.append(enrichment_result)
             print(f"  SUCCESS: Enriched {person_name}")
+
+            # Save immediately to SQL per record if possible
+            try:
+                if cursor is not None and conn is not None:
+                    _save_single_enrichment(cursor, enrichment_result)
+                    conn.commit()
+                    print(f"  💾 Saved to SQL: {person_name}")
+            except Exception as e:
+                logger.error(f"  Error saving enrichment for {person_name}: {e}")
             
         except Exception as e:
             print(f"  ERROR: Failed to enrich {person_name}: {e}")
@@ -326,8 +354,51 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any]) ->
         if not use_mock:
             time.sleep(0.1)
     
+    # Clean up DB connection context manager
+    try:
+        if conn_ctx is not None:
+            # Exit the context manager if we manually entered it
+            conn_ctx.__exit__(None, None, None)
+    except Exception:
+        pass
+
     print(f"Enriched {len(enriched_results)} out of {len(people)} people")
     return enriched_results
+
+
+def _save_single_enrichment(cursor, result: Dict[str, Any]):
+    """Save a single enrichment result using an existing cursor."""
+    # Extract data
+    original_data = result.get('enriched_data', {}).get('original_data', {})
+    if not original_data:
+        # Some mock/API paths may store under 'original_person'
+        original_data = result.get('enriched_data', {}).get('original_person', {})
+    enrichment_data = {
+        "original_person": original_data,
+        "enrichment_result": result,
+        "enrichment_metadata": {
+            "enriched_at": time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            "api_cost": 0.03
+        }
+    }
+    insert_query = """
+        INSERT INTO enriched_people (
+            first_name, last_name, city, state, country,
+            patent_number, person_type, enrichment_data, api_cost
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+    params = (
+        (original_data.get('first_name') or '').strip(),
+        (original_data.get('last_name') or '').strip(),
+        (original_data.get('city') or '').strip(),
+        (original_data.get('state') or '').strip(),
+        (original_data.get('country') or 'US').strip(),
+        original_data.get('patent_number', ''),
+        original_data.get('person_type', 'inventor'),
+        json.dumps(enrichment_data),
+        0.03
+    )
+    cursor.execute(insert_query, params)
 
 
 def save_enrichments_to_database(enriched_results: List[Dict[str, Any]]):

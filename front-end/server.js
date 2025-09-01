@@ -143,7 +143,8 @@ function createConfig() {
         'XML_FILE_PATH': "ipg250812.xml",
         'OUTPUT_DIR': process.env.OUTPUT_DIR || 'output',
         'OUTPUT_CSV': "output/enriched_patents.csv",
-        'OUTPUT_JSON': "output/enriched_patents.json"
+        'OUTPUT_JSON': "output/enriched_patents.json",
+        'DEDUP_NEW_PEOPLE': true
     };
 }
 
@@ -189,6 +190,28 @@ function getFileStats(filePath) {
         return { exists: false };
     } catch (error) {
         return { exists: false, error: error.message };
+    }
+}
+
+// Helper: get SQL counts via a small Python script
+function getSqlCounts() {
+    try {
+        const path = require('path');
+        const { spawnSync } = require('child_process');
+        const pythonPath = path.join(__dirname, '..', 'patent_env', 'bin', 'python3');
+        const scriptPath = path.join(__dirname, '..', 'scripts', 'get_sql_counts.py');
+        const env = {
+            ...process.env,
+            PYTHONPATH: path.join(__dirname, '..'),
+        };
+        const proc = spawnSync(pythonPath, [scriptPath], { env });
+        if (proc.status === 0) {
+            const out = proc.stdout.toString().trim();
+            return JSON.parse(out || '{}');
+        }
+        return {};
+    } catch (e) {
+        return {};
     }
 }
 
@@ -663,8 +686,9 @@ app.post('/api/finalize-verification', (req, res) => {
     }
 });
 
-// Step 2: Extract Additional Patents (was Step 1)
+// Step 2: Data Enrichment (moved up from Step 3)
 app.post('/api/step2', async (req, res) => {
+    const { testMode = false } = req.body;
     const stepId = 'step2';
     
     if (runningProcesses.has(stepId)) {
@@ -675,46 +699,27 @@ app.post('/api/step2', async (req, res) => {
     }
     
     try {
-        console.log('Starting Step 2: Extract Additional Patents from USPTO API (Async)');
-        
-        // Start the process asynchronously
-        runPythonScriptAsync('front-end/run_step2_wrapper.py', [], stepId)
+        console.log(`Starting Step 2: Data Enrichment${testMode ? ' (TEST MODE)' : ''} (Async)`);
+        const args = testMode ? ['--test'] : [];
+        runPythonScriptAsync('front-end/run_step2_wrapper.py', args, stepId)
             .then((result) => {
                 console.log('Step 2 completed successfully');
-                
-                // Check if Step 2 was skipped (using downloaded data instead)
-                const extractionResults = readJsonFile('output/extraction_results.json');
-                
-                let files;
-                if (extractionResults && extractionResults.skipped_api) {
-                    const downloadedPatents = readJsonFile('output/downloaded_patents.json');
-                    files = {
-                        rawPatents: {
-                            count: downloadedPatents ? downloadedPatents.length : 0,
-                            stats: getFileStats('output/downloaded_patents.json'),
-                            source: 'downloaded_data_from_step0'
-                        },
-                        rawPatentsCsv: { 
-                            exists: false, 
-                            note: 'Using downloaded data from Step 0 instead' 
-                        }
-                    };
-                } else {
-                    const rawPatents = readJsonFile('output/raw_patents.json');
-                    files = {
-                        rawPatents: {
-                            count: rawPatents ? rawPatents.length : 0,
-                            stats: getFileStats('output/raw_patents.json')
-                        },
-                        rawPatentsCsv: getFileStats('output/raw_patents.csv')
-                    };
-                }
-                
+                const enrichedData = readJsonFile('output/enriched_patents.json');
+                const enrichmentResults = readJsonFile('output/enrichment_results.json');
+                const files = {
+                    enrichedData: {
+                        count: enrichedData ? enrichedData.length : 0,
+                        stats: getFileStats('output/enriched_patents.json')
+                    },
+                    enrichedCsv: getFileStats('output/enriched_patents.csv'),
+                    enrichmentResults: getFileStats('output/enrichment_results.json')
+                };
                 runningProcesses.set(stepId + '_completed', {
                     completed: true,
                     success: true,
                     output: result.output,
                     files: files,
+                    results: enrichmentResults,
                     completedAt: new Date()
                 });
             })
@@ -734,15 +739,11 @@ app.post('/api/step2', async (req, res) => {
             success: true,
             status: 'started',
             processing: true,
-            message: 'Step 2 started successfully. Use /api/step2/status to check progress.'
+            message: `Step 2 started successfully${testMode ? ' (test mode)' : ''}. Use /api/step2/status to check progress.`
         });
-        
     } catch (error) {
         console.error('Step 2 startup error:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
@@ -822,6 +823,7 @@ app.get('/api/status', (req, res) => {
     const status = {
         step0: {
             downloadResults: getFileStats('output/download_results.json'),
+            // downloadedPatents metric removed from UI
             downloadedPatents: getFileStats('output/downloaded_patents.json'),
             running: runningProcesses.has('step0')
         },
@@ -832,16 +834,10 @@ app.get('/api/status', (req, res) => {
             running: runningProcesses.has('step1')
         },
         step2: {
-            rawPatents: getFileStats('output/raw_patents.json'),
-            rawPatentsCsv: getFileStats('output/raw_patents.csv'),
-            extractionResults: getFileStats('output/extraction_results.json'),
-            running: runningProcesses.has('step2')
-        },
-        step3: {
             enrichedData: getFileStats('output/enriched_patents.json'),
             enrichedCsv: getFileStats('output/enriched_patents.csv'),
             enrichmentResults: getFileStats('output/enrichment_results.json'),
-            running: runningProcesses.has('step3')
+            running: runningProcesses.has('step2')
         }
     };
     
@@ -850,23 +846,14 @@ app.get('/api/status', (req, res) => {
     const newPeople = readJsonFile('output/new_people_for_enrichment.json');
     const newPatents = readJsonFile('output/filtered_new_patents.json');
     const enrichedData = readJsonFile('output/enriched_patents.json');
-    
-    // For Step 2, check if it was skipped
-    const extractionResults = readJsonFile('output/extraction_results.json');
-    let rawPatentsCount = 0;
-    if (extractionResults && extractionResults.skipped_api) {
-        rawPatentsCount = downloadedPatents ? downloadedPatents.length : 0;
-    } else {
-        const rawPatents = readJsonFile('output/raw_patents.json');
-        rawPatentsCount = rawPatents ? rawPatents.length : 0;
-    }
+
+    // Pull enriched count from SQL
+    const sqlCounts = getSqlCounts();
     
     status.counts = {
-        downloadedPatents: downloadedPatents ? downloadedPatents.length : 0,
         newPeople: newPeople ? newPeople.length : 0,
         newPatents: newPatents ? newPatents.length : 0,
-        rawPatents: rawPatentsCount,
-        enrichedData: enrichedData ? enrichedData.length : 0
+        enrichedData: typeof sqlCounts.enriched_people === 'number' ? sqlCounts.enriched_people : (enrichedData ? enrichedData.length : 0)
     };
     
     // Add verification info
@@ -881,9 +868,7 @@ app.get('/api/status', (req, res) => {
         };
     }
     
-    // Add Step 2 status info
-    status.step2.skipped = extractionResults && extractionResults.skipped_api;
-    status.step2.source = extractionResults && extractionResults.skipped_api ? 'downloaded_data' : 'api_data';
+    // Step 2 now represents enrichment; no extraction status
     
     res.json(status);
 });
@@ -908,23 +893,6 @@ app.get('/api/sample/:step', (req, res) => {
                 if (sampleData) sampleData = sampleData.slice(0, 3);
                 break;
             case 'step2':
-                const extractionResults = readJsonFile('output/extraction_results.json');
-                if (extractionResults && extractionResults.skipped_api) {
-                    sampleData = readJsonFile('output/downloaded_patents.json');
-                    if (sampleData) {
-                        sampleData = sampleData.slice(0, 3);
-                        sampleData = {
-                            note: "Step 2 was skipped - showing downloaded data from Step 0 instead",
-                            source: "downloaded_patents.json (from Step 0)",
-                            data: sampleData
-                        };
-                    }
-                } else {
-                    sampleData = readJsonFile('output/raw_patents.json');
-                    if (sampleData) sampleData = sampleData.slice(0, 3);
-                }
-                break;
-            case 'step3':
                 sampleData = readJsonFile('output/enriched_patents.json');
                 if (sampleData) sampleData = sampleData.slice(0, 3);
                 break;
@@ -951,10 +919,8 @@ app.listen(PORT, () => {
     console.log('   GET  /api/step1/status - Check Step 1 progress');
     console.log('   GET  /api/verification-data - Get people needing verification');
     console.log('   POST /api/finalize-verification - Save verification decisions');
-    console.log('   POST /api/step2 - Extract additional patents (was Step 1)');
+    console.log('   POST /api/step2 - Data enrichment');
     console.log('   GET  /api/step2/status - Check Step 2 progress');
-    console.log('   POST /api/step3 - Data enrichment (was Step 2)');
-    console.log('   GET  /api/step3/status - Check Step 3 progress');
     console.log('   GET  /api/status - Get current pipeline status');
     console.log('   GET  /api/sample/:step - Get sample data');
     console.log('');

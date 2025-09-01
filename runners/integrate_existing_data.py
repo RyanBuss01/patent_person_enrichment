@@ -4,6 +4,7 @@
 # HYBRID: Load from SQL into memory for fast CSV-style matching
 # Replaces the slow SQL approach with fast in-memory processing
 # ENHANCED: Added US Patent filtering before database comparison
+# FIXED: Proper US filtering sequence to prevent foreign patents in people counting
 # =============================================================================
 
 import logging
@@ -14,6 +15,7 @@ from typing import Dict, Any, List, Tuple, Optional
 from pathlib import Path
 from datetime import datetime
 import uuid
+import re
 
 from classes.simple_xml_processor import process_xml_files
 
@@ -74,6 +76,7 @@ class HybridSQLMemoryIntegrator:
                 foreign_patents.append({
                     'patent_number': patent.get('patent_number'),
                     'country': patent.get('country_code', ''),
+                    'inventors': [{'country': inv.get('country', 'Unknown')} for inv in patent.get('inventors', [])],
                     'title': patent.get('patent_title', '')[:100] + '...' if patent.get('patent_title') else '',
                     'reason': 'Non-US patent'
                 })
@@ -106,15 +109,20 @@ class HybridSQLMemoryIntegrator:
         }
     
     def _is_us_patent(self, patent: Dict[str, Any]) -> bool:
-        """Only keep patents where ALL inventors have country = 'US'"""
+        """SIMPLE: Only keep patents where ALL inventors have country = 'US'"""
         
-        # Check all inventors - ALL must be US
-        for inventor in patent.get('inventors', []):
+        # Check all inventors - ALL must be explicitly US
+        inventors = patent.get('inventors', [])
+        if not inventors:
+            return False  # No inventors, can't determine origin
+        
+        for inventor in inventors:
             inventor_country = inventor.get('country')
-            if inventor_country is None or str(inventor_country).upper() != 'US':
+            # STRICT: Must be exactly 'US', reject everything else including None/null
+            if not inventor_country or str(inventor_country).upper() != 'US':
                 return False
         
-        # Only keep if ALL inventors are explicitly US
+        # Only keep if ALL inventors are explicitly 'US'
         return True
     
     def load_existing_data_from_sql(self) -> Dict[str, Any]:
@@ -356,10 +364,24 @@ class HybridSQLMemoryIntegrator:
         
         return 0
     
-    def filter_new_xml_data_fast(self, xml_patents: List[Dict]) -> Dict[str, Any]:
-        """Fast filtering with in-memory matching and enhanced progress"""
-        logger.info(f"Fast filtering of {len(xml_patents)} XML patents using in-memory data")
-        print(f"PROGRESS: Starting fast patent processing - {len(xml_patents):,} patents")
+    def filter_new_xml_data_fast(self, us_patents_only: List[Dict]) -> Dict[str, Any]:
+        """
+        FIXED: Fast filtering with in-memory matching - ONLY processes US patents
+        This function should only receive US patents, ensuring people count matches patent count
+        """
+        logger.info(f"Fast filtering of {len(us_patents_only)} US patents using in-memory data")
+        print(f"PROGRESS: Starting fast patent processing - {len(us_patents_only):,} US patents only")
+        
+        # Verify we're only getting US patents
+        non_us_count = 0
+        for patent in us_patents_only:
+            for inventor in patent.get('inventors', []):
+                if inventor.get('country') != 'US':
+                    non_us_count += 1
+        
+        if non_us_count > 0:
+            logger.warning(f"WARNING: Found {non_us_count} non-US inventors in supposedly US-only patents!")
+            print(f"WARNING: {non_us_count} non-US inventors found - filtering may have failed!")
         
         # Thresholds from VBA analysis
         AUTO_MATCH_THRESHOLD = 25
@@ -384,13 +406,13 @@ class HybridSQLMemoryIntegrator:
         
         # Process in batches for better progress reporting
         BATCH_SIZE = 100
-        total_batches = (len(xml_patents) + BATCH_SIZE - 1) // BATCH_SIZE
+        total_batches = (len(us_patents_only) + BATCH_SIZE - 1) // BATCH_SIZE
         
         for batch_num in range(total_batches):
             batch_start_time = time.time()
             start_idx = batch_num * BATCH_SIZE
-            end_idx = min((batch_num + 1) * BATCH_SIZE, len(xml_patents))
-            batch_patents = xml_patents[start_idx:end_idx]
+            end_idx = min((batch_num + 1) * BATCH_SIZE, len(us_patents_only))
+            batch_patents = us_patents_only[start_idx:end_idx]
             
             for patent in batch_patents:
                 patent_number = self._clean_patent_number(patent.get('patent_number', ''))
@@ -399,7 +421,7 @@ class HybridSQLMemoryIntegrator:
                 if is_new_patent:
                     new_patents.append(patent)
                     
-                    # Process inventors
+                    # Process inventors (should all be US)
                     for inventor in patent.get('inventors', []):
                         total_xml_people += 1
                         processed_people += 1
@@ -440,7 +462,7 @@ class HybridSQLMemoryIntegrator:
                                 'match_status': 'new'
                             })
                     
-                    # Process assignees with names
+                    # Process assignees with names (should also be US)
                     for assignee in patent.get('assignees', []):
                         if assignee.get('first_name') or assignee.get('last_name'):
                             total_xml_people += 1
@@ -481,7 +503,7 @@ class HybridSQLMemoryIntegrator:
                                 })
                 else:
                     duplicate_patents += 1
-                    # Count people for statistics
+                    # Count people for statistics even from duplicate patents
                     for inventor in patent.get('inventors', []):
                         total_xml_people += 1
                     for assignee in patent.get('assignees', []):
@@ -493,12 +515,20 @@ class HybridSQLMemoryIntegrator:
             elapsed = time.time() - start_time
             patents_processed = end_idx
             rate = patents_processed / elapsed if elapsed > 0 else 0
-            eta_minutes = ((len(xml_patents) - patents_processed) / rate / 60) if rate > 0 else 0
+            eta_minutes = ((len(us_patents_only) - patents_processed) / rate / 60) if rate > 0 else 0
             
-            progress_msg = f"Batch {batch_num + 1}/{total_batches} - Patent {patents_processed:,}/{len(xml_patents):,} ({patents_processed/len(xml_patents)*100:.1f}%) - People: {processed_people:,} - Rate: {rate:.1f}/sec - ETA: {eta_minutes:.1f}min"
+            progress_msg = f"Batch {batch_num + 1}/{total_batches} - Patent {patents_processed:,}/{len(us_patents_only):,} ({patents_processed/len(us_patents_only)*100:.1f}%) - People: {processed_people:,} - Rate: {rate:.1f}/sec - ETA: {eta_minutes:.1f}min"
             logger.info(progress_msg)
             print(f"PROGRESS: {progress_msg}")
         
+        # Optional deduplication of new people across patents
+        dedup_removed = 0
+        if self.config.get('DEDUP_NEW_PEOPLE', True) and new_people:
+            before = len(new_people)
+            new_people = self._dedup_new_people(new_people)
+            dedup_removed = before - len(new_people)
+            print(f"PROGRESS: Deduplicated new people - removed {dedup_removed:,}, remaining {len(new_people):,}")
+
         total_elapsed = time.time() - start_time
         logger.info(f"Fast processing complete in {total_elapsed/60:.1f} minutes")
         print(f"PROGRESS: COMPLETE - {len(new_patents):,} new patents, {len(new_people):,} people in {total_elapsed/60:.1f} minutes")
@@ -509,12 +539,52 @@ class HybridSQLMemoryIntegrator:
             'existing_people_found': existing_people_found,
             'duplicate_patents_count': duplicate_patents,
             'duplicate_people_count': len(existing_people_found),
-            'total_original_patents': len(xml_patents),
+            'total_original_patents': len(us_patents_only),  # FIXED: Only US patents
             'total_original_people': total_xml_people,
             'match_statistics': match_statistics,
             'processing_time_minutes': total_elapsed / 60,
-            'data_source': 'sql_database' if self.loaded_sql_data else 'csv_files'
+            'data_source': 'sql_database' if self.loaded_sql_data else 'csv_files',
+            'dedup_new_people_removed': dedup_removed
         }
+
+    def _dedup_new_people(self, people: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Deduplicate new people by name+city+state+person_type; aggregate patent numbers."""
+        seen: Dict[Tuple[str, str, str, str, str], Dict[str, Any]] = {}
+        for p in people:
+            fn = self._clean_string(p.get('first_name', '')).lower()
+            ln = self._clean_string(p.get('last_name', '')).lower()
+            city = self._clean_string(p.get('city', '')).lower()
+            state = self._clean_string(p.get('state', '')).lower()
+            ptype = self._clean_string(p.get('person_type', '')).lower()
+            key = (fn, ln, city, state, ptype)
+
+            patent_no = p.get('patent_number')
+            if key in seen:
+                # Aggregate patent numbers
+                assoc = seen[key].setdefault('associated_patents', set())
+                if patent_no:
+                    assoc.add(patent_no)
+                # Optionally keep highest match score
+                prev_score = seen[key].get('match_score', 0)
+                cur_score = p.get('match_score', 0)
+                if cur_score > prev_score:
+                    seen[key]['match_score'] = cur_score
+                    seen[key]['match_status'] = p.get('match_status')
+            else:
+                rec = dict(p)
+                rec['associated_patents'] = set()
+                if patent_no:
+                    rec['associated_patents'].add(patent_no)
+                seen[key] = rec
+
+        # Convert sets to sorted lists and add counts
+        deduped = []
+        for rec in seen.values():
+            assoc = sorted(list(rec.get('associated_patents', set())))
+            rec['associated_patents'] = assoc
+            rec['associated_patent_count'] = len(assoc)
+            deduped.append(rec)
+        return deduped
     
     def cleanup_memory(self):
         """Clean up memory after processing"""
@@ -552,23 +622,28 @@ class HybridSQLMemoryIntegrator:
             return ''
         
         clean_num = str(patent_num).strip().upper()
-        clean_num = clean_num.replace('US', '').replace('USPTO', '')
-        clean_num = clean_num.replace(',', '').replace(' ', '').replace('-', '')
+        # Remove common prefixes and design/plant/reissue prefixes
+        clean_num = re.sub(r'^(US|USPTO|US-)', '', clean_num)
+        clean_num = re.sub(r'^(D|PP|RE|H|T)', '', clean_num)
+        # Drop all non-digits
+        clean_num = re.sub(r'[^0-9]', '', clean_num)
+        # Remove leading zeros
         clean_num = clean_num.lstrip('0')
         
         return clean_num if clean_num and clean_num.isdigit() else ''
 
 
 # =============================================================================
-# MAIN RUNNER FUNCTION - ENHANCED WITH US PATENT FILTERING AND SUMMARY
+# MAIN RUNNER FUNCTION - FIXED SEQUENCE TO ENSURE PROPER US FILTERING
 # =============================================================================
 
 def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Main runner function with US patent filtering and comprehensive summary
+    FIXED: Main runner function with proper US patent filtering sequence
+    The bug was that people counting was happening before/alongside filtering
     """
     try:
-        # Step 1: Process XML files
+        # Step 1: Process XML files (all patents)
         xml_folder = config.get('USPC_DOWNLOAD_PATH', 'USPC_Download')
         output_folder = config.get('OUTPUT_DIR', 'output')
         
@@ -584,15 +659,16 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
                 'duplicate_patents_count': 0
             }
         
-        # Step 2: Filter to US patents only BEFORE database comparison
+        # Step 2: Filter to US patents FIRST, before any people processing
         integrator = HybridSQLMemoryIntegrator(config)
         
         us_filter_result = integrator.filter_us_patents_only(xml_patents)
-        us_patents = us_filter_result['us_patents']
+        us_patents_only = us_filter_result['us_patents']  # CRITICAL: Only pass US patents forward
         
-        logger.info(f"US patent filtering: {len(us_patents):,} US patents from {len(xml_patents):,} total")
+        logger.info(f"US patent filtering: {len(us_patents_only):,} US patents from {len(xml_patents):,} total")
+        print(f"PROGRESS: US filtering complete - {len(us_patents_only):,} US patents will be processed")
         
-        if not us_patents:
+        if not us_patents_only:
             return {
                 'success': False,
                 'error': 'No US patents found after filtering',
@@ -619,7 +695,7 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
                 new_people_data = []
                 total_xml_people = 0
                 
-                for patent in us_patents:
+                for patent in us_patents_only:  # FIXED: Use us_patents_only, not xml_patents
                     for inventor in patent.get('inventors', []):
                         new_people_data.append({
                             **inventor,
@@ -647,21 +723,22 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
                     'success': True,
                     'original_patents_count': len(xml_patents),
                     'foreign_patents_count': us_filter_result['foreign_patents_count'],
-                    'us_patents_count': len(us_patents),
+                    'us_patents_count': len(us_patents_only),
                     'existing_patents_count': 0,
                     'existing_people_count': 0,
-                    'new_patents_count': len(us_patents),
+                    'new_patents_count': len(us_patents_only),
                     'new_people_count': len(new_people_data),
                     'duplicate_patents_count': 0,
                     'duplicate_people_count': 0,
-                    'total_xml_patents': len(us_patents),
+                    'total_xml_patents': len(us_patents_only),  # FIXED: Count US patents only
                     'total_xml_people': total_xml_people,
                     'us_filter_result': us_filter_result,
                     'warning': 'No existing data found - all US patents treated as new'
                 }
         
         # Step 4: Filter US patents using fast in-memory matching
-        filter_result = integrator.filter_new_xml_data_fast(us_patents)
+        # CRITICAL: Pass us_patents_only, not xml_patents
+        filter_result = integrator.filter_new_xml_data_fast(us_patents_only)
         
         # Step 5: Clean up memory
         integrator.cleanup_memory()
@@ -686,7 +763,7 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
             'success': True,
             'original_patents_count': len(xml_patents),
             'foreign_patents_count': us_filter_result['foreign_patents_count'],
-            'us_patents_count': len(us_patents),
+            'us_patents_count': len(us_patents_only),
             'us_retention_rate': us_filter_result['us_retention_rate'],
             'existing_patents_count': load_result['existing_patents_count'],
             'existing_people_count': load_result['existing_people_count'],
@@ -694,13 +771,14 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
             'new_people_count': len(filter_result['new_people']),
             'duplicate_patents_count': filter_result['duplicate_patents_count'],
             'duplicate_people_count': filter_result['duplicate_people_count'],
-            'total_xml_patents': filter_result['total_original_patents'],
-            'total_xml_people': filter_result['total_original_people'],
+            'total_xml_patents': filter_result['total_original_patents'],  # Should now be US patents only
+            'total_xml_people': filter_result['total_original_people'],    # Should now be US people only
             'match_statistics': filter_result['match_statistics'],
             'processing_time_minutes': filter_result['processing_time_minutes'],
             'data_source': filter_result['data_source'],
             'us_filter_result': us_filter_result,
-            'new_people_data': filter_result['new_people']  # For enrichment step
+            'new_people_data': filter_result['new_people'],  # For enrichment step
+            'dedup_new_people_removed': filter_result.get('dedup_new_people_removed', 0)
         }
         
         # Log comprehensive summary
