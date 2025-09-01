@@ -77,8 +77,16 @@ class DatabaseManager:
                 conn.rollback()
             raise
         finally:
-            if conn and conn.is_connected():
-                conn.close()
+            if conn:
+                try:
+                    # MySQL connector has is_connected(); sqlite3 does not
+                    if hasattr(conn, 'is_connected'):
+                        if conn.is_connected():
+                            conn.close()
+                    else:
+                        conn.close()
+                except Exception:
+                    pass
     
     def test_connection(self) -> bool:
         """Test database connection"""

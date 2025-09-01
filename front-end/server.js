@@ -265,11 +265,21 @@ function getSqlCounts() {
     try {
         const pythonPath = resolvePython();
         const scriptPath = path.join(__dirname, '..', 'scripts', 'get_sql_counts.py');
+
+        // Ensure Python can import local modules and has DB config
         const env = {
             ...process.env,
             PYTHONPATH: path.join(__dirname, '..'),
+            // Map SQL_* -> DB_* for Python helpers
+            DB_HOST: process.env.DB_HOST || process.env.SQL_HOST || 'localhost',
+            DB_PORT: process.env.DB_PORT || process.env.SQL_PORT || '3306',
+            DB_NAME: process.env.DB_NAME || process.env.SQL_DATABASE || 'patent_data',
+            DB_USER: process.env.DB_USER || process.env.SQL_USER || 'root',
+            DB_PASSWORD: process.env.DB_PASSWORD || process.env.SQL_PASSWORD || 'password',
+            DB_ENGINE: (process.env.DB_ENGINE || 'mysql').toLowerCase()
         };
-        const proc = spawnSync(pythonPath, [scriptPath], { env });
+
+        const proc = spawnSync(pythonPath, [scriptPath], { env, cwd: path.join(__dirname, '..') });
         if (proc.status === 0) {
             const out = proc.stdout.toString().trim();
             return JSON.parse(out || '{}');
