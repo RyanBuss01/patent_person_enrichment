@@ -448,7 +448,9 @@ class HybridSQLMemoryIntegrator:
                                 'person_id': f"{patent_number}_inventor_{processed_people}",
                                 'match_score': best_score,
                                 'match_status': 'needs_review',
-                                'verification_needed': True
+                                'verification_needed': True,
+                                # Include top candidate matches for frontend review
+                                'potential_matches': matches[:5]
                             })
                         else:
                             match_statistics['definitely_new'] += 1
@@ -488,7 +490,9 @@ class HybridSQLMemoryIntegrator:
                                     'person_id': f"{patent_number}_assignee_{processed_people}",
                                     'match_score': best_score,
                                     'match_status': 'needs_review',
-                                    'verification_needed': True
+                                    'verification_needed': True,
+                                    # Include top candidate matches for frontend review
+                                    'potential_matches': matches[:5]
                                 })
                             else:
                                 match_statistics['definitely_new'] += 1
@@ -570,6 +574,9 @@ class HybridSQLMemoryIntegrator:
                 if cur_score > prev_score:
                     seen[key]['match_score'] = cur_score
                     seen[key]['match_status'] = p.get('match_status')
+                    # If the newer record has candidate matches, prefer them
+                    if 'potential_matches' in p:
+                        seen[key]['potential_matches'] = p.get('potential_matches')
             else:
                 rec = dict(p)
                 rec['associated_patents'] = set()

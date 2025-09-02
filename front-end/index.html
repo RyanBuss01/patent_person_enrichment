@@ -693,7 +693,7 @@
                             📋 View Sample Patents
                         </button>
                         <button class="btn btn-test hidden" onclick="startVerification()" id="step1VerifyBtn">
-                            🔍 Review Potential Matches
+                            🔍 Review Potential Matches (optional)
                         </button>
                     </div>
                     
@@ -1264,7 +1264,7 @@
                             <div class="match-score">Match Score: ${match[1]}</div>
                             <div><strong>Name:</strong> ${match[0].first_name || ''} ${match[0].last_name || ''}</div>
                             <div><strong>Location:</strong> ${match[0].city || ''}, ${match[0].state || ''}</div>
-                            <div><strong>Source:</strong> ${match[0].source_file || 'Unknown'}</div>
+                            <div><strong>Source:</strong> ${match[0].source_file || match[0].source || 'Unknown'}</div>
                         </div>
                     `;
                 });
