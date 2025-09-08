@@ -12,13 +12,24 @@ from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Add the parent directory to sys.path so we can import our modules
-sys.path.append(str(Path(__file__).parent.paresnt))
+# Add the project root to sys.path so we can import our modules
+try:
+    project_root = Path(__file__).resolve().parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.append(str(project_root))
+except Exception:
+    pass
 
 from runners.integrate_existing_data import run_existing_data_integration
 
 # Load environment variables
 load_dotenv()
+
+# Ensure output directory exists for logs and artifacts
+try:
+    Path('output').mkdir(exist_ok=True)
+except Exception:
+    pass
 
 # Configure logging with more detailed output
 logging.basicConfig(

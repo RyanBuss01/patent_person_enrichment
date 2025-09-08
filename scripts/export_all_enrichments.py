@@ -20,6 +20,11 @@ def _flatten(obj, prefix='', out=None):
         if prefix:
             out[prefix] = ''
         return out
+    # Treat booleans as empty in CSV export
+    if isinstance(obj, bool):
+        if prefix:
+            out[prefix] = ''
+        return out
     if isinstance(obj, list):
         out[prefix] = json.dumps(obj, ensure_ascii=False)
         return out
@@ -32,7 +37,8 @@ def _flatten(obj, prefix='', out=None):
             _flatten(v, key, out)
         return out
     # Primitive
-    out[prefix] = str(obj)
+    val = '' if str(obj).strip().lower() in {'nan', 'none', 'null'} else str(obj)
+    out[prefix] = val
     return out
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -80,11 +86,28 @@ def main():
             header_set.add(k)
 
     headers = sorted(header_set)
-    writer = csv.DictWriter(sys.stdout, fieldnames=headers)
+
+    # Simplify headers to last dotted segment with collision-safe suffixes
+    def simplify_headers(cols):
+        mapping = {}
+        counts = {}
+        display = []
+        for c in cols:
+            base = c.split('.')[-1]
+            n = counts.get(base, 0) + 1
+            counts[base] = n
+            name = base if n == 1 else f"{base}_{n}"
+            mapping[c] = name
+            display.append(name)
+        return mapping, display
+
+    mapping, display_headers = simplify_headers(headers)
+
+    writer = csv.DictWriter(sys.stdout, fieldnames=display_headers)
     writer.writeheader()
     for out in flat_rows:
-        # Fill missing keys with ''
-        normalized = {h: out.get(h, '') for h in headers}
+        # Remap to display headers, fill missing keys with ''
+        normalized = {mapping[h]: out.get(h, '') for h in headers}
         writer.writerow(normalized)
 
 

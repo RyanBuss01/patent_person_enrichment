@@ -109,20 +109,33 @@ class HybridSQLMemoryIntegrator:
         }
     
     def _is_us_patent(self, patent: Dict[str, Any]) -> bool:
-        """SIMPLE: Only keep patents where ALL inventors have country = 'US'"""
-        
-        # Check all inventors - ALL must be explicitly US
+        """Keep patents where ALL inventors are US by country OR US state.
+
+        More tolerant than strict 'US' country-only check to handle uploads
+        where country is missing but state is present (e.g., 'CA', 'TX').
+        """
+
         inventors = patent.get('inventors', [])
         if not inventors:
-            return False  # No inventors, can't determine origin
-        
+            return False
+
+        US_STATE_CODES = {
+            'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA','ME','MD',
+            'MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC',
+            'SD','TN','TX','UT','VT','VA','WA','WV','WI','WY','DC','PR'
+        }
+
         for inventor in inventors:
-            inventor_country = inventor.get('country')
-            # STRICT: Must be exactly 'US', reject everything else including None/null
-            if not inventor_country or str(inventor_country).upper() != 'US':
+            c = (inventor.get('country') or '').strip().upper()
+            s = (inventor.get('state') or '').strip().upper()
+            is_us = False
+            if c in {'US', 'USA', 'UNITED STATES', 'UNITED STATES OF AMERICA'}:
+                is_us = True
+            elif s in US_STATE_CODES:
+                is_us = True
+            if not is_us:
                 return False
-        
-        # Only keep if ALL inventors are explicitly 'US'
+
         return True
     
     def load_existing_data_from_sql(self) -> Dict[str, Any]:
@@ -372,11 +385,17 @@ class HybridSQLMemoryIntegrator:
         logger.info(f"Fast filtering of {len(us_patents_only)} US patents using in-memory data")
         print(f"PROGRESS: Starting fast patent processing - {len(us_patents_only):,} US patents only")
         
-        # Verify we're only getting US patents
+        # Verify we're only getting US patents (using the same tolerant logic)
         non_us_count = 0
         for patent in us_patents_only:
             for inventor in patent.get('inventors', []):
-                if inventor.get('country') != 'US':
+                c = (inventor.get('country') or '').strip().upper()
+                s = (inventor.get('state') or '').strip().upper()
+                if c not in {'US', 'USA', 'UNITED STATES', 'UNITED STATES OF AMERICA'} and s not in {
+                    'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA','ME','MD',
+                    'MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC',
+                    'SD','TN','TX','UT','VT','VA','WA','WV','WI','WY','DC','PR'
+                }:
                     non_us_count += 1
         
         if non_us_count > 0:
@@ -391,6 +410,7 @@ class HybridSQLMemoryIntegrator:
         new_patents = []
         new_people = []
         existing_people_found = []
+        same_name_diff_address = []  # Track candidates where name matches but address differs
         duplicate_patents = 0
         total_xml_people = 0
         processed_people = 0
@@ -428,16 +448,56 @@ class HybridSQLMemoryIntegrator:
                         
                         matches = self.find_person_matches_fast(inventor)
                         best_score = matches[0][1] if matches else 0
+
+                        # Detect same-name different-address scenario (use top match)
+                        moved_candidate = None
+                        if matches:
+                            top_existing, top_score = matches[0]
+                            try:
+                                tf = self._clean_string(inventor.get('first_name', '')).lower()
+                                tl = self._clean_string(inventor.get('last_name', '')).lower()
+                                tc = self._clean_string(inventor.get('city', '')).lower()
+                                ts = self._clean_string(inventor.get('state', '')).lower()
+                                ef = top_existing.get('first_name', '')
+                                el = top_existing.get('last_name', '')
+                                ec = top_existing.get('city', '')
+                                es = top_existing.get('state', '')
+                                names_equal = (tf and tl and tf == ef and tl == el)
+                                # Consider address different if both have any location component and differ
+                                addr_diff = (tc or ts or ec or es) and (tc != ec or ts != es)
+                                if names_equal and addr_diff:
+                                    moved_candidate = {
+                                        'new_person': {
+                                            **inventor,
+                                            'patent_number': patent_number,
+                                            'patent_title': patent.get('patent_title'),
+                                            'person_type': 'inventor',
+                                            'person_id': f"{patent_number}_inventor_{processed_people}",
+                                            'match_score': top_score,
+                                            'match_status': 'same_name_diff_address'
+                                        },
+                                        'existing_person': top_existing,
+                                        'matched_score': top_score,
+                                        'reason': 'same_name_different_address'
+                                    }
+                            except Exception:
+                                moved_candidate = None
                         
                         self._update_match_statistics(match_statistics, best_score)
                         
                         if best_score >= AUTO_MATCH_THRESHOLD:
                             match_statistics['auto_matched'] += 1
-                            existing_people_found.append({
+                            # Add reason and linked existing when available
+                            record = {
                                 **inventor,
                                 'match_score': best_score,
                                 'match_reason': 'auto_matched'
-                            })
+                            }
+                            if moved_candidate is not None:
+                                record['match_reason'] = 'moved'
+                                record['matched_existing'] = moved_candidate.get('existing_person')
+                                same_name_diff_address.append(moved_candidate)
+                            existing_people_found.append(record)
                         elif best_score >= REVIEW_THRESHOLD:
                             match_statistics['needs_review'] += 1
                             new_people.append({
@@ -472,14 +532,52 @@ class HybridSQLMemoryIntegrator:
                             
                             matches = self.find_person_matches_fast(assignee)
                             best_score = matches[0][1] if matches else 0
+
+                            # Detect same-name different-address scenario (use top match)
+                            moved_candidate = None
+                            if matches:
+                                top_existing, top_score = matches[0]
+                                try:
+                                    tf = self._clean_string(assignee.get('first_name', '')).lower()
+                                    tl = self._clean_string(assignee.get('last_name', '')).lower()
+                                    tc = self._clean_string(assignee.get('city', '')).lower()
+                                    ts = self._clean_string(assignee.get('state', '')).lower()
+                                    ef = top_existing.get('first_name', '')
+                                    el = top_existing.get('last_name', '')
+                                    ec = top_existing.get('city', '')
+                                    es = top_existing.get('state', '')
+                                    names_equal = (tf and tl and tf == ef and tl == el)
+                                    addr_diff = (tc or ts or ec or es) and (tc != ec or ts != es)
+                                    if names_equal and addr_diff:
+                                        moved_candidate = {
+                                            'new_person': {
+                                                **assignee,
+                                                'patent_number': patent_number,
+                                                'patent_title': patent.get('patent_title'),
+                                                'person_type': 'assignee',
+                                                'person_id': f"{patent_number}_assignee_{processed_people}",
+                                                'match_score': top_score,
+                                                'match_status': 'same_name_diff_address'
+                                            },
+                                            'existing_person': top_existing,
+                                            'matched_score': top_score,
+                                            'reason': 'same_name_different_address'
+                                        }
+                                except Exception:
+                                    moved_candidate = None
                             
                             if best_score >= AUTO_MATCH_THRESHOLD:
                                 match_statistics['auto_matched'] += 1
-                                existing_people_found.append({
+                                record = {
                                     **assignee,
                                     'match_score': best_score,
                                     'match_reason': 'auto_matched'
-                                })
+                                }
+                                if moved_candidate is not None:
+                                    record['match_reason'] = 'moved'
+                                    record['matched_existing'] = moved_candidate.get('existing_person')
+                                    same_name_diff_address.append(moved_candidate)
+                                existing_people_found.append(record)
                             elif best_score >= REVIEW_THRESHOLD:
                                 match_statistics['needs_review'] += 1
                                 new_people.append({
@@ -548,7 +646,9 @@ class HybridSQLMemoryIntegrator:
             'match_statistics': match_statistics,
             'processing_time_minutes': total_elapsed / 60,
             'data_source': 'sql_database' if self.loaded_sql_data else 'csv_files',
-            'dedup_new_people_removed': dedup_removed
+            'dedup_new_people_removed': dedup_removed,
+            'same_name_diff_address': same_name_diff_address,
+            'same_name_diff_address_count': len(same_name_diff_address)
         }
 
     def _dedup_new_people(self, people: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -650,12 +750,28 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
     The bug was that people counting was happening before/alongside filtering
     """
     try:
-        # Step 1: Process XML files (all patents)
+        # Step 1: Load patents from Step 0 output if present; otherwise process XML files
         xml_folder = config.get('USPC_DOWNLOAD_PATH', 'USPC_Download')
         output_folder = config.get('OUTPUT_DIR', 'output')
-        
-        logger.info("Processing XML patent files...")
-        xml_patents = process_xml_files(xml_folder, output_folder)
+
+        step0_patents_path = Path(output_folder) / 'downloaded_patents.json'
+        xml_patents = None
+        input_source = 'xml_files'
+
+        if step0_patents_path.exists():
+            try:
+                with open(step0_patents_path, 'r') as f:
+                    xml_patents = json.load(f)
+                input_source = 'step0_downloaded'
+                logger.info(f"Loaded {len(xml_patents) if isinstance(xml_patents, list) else 0} patents from Step 0 output: {step0_patents_path}")
+                print(f"PROGRESS: Using patents from Step 0 output ({step0_patents_path})")
+            except Exception as e:
+                logger.warning(f"Failed to read {step0_patents_path}: {e}. Falling back to XML files.")
+
+        if not xml_patents:
+            logger.info("Processing XML patent files (fallback)...")
+            xml_patents = process_xml_files(xml_folder, output_folder)
+            input_source = 'xml_files'
         
         if not xml_patents:
             return {
@@ -672,7 +788,7 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
         us_filter_result = integrator.filter_us_patents_only(xml_patents)
         us_patents_only = us_filter_result['us_patents']  # CRITICAL: Only pass US patents forward
         
-        logger.info(f"US patent filtering: {len(us_patents_only):,} US patents from {len(xml_patents):,} total")
+        logger.info(f"US patent filtering: {len(us_patents_only):,} US patents from {len(xml_patents):,} total (source={input_source})")
         print(f"PROGRESS: US filtering complete - {len(us_patents_only):,} US patents will be processed")
         
         if not us_patents_only:
@@ -762,6 +878,13 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
             
             with open(Path(output_folder) / 'existing_people_found.json', 'w') as f:
                 json.dump(filter_result['existing_people_found'], f, indent=2, default=str)
+
+            # Save same-name different-address candidates for UI review
+            try:
+                with open(Path(output_folder) / 'same_name_diff_address.json', 'w') as f:
+                    json.dump(filter_result.get('same_name_diff_address', []), f, indent=2, default=str)
+            except Exception as e:
+                logger.warning(f"Could not save same_name_diff_address.json: {e}")
             
             logger.info(f"Saved results to {output_folder}")
         
@@ -785,7 +908,9 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
             'data_source': filter_result['data_source'],
             'us_filter_result': us_filter_result,
             'new_people_data': filter_result['new_people'],  # For enrichment step
-            'dedup_new_people_removed': filter_result.get('dedup_new_people_removed', 0)
+            'dedup_new_people_removed': filter_result.get('dedup_new_people_removed', 0),
+            'same_name_diff_address_count': filter_result.get('same_name_diff_address_count', 0),
+            'input_source': input_source
         }
         
         # Log comprehensive summary

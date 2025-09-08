@@ -11,6 +11,155 @@ from pathlib import Path
 from classes.people_data_labs_enricher import PeopleDataLabsEnricher
 from database.db_manager import DatabaseManager, DatabaseConfig
 
+
+def _person_signature(person: Dict[str, Any]) -> str:
+    """Build a stable signature for a person used for matching/skipping."""
+    first_name = (person.get('first_name') or '').strip().lower()
+    last_name = (person.get('last_name') or '').strip().lower()
+    city = (person.get('city') or '').strip().lower()
+    state = (person.get('state') or '').strip().lower()
+    patent_number = (person.get('patent_number') or '').strip()
+    return f"{first_name}_{last_name}_{city}_{state}_{patent_number}"
+
+
+def _ensure_failed_table(conn, engine: str):
+    """Ensure failed_enrichments table exists with a reasonable schema."""
+    cursor = conn.cursor()
+    if engine == 'sqlite':
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS failed_enrichments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                first_name TEXT,
+                last_name TEXT,
+                city TEXT,
+                state TEXT,
+                country TEXT,
+                patent_number TEXT,
+                person_type TEXT,
+                failure_reason TEXT,
+                failure_code TEXT,
+                attempt_count INTEGER DEFAULT 1,
+                last_attempt_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                raw_person TEXT,
+                context TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(first_name,last_name,city,state,patent_number,person_type)
+            )
+            """
+        )
+    else:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS failed_enrichments (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                first_name VARCHAR(100),
+                last_name VARCHAR(100),
+                city VARCHAR(100),
+                state VARCHAR(50),
+                country VARCHAR(100),
+                patent_number VARCHAR(50),
+                person_type VARCHAR(50),
+                failure_reason TEXT,
+                failure_code VARCHAR(100),
+                attempt_count INT DEFAULT 1,
+                last_attempt_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                raw_person JSON,
+                context JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uniq_failed_person (first_name,last_name,city,state,patent_number,person_type),
+                INDEX idx_person (last_name, first_name, state, city)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+        )
+    try:
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _record_failed_enrichment(cursor, engine: str, person: Dict[str, Any], reason: str, failure_code: Optional[str] = None):
+    """Insert or update a failed enrichment record."""
+    # Normalize person fields
+    first_name = (person.get('first_name') or '').strip()
+    last_name = (person.get('last_name') or '').strip()
+    city = (person.get('city') or '').strip()
+    state = (person.get('state') or '').strip()
+    country = (person.get('country') or 'US').strip()
+    patent_number = (person.get('patent_number') or '').strip()
+    person_type = (person.get('person_type') or 'inventor').strip()
+
+    if engine == 'sqlite':
+        query = (
+            "INSERT INTO failed_enrichments (first_name,last_name,city,state,country,patent_number,person_type,failure_reason,failure_code,raw_person,context) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(first_name,last_name,city,state,patent_number,person_type) DO UPDATE SET "
+            "attempt_count = attempt_count + 1, last_attempt_at = CURRENT_TIMESTAMP, failure_reason=excluded.failure_reason, failure_code=excluded.failure_code"
+        )
+        params = (
+            first_name, last_name, city, state, country, patent_number, person_type,
+            reason, failure_code or '', json.dumps(person), json.dumps({'stage': 'enrichment'})
+        )
+    else:
+        query = (
+            "INSERT INTO failed_enrichments "
+            "(first_name,last_name,city,state,country,patent_number,person_type,failure_reason,failure_code,raw_person,context) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE attempt_count=attempt_count+1, last_attempt_at=CURRENT_TIMESTAMP, failure_reason=VALUES(failure_reason), failure_code=VALUES(failure_code)"
+        )
+        params = (
+            first_name, last_name, city, state, country, patent_number, person_type,
+            reason, failure_code or '', json.dumps(person), json.dumps({'stage': 'enrichment'})
+        )
+    cursor.execute(query, params)
+
+
+def _load_failed_signatures(db_config: DatabaseConfig) -> set:
+    """Load signatures for people who previously failed to enrich."""
+    try:
+        db_manager = DatabaseManager(db_config)
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            # Check table existence first to avoid noisy errors in context manager
+            exists = False
+            try:
+                if db_config.engine == 'sqlite':
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='failed_enrichments'")
+                    exists = bool(cursor.fetchone())
+                else:
+                    cursor.execute(
+                        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=%s AND table_name=%s",
+                        (db_config.database, 'failed_enrichments')
+                    )
+                    row = cursor.fetchone()
+                    exists = bool(row and (row[0] if not isinstance(row, dict) else list(row.values())[0]))
+            except Exception:
+                exists = False
+            if not exists:
+                return set()
+            cursor.execute(
+                "SELECT first_name, last_name, city, state, patent_number, person_type FROM failed_enrichments"
+            )
+            rows = cursor.fetchall() or []
+            failed = set()
+            for r in rows:
+                if isinstance(r, dict):
+                    person = {
+                        'first_name': r.get('first_name'), 'last_name': r.get('last_name'),
+                        'city': r.get('city'), 'state': r.get('state'),
+                        'patent_number': r.get('patent_number')
+                    }
+                else:
+                    first_name, last_name, city, state, patent_number, _ptype = r
+                    person = {
+                        'first_name': first_name, 'last_name': last_name,
+                        'city': city, 'state': state, 'patent_number': patent_number
+                    }
+                failed.add(_person_signature(person))
+            return failed
+    except Exception:
+        return set()
+
 logger = logging.getLogger(__name__)
 
 def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -44,17 +193,38 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
         # Filter out already enriched people (FAST in-memory check)
         new_people_to_enrich = []
         skipped_count = 0
+        skipped_failed_count = 0
+        skipped_duplicate_count = 0
         matched_existing_for_this_run: List[Dict[str, Any]] = []
+        # Express mode: skip previously failed enrichments
+        express_mode = bool(config.get('EXPRESS_MODE'))
+        failed_set = set()
+        if express_mode:
+            print("Express mode enabled: loading failed enrichments to skip...")
+            failed_set = _load_failed_signatures(DatabaseConfig.from_env())
+            print(f"Loaded {len(failed_set)} failed signatures to skip in express mode")
         
         for person in people_to_enrich:
+            if express_mode and _person_signature(person) in failed_set:
+                skipped_failed_count += 1
+                skipped_count += 1
+                continue
             match = find_existing_enriched_match(person, existing_enriched)
             if match is not None:
+                skipped_duplicate_count += 1
                 skipped_count += 1
                 matched_existing_for_this_run.append(match)
             else:
                 new_people_to_enrich.append(person)
-        
-        print(f"After duplicate check: {len(new_people_to_enrich)} new people, {skipped_count} already enriched")
+
+        # Detailed summary of filtering
+        print(
+            "After duplicate check: "
+            f"{len(new_people_to_enrich)} new people, "
+            f"{skipped_duplicate_count} duplicates, "
+            f"{skipped_failed_count} skipped (previously failed), "
+            f"{skipped_count} total skipped"
+        )
         
         if not new_people_to_enrich:
             return {
@@ -63,8 +233,11 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
                 'total_people': len(people_to_enrich),
                 'enriched_count': 0,
                 'enriched_data': existing_enriched,
+                'matched_existing': matched_existing_for_this_run,
                 'actual_api_cost': '$0.00',
-                'api_calls_saved': len(people_to_enrich)
+                'api_calls_saved': len(people_to_enrich),
+                'already_enriched_count': skipped_duplicate_count,
+                'skipped_failed_count': skipped_failed_count
             }
         
         # Limit for test mode (hard cap to 2 people)
@@ -74,40 +247,29 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
         
         print(f"STEP 4: Enriching {len(new_people_to_enrich)} people...")
 
-        # Live progress tracking
+        # Initialize simple live progress (works with UI poller)
         progress_path = Path(config.get('OUTPUT_DIR', 'output')) / 'step2_progress.json'
-        def write_progress(processed:int, total:int, new_added:int, skipped:int):
-            try:
-                payload = {
+        try:
+            with open(progress_path, 'w') as pf:
+                json.dump({
                     'step': 2,
-                    'total': int(total),
-                    'processed': int(processed),
-                    'newly_enriched': int(new_added),
-                    'already_enriched': int(skipped),
+                    'total': int(len(new_people_to_enrich) + skipped_count),
+                    'processed': 0,
+                    'newly_enriched': 0,
+                    'already_enriched': int(skipped_count),
+                    'stage': 'starting_enrichment',
                     'started_at': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                     'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ')
-                }
-                with open(progress_path, 'w') as pf:
-                    json.dump(payload, pf)
-            except Exception:
-                pass
+                }, pf)
+        except Exception:
+            pass
 
-        processed_counter = 0
-        newly_counter = 0
-        write_progress(processed_counter, len(new_people_to_enrich) + skipped_count, newly_counter, skipped_count)
-        
-        # Enrich the new people (now saves to SQL per record)
-        newly_enriched = []
-        # Enrich in batches to speed up API usage
-        BATCH_SIZE = 25
-        for start in range(0, len(new_people_to_enrich), BATCH_SIZE):
-            chunk = new_people_to_enrich[start:start+BATCH_SIZE]
-            res = enrich_people_batch(chunk, config)
-            if res:
-                newly_enriched.extend(res)
-                newly_counter += len(res)
-            processed_counter += len(chunk)
-            write_progress(processed_counter + skipped_count, len(new_people_to_enrich) + skipped_count, newly_counter, skipped_count)
+        # Enrich the new people in a single pass (original faster flow)
+        newly_enriched = enrich_people_batch(new_people_to_enrich, config, progress={
+            'path': str(progress_path),
+            'total': int(len(new_people_to_enrich) + skipped_count),
+            'skipped': int(skipped_count)
+        })
         
         # Note: Each enrichment is now saved to SQL inside the loop
         print(f"STEP 5: Saved {len(newly_enriched)} enrichments during processing")
@@ -135,7 +297,8 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
             'matched_existing': matched_existing_for_this_run,
             'actual_api_cost': f"${len(newly_enriched) * 0.03:.2f}",
             'api_calls_saved': skipped_count,
-            'already_enriched_count': skipped_count,
+            'already_enriched_count': skipped_duplicate_count,
+            'skipped_failed_count': skipped_failed_count,
             'failed_count': len(new_people_to_enrich) - len(newly_enriched)
         }
         
@@ -284,24 +447,20 @@ def find_existing_enriched_match(person: Dict[str, Any], existing_enriched: List
     return None
 
 
-def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any]) -> List[Dict[str, Any]]:
+def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any], progress: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Enrich a batch of people"""
     
     api_key = config.get('PEOPLEDATALABS_API_KEY')
     enriched_results = []
     
-    # Initialize enricher
+    # Initialize enricher – require a valid API key (no mock paths)
     if not api_key or api_key == 'YOUR_PDL_API_KEY':
-        print("Using mock enrichment (no API key)")
-        use_mock = True
-    else:
-        print(f"Using real API with key: {api_key[:10]}...")
-        try:
-            enricher = PeopleDataLabsEnricher(api_key)
-            use_mock = False
-        except Exception as e:
-            print(f"Failed to initialize enricher: {e}")
-            use_mock = True
+        raise RuntimeError("PEOPLEDATALABS_API_KEY is missing. Mock enrichment is disabled.")
+    print(f"Using real API with key: {api_key[:10]}...")
+    try:
+        enricher = PeopleDataLabsEnricher(api_key)
+    except Exception as e:
+        raise RuntimeError(f"Failed to initialize PDL enricher: {e}")
     
     # Prepare database connection for per-record saves
     db_manager = None
@@ -315,42 +474,37 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any]) ->
         conn_ctx = db_manager.get_connection()
         conn = conn_ctx.__enter__()
         cursor = conn.cursor()
+        try:
+            _ensure_failed_table(conn, db_config.engine)
+        except Exception:
+            pass
     except Exception as e:
         logger.warning(f"Could not open DB connection for per-record saves: {e}")
         db_manager = None
         conn = None
         cursor = None
 
-    # Attempt bulk enrichment to speed things up
-    bulk_supported = (not use_mock) and (len(people) > 1)
-    if bulk_supported:
+    # Single-iteration flow only (bulk disabled)
+
+    # Progress helpers
+    processed_counter = 0
+    new_added_counter = 0
+    def write_progress_safely():
+        if not progress:
+            return
         try:
-            print(f"  BULK: Enriching {len(people)} people in a single request...")
-            bulk_results = enricher.bulk_enrich_people(people)
-            for br in bulk_results:
-                enriched_results.append(br)
-                # Save to SQL
-                try:
-                    if cursor is not None and conn is not None:
-                        _save_single_enrichment(cursor, br)
-                        conn.commit()
-                except Exception as e:
-                    logger.error(f"  Error saving bulk enrichment: {e}")
-            # Remove successfully enriched people from the to-do list by simple name matching
-            completed_keys = set()
-            for br in bulk_results:
-                od = br.get('enriched_data', {}).get('original_data', {})
-                key = (od.get('first_name','').strip().lower(), od.get('last_name','').strip().lower(), od.get('city','').strip().lower(), od.get('state','').strip().lower(), str(od.get('patent_number') or ''))
-                completed_keys.add(key)
-            remaining = []
-            for p in people:
-                key = ((p.get('first_name') or '').strip().lower(), (p.get('last_name') or '').strip().lower(), (p.get('city') or '').strip().lower(), (p.get('state') or '').strip().lower(), str(p.get('patent_number') or ''))
-                if key not in completed_keys:
-                    remaining.append(p)
-            people = remaining
-            print(f"  BULK: Completed {len(bulk_results)}, remaining {len(people)} for single lookup")
-        except Exception as e:
-            print(f"  BULK failed: {e}. Falling back to per-person.")
+            payload = {
+                'step': 2,
+                'total': int(progress.get('total', len(people))),
+                'processed': int(progress.get('skipped', 0)) + processed_counter,
+                'newly_enriched': new_added_counter,
+                'already_enriched': int(progress.get('skipped', 0)),
+                'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ')
+            }
+            with open(progress.get('path'), 'w') as pf:
+                json.dump(payload, pf)
+        except Exception:
+            pass
 
     for i, person in enumerate(people):
         # Secondary safety: enforce test mode cap inside the loop
@@ -364,83 +518,56 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any]) ->
         print(f"  Person data: first_name='{person.get('first_name')}', last_name='{person.get('last_name')}', city='{person.get('city')}', state='{person.get('state')}'")
         
         try:
-            if not use_mock:
-                # Clean person data to avoid the join error
-                clean_person = {
-                    'first_name': str(person.get('first_name', '')).strip(),
-                    'last_name': str(person.get('last_name', '')).strip(),
-                    'city': str(person.get('city', '')).strip(),
-                    'state': str(person.get('state', '')).strip(),
-                    'country': str(person.get('country', 'US')).strip(),
-                    'patent_number': str(person.get('patent_number', '')),
-                    'patent_title': str(person.get('patent_title', '')),
-                    'person_type': str(person.get('person_type', 'inventor'))
-                }
-                
-                result = enricher.enrich_people_list([clean_person])
-                if result and len(result) > 0:
-                    enrichment_result = result[0]
-                else:
-                    if config.get('TEST_MODE'):
-                        enrichment_result = {
-                            'original_name': person_name,
-                            'patent_number': person.get('patent_number', ''),
-                            'patent_title': person.get('patent_title', ''),
-                            'match_score': 0.5,
-                            'enriched_data': {
-                                'person_type': person.get('person_type', 'inventor'),
-                                'original_data': clean_person,
-                                'pdl_data': {
-                                    'full_name': person_name,
-                                    'emails': [{'address': f"test.{person_name.lower().replace(' ', '.')}@example.com"}],
-                                    'linkedin_url': f'https://linkedin.com/in/{person_name.lower().replace(" ", "")}',
-                                    'job_title': 'Inventor',
-                                    'job_company_name': 'Unknown Company',
-                                    'note': 'Mock data - person not found in PeopleDataLabs'
-                                },
-                                'api_method': 'mock_fallback'
-                            }
-                        }
-                    else:
-                        continue
-            else:
-                # Mock enrichment - always works
-                enrichment_result = {
-                    'original_name': person_name,
-                    'patent_number': person.get('patent_number', ''),
-                    'patent_title': person.get('patent_title', ''),
-                    'match_score': 1.0,
-                    'enriched_data': {
-                        'person_type': person.get('person_type', 'inventor'),
-                        'original_data': person,
-                        'pdl_data': {
-                            'full_name': person_name,
-                            'emails': [{'address': f"mock@example.com"}],
-                            'linkedin_url': 'https://linkedin.com/in/mockuser',
-                            'job_title': 'Software Engineer',
-                            'job_company_name': 'Mock Company'
-                        },
-                        'api_method': 'mock'
-                    }
-                }
+            # Real API path only – clean person data
+            clean_person = {
+                'first_name': str(person.get('first_name', '')).strip(),
+                'last_name': str(person.get('last_name', '')).strip(),
+                'city': str(person.get('city', '')).strip(),
+                'state': str(person.get('state', '')).strip(),
+                'country': str(person.get('country', 'US')).strip(),
+                'patent_number': str(person.get('patent_number', '')),
+                'patent_title': str(person.get('patent_title', '')),
+                'person_type': str(person.get('person_type', 'inventor'))
+            }
             
-            enriched_results.append(enrichment_result)
-            # Save immediately to SQL per record if possible
-            try:
-                if cursor is not None and conn is not None:
-                    _save_single_enrichment(cursor, enrichment_result)
-                    conn.commit()
-            except Exception as e:
-                logger.error(f"  Error saving enrichment for {person_name}: {e}")
+            result = enricher.enrich_people_list([clean_person])
+            enrichment_result = result[0] if (result and len(result) > 0) else None
+            
+            if enrichment_result is not None:
+                enriched_results.append(enrichment_result)
+                new_added_counter += 1
+                # Save immediately to SQL per record if possible
+                try:
+                    if cursor is not None and conn is not None:
+                        _save_single_enrichment(cursor, enrichment_result)
+                        conn.commit()
+                except Exception as e:
+                    logger.error(f"  Error saving enrichment for {person_name}: {e}")
+            else:
+                # Record failure (no enrichment result)
+                try:
+                    if cursor is not None and conn is not None:
+                        # Use cleaned person when available
+                        _record_failed_enrichment(cursor, db_config.engine if 'db_config' in locals() else 'mysql', clean_person, 'not_found', None)
+                        conn.commit()
+                except Exception as e:
+                    logger.warning(f"  Could not record failed enrichment for {person_name}: {e}")
             
         except Exception as e:
             import traceback
             traceback.print_exc()
-            continue
+            # Record exception as failed enrichment
+            try:
+                if cursor is not None and conn is not None:
+                    _record_failed_enrichment(cursor, db_config.engine if 'db_config' in locals() else 'mysql', person, f'exception: {str(e)}', None)
+                    conn.commit()
+            except Exception:
+                pass
         
         # Small delay to be nice to API
-        if not use_mock:
-            time.sleep(0.1)
+        time.sleep(0.1)
+        processed_counter += 1
+        write_progress_safely()
     
     # Clean up DB connection context manager
     try:
@@ -459,7 +586,7 @@ def _save_single_enrichment(cursor, result: Dict[str, Any]):
     # Extract data
     original_data = result.get('enriched_data', {}).get('original_data', {})
     if not original_data:
-        # Some mock/API paths may store under 'original_person'
+        # Support alternate key name from API variations
         original_data = result.get('enriched_data', {}).get('original_person', {})
     enrichment_data = {
         "original_person": original_data,

@@ -1,7 +1,7 @@
 # Patent Enrichments
 
 ## Getting Started
-Activate python venv: `source venv/bin/activate`
+Activate python venv: `source patent_env/bin/activate`
 
 install python dependencies: `pip3 install -r requirements.txt`
 

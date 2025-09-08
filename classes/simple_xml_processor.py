@@ -52,6 +52,21 @@ def process_xml_files(xml_folder="USPC_Download", output_folder="output"):
         # Save as CSV
         csv_file = output_path / "extracted_patents.csv"
         df = pd.json_normalize(all_patents)
+        # Simplify headers to last dotted segment with collision-safe suffixes
+        def _simplify_headers(cols):
+            mapping = {}
+            counts = {}
+            simple = []
+            for c in cols:
+                base = str(c).split('.')[-1]
+                n = counts.get(base, 0) + 1
+                counts[base] = n
+                name = base if n == 1 else f"{base}_{n}"
+                mapping[c] = name
+                simple.append(name)
+            return mapping, simple
+        _, simple_cols = _simplify_headers(list(df.columns))
+        df.columns = simple_cols
         df.to_csv(csv_file, index=False)
         
         logger.info(f"✅ Processed {len(all_patents)} total patents")

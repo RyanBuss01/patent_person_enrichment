@@ -281,6 +281,29 @@
             color: #2c3e50;
         }
 
+        /* Cost estimate cards */
+        .cost-estimate {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 6px;
+        }
+        .cost-card {
+            background: #ffffff;
+            border-radius: 8px;
+            padding: 8px 10px;
+            border-left: 4px solid #ccc;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+            max-width: 350px;
+        }
+        .cost-card.max { background: #e8f4fb; border-left-color: #3498db; }
+        .cost-card.est { background: #ecf9f1; border-left-color: #27ae60; }
+        .cost-line { display:flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+        .cost-title { font-weight: 400; color: #2c3e50; margin: 0; font-size: inherit; }
+        .cost-value { font-size: inherit; font-weight: 700; color: #2c3e50; }
+        .cost-note { margin-top: 2px; font-size: 0.85em; color: #6c757d; }
+        .people-pill { display:inline-block; margin-top: 4px; background:#f1f3f5; color:#495057; border-radius:999px; padding:3px 8px; font-weight:600; font-size:0.9em; }
+
         .progress-bar {
             background: #ecf0f1;
             border-radius: 10px;
@@ -1075,12 +1098,23 @@
                         const fmt = (n) => `$${n.toFixed(1)}`; // round to nearest 0.1
                         costDiv.innerHTML = `
                             <h4>💰 Enrichment Cost Estimate</h4>
-                            <div class="file-stats">
-                                <div class="file-stat"><span>People to enrich:</span><span>${people.toLocaleString()}</span></div>
-                                <div class="file-stat"><span>Max cost (@ $0.10 each):</span><span>${fmt(maxCost)}</span></div>
-                                <div class="file-stat"><span>Estimated cost (20% hit rate):</span><span>${fmt(estCost)}</span></div>
+                            <div class="people-pill">People to enrich: ${people.toLocaleString()}</div>
+                            <div class="cost-estimate">
+                                <div class="cost-card max">
+                                    <div class="cost-line">
+                                        <div class="cost-title">Max Cost (@ $0.10 each)</div>
+                                        <div class="cost-value">${fmt(maxCost)}</div>
+                                    </div>
+                                    <div class="cost-note">If all ${people.toLocaleString()} people are enriched</div>
+                                </div>
+                                <div class="cost-card est">
+                                    <div class="cost-line">
+                                        <div class="cost-title">Estimated Cost (20% hit rate)</div>
+                                        <div class="cost-value">${fmt(estCost)}</div>
+                                    </div>
+                                    <div class="cost-note">Assuming ~20% of ${people.toLocaleString()} match</div>
+                                </div>
                             </div>
-                            <div style="margin-top:8px; font-size:0.85em; color:#6c757d;">Actual cost depends on matches returned.</div>
                         `;
                         costDiv.classList.remove('hidden');
                     } else {

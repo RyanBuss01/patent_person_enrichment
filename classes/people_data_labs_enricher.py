@@ -97,17 +97,125 @@ class PeopleDataLabsEnricher:
         
         logger.info(f"Enrichment completed. {len(enriched_results)} people successfully enriched")
         return enriched_results
+
+    # Utility: build standard PDL params for a person
+    def _build_params(self, person: Dict) -> Dict:
+        first_name = (person.get('first_name') or '').strip()
+        last_name = (person.get('last_name') or '').strip()
+        city = (person.get('city') or '').strip()
+        state = (person.get('state') or '').strip()
+        country = (person.get('country') or '').strip()
+        params = {}
+        if first_name:
+            params['first_name'] = first_name
+        if last_name:
+            params['last_name'] = last_name
+        loc_parts = []
+        if city: loc_parts.append(city)
+        if state: loc_parts.append(state)
+        if country: loc_parts.append(country)
+        if loc_parts:
+            params['location'] = ', '.join(loc_parts)
+        return params
+
+    def bulk_enrich_people(self, people_list: List[Dict], include_if_matched: bool = True) -> List[Dict]:
+        """Use PeopleDataLabs bulk enrichment to speed up processing.
+
+        Returns a list of enriched records in the same structure used by
+        enrich_people_list/_enrich_single_person_new_format.
+        """
+        if not people_list:
+            return []
+        try:
+            requests = []
+            for idx, person in enumerate(people_list):
+                params = self._build_params(person)
+                if not params:
+                    continue
+                requests.append({
+                    'metadata': { 'idx': idx },
+                    'params': params
+                })
+            if not requests:
+                return []
+            payload = {
+                # Do not set a strict "required" to avoid over-filtering
+                'include_if_matched': True if include_if_matched else False,
+                'requests': requests
+            }
+            resp = self.client.person.bulk(**payload)
+            results = resp.json() or []
+            enriched_results: List[Dict] = []
+            for i, r in enumerate(results):
+                try:
+                    if r and r.get('status') == 200 and r.get('data'):
+                        # Map response to original person by position
+                        person = people_list[i] if i < len(people_list) else {}
+                        enriched_results.append({
+                            'original_name': f"{person.get('first_name', '')} {person.get('last_name', '')}".strip(),
+                            'patent_number': person.get('patent_number', ''),
+                            'patent_title': person.get('patent_title', ''),
+                            'match_score': 1.0,
+                            'enriched_data': {
+                                'person_type': person.get('person_type', 'inventor'),
+                                'original_data': person,
+                                'pdl_data': r['data'],
+                                'api_method': 'bulk'
+                            }
+                        })
+                except Exception:
+                    continue
+            return enriched_results
+        except Exception as e:
+            logger.warning(f"Bulk enrichment failed, falling back to single requests: {e}")
+            return []
     
     def _enrich_single_person_new_format(self, person: Dict, params: Dict) -> Optional[Dict]:
-        """Enrich a single person in the new Access DB format"""
+        """Enrich a single person in the new Access DB format.
+        Try enrichment first (returns full record), then fallback to identify+retrieve.
+        """
         try:
-            # Try Person Identify first
+            # Prefer Person Enrichment first (typically faster and returns full data)
+            try:
+                enr = self.client.person.enrichment(**params)
+                er = enr.json()
+                if er.get('status') == 200 and er.get('data'):
+                    return {
+                        'original_name': f"{person.get('first_name', '')} {person.get('last_name', '')}".strip(),
+                        'patent_number': person.get('patent_number', ''),
+                        'patent_title': person.get('patent_title', ''),
+                        'match_score': 1.0,
+                        'enriched_data': {
+                            'person_type': person.get('person_type', ''),
+                            'original_data': person,
+                            'pdl_data': er['data'],
+                            'api_method': 'enrichment'
+                        },
+                        'api_raw': {
+                            'enrichment': er
+                        }
+                    }
+            except Exception:
+                pass
+
+            # Fallback to Person Identify + Retrieve for complete data
             response = self.client.person.identify(**params)
             result = response.json()
-            
             if result.get('status') == 200 and result.get('matches'):
                 best_match = result['matches'][0]
-                
+                pdl_data = best_match
+                api_method = 'identify'
+                try:
+                    match_id = best_match.get('id') or best_match.get('pdl_id')
+                    if match_id:
+                        resp_full = self.client.person.retrieve(id=match_id)
+                        full_json = resp_full.json()
+                        if full_json.get('status') == 200 and full_json.get('data'):
+                            pdl_data = full_json['data']
+                            api_method = 'identify+retrieve'
+                except Exception:
+                    pass
+
                 return {
                     'original_name': f"{person.get('first_name', '')} {person.get('last_name', '')}".strip(),
                     'patent_number': person.get('patent_number', ''),
@@ -116,32 +224,16 @@ class PeopleDataLabsEnricher:
                     'enriched_data': {
                         'person_type': person.get('person_type', ''),
                         'original_data': person,
-                        'pdl_data': best_match,
-                        'api_method': 'identify'
+                        'pdl_data': pdl_data,
+                        'api_method': api_method
+                    },
+                    'api_raw': {
+                        'identify': result,
+                        **({'retrieve': full_json} if 'full_json' in locals() else {})
                     }
                 }
-            
-            # Fallback to enrichment
-            response = self.client.person.enrichment(**params)
-            result = response.json()
-            
-            if result.get('status') == 200 and result.get('data'):
-                return {
-                    'original_name': f"{person.get('first_name', '')} {person.get('last_name', '')}".strip(),
-                    'patent_number': person.get('patent_number', ''),
-                    'patent_title': person.get('patent_title', ''),
-                    'match_score': 1.0,
-                    'enriched_data': {
-                        'person_type': person.get('person_type', ''),
-                        'original_data': person,
-                        'pdl_data': result['data'],
-                        'api_method': 'enrichment'
-                    }
-                }
-                
         except Exception as e:
             logger.warning(f"API error for {person.get('first_name', '')} {person.get('last_name', '')}: {e}")
-        
         return None
     
     def _enrich_person(self, person_data: Dict, patent: PatentData, person_type: str) -> Optional[EnrichedData]:
@@ -177,9 +269,21 @@ class PeopleDataLabsEnricher:
                 result = response.json()
                 
                 if result.get('status') == 200 and result.get('matches'):
-                    # Use the first (best) match
+                    # Use the first (best) match, then try to retrieve full data
                     best_match = result['matches'][0]
-                    
+                    pdl_data = best_match
+                    api_method = 'identify'
+                    try:
+                        match_id = best_match.get('id') or best_match.get('pdl_id')
+                        if match_id:
+                            resp_full = self.client.person.retrieve(id=match_id)
+                            full_json = resp_full.json()
+                            if full_json.get('status') == 200 and full_json.get('data'):
+                                pdl_data = full_json['data']
+                                api_method = 'identify+retrieve'
+                    except Exception:
+                        pass
+
                     original_name = f"{person_data.get('first_name', '')} {person_data.get('last_name', '')}".strip()
                     
                     return EnrichedData(
@@ -189,8 +293,8 @@ class PeopleDataLabsEnricher:
                         enriched_data={
                             'person_type': person_type,
                             'original_data': person_data,
-                            'pdl_data': best_match,
-                            'api_method': 'identify'
+                            'pdl_data': pdl_data,
+                            'api_method': api_method
                         },
                         match_score=best_match.get('match_score', 0.0)
                     )
