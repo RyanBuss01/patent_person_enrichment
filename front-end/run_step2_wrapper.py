@@ -26,7 +26,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def load_config(test_mode=False):
+def load_config(test_mode=False, express_mode=False):
     """Load enrichment configuration like main.py"""
     return {
         'PEOPLEDATALABS_API_KEY': os.getenv('PEOPLEDATALABS_API_KEY', "YOUR_PDL_API_KEY"),
@@ -36,7 +36,8 @@ def load_config(test_mode=False):
         'OUTPUT_JSON': "output/enriched_patents.json",
         'ENRICH_ONLY_NEW_PEOPLE': os.getenv('ENRICH_ONLY_NEW_PEOPLE', 'true').lower() == 'true',
         'MAX_ENRICHMENT_COST': 2 if test_mode else int(os.getenv('MAX_ENRICHMENT_COST', '1000')),
-        'TEST_MODE': test_mode
+        'TEST_MODE': test_mode,
+        'EXPRESS_MODE': express_mode
     }
 
 def load_existing_enrichment():
@@ -106,10 +107,11 @@ def main():
     """Run Step 2: Data Enrichment"""
     # Support test mode via env or CLI flag (compat)
     test_mode = os.getenv('STEP2_TEST_MODE', '').lower() == 'true' or ('--test' in sys.argv)
-    print("🚀 STARTING STEP 2: DATA ENRICHMENT" + (" (TEST MODE)" if test_mode else ""))
+    express_mode = os.getenv('STEP2_EXPRESS_MODE', '').lower() == 'true' or ('--express' in sys.argv)
+    print("🚀 STARTING STEP 2: DATA ENRICHMENT" + (" (TEST MODE)" if test_mode else "") + (" [EXPRESS]" if express_mode else ""))
     print("=" * 60)
     
-    config = load_config(test_mode)
+    config = load_config(test_mode, express_mode)
     os.makedirs(config['OUTPUT_DIR'], exist_ok=True)
     
     try:
@@ -128,25 +130,41 @@ def main():
         # Run enrichment
         logger.info("Starting data enrichment...")
         print("💎 Enriching patent inventor and assignee data")
-        if config.get('PEOPLEDATALABS_API_KEY') == 'YOUR_PDL_API_KEY':
-            print("⚠️  Using mock data - configure PEOPLEDATALABS_API_KEY for real enrichment")
         result = run_enrichment(config)
         
         # Merge with existing if needed
-        if result.get('success') and result.get('enriched_data'):
-            new_enriched_data = result['enriched_data']
-            if backup_existing_data:
-                combined_data = backup_existing_data + new_enriched_data
+        if result.get('success'):
+            # Use only newly enriched data for local file append semantics
+            new_enriched_data = result.get('newly_enriched_data') or []
+            matched_existing = result.get('matched_existing') or []
+            if new_enriched_data:
+                combined_data = (backup_existing_data or []) + new_enriched_data
+                # Always write local JSON/CSV snapshot for this cycle
                 with open(config['OUTPUT_JSON'], 'w') as f:
                     json.dump(combined_data, f, indent=2, default=str)
                 _export_combined_to_csv(combined_data, config['OUTPUT_CSV'])
+                # Save per-run files
+                with open(os.path.join(config['OUTPUT_DIR'], 'enriched_patents_new_this_run.json'), 'w') as f:
+                    json.dump(new_enriched_data, f, indent=2, default=str)
+                with open(os.path.join(config['OUTPUT_DIR'], 'current_cycle_enriched.json'), 'w') as f:
+                    json.dump(new_enriched_data + matched_existing, f, indent=2, default=str)
                 result['total_enriched_records'] = len(combined_data)
                 result['new_records_added'] = len(new_enriched_data)
-                result['existing_records'] = len(backup_existing_data)
+                result['existing_records'] = len(backup_existing_data or [])
             else:
-                result['total_enriched_records'] = len(new_enriched_data)
-                result['new_records_added'] = len(new_enriched_data)
-                result['existing_records'] = 0
+                # No new records this run; if a local file exists, keep counts consistent
+                if backup_existing_data is not None:
+                    with open(config['OUTPUT_JSON'], 'w') as f:
+                        json.dump(backup_existing_data or [], f, indent=2, default=str)
+                    _export_combined_to_csv(backup_existing_data or [], config['OUTPUT_CSV'])
+                    # Also write empty per-run files for clarity
+                    with open(os.path.join(config['OUTPUT_DIR'], 'enriched_patents_new_this_run.json'), 'w') as f:
+                        json.dump([], f)
+                    with open(os.path.join(config['OUTPUT_DIR'], 'current_cycle_enriched.json'), 'w') as f:
+                        json.dump(matched_existing or [], f, indent=2, default=str)
+                    result['total_enriched_records'] = len(backup_existing_data or [])
+                    result['new_records_added'] = 0
+                    result['existing_records'] = len(backup_existing_data or [])
         
         # Save results meta for frontend
         results_file = os.path.join(config['OUTPUT_DIR'], 'enrichment_results.json')
@@ -160,6 +178,11 @@ def main():
             print(f"   👥 People processed this run: {result.get('total_people', 0):,}")
             print(f"   ✅ Successfully enriched this run: {result.get('enriched_count', 0):,}")
             print(f"   📈 Enrichment rate: {result.get('enrichment_rate', 0):.1f}%")
+            # Additional skip details
+            if result.get('already_enriched_count') is not None:
+                print(f"   🔁 Duplicates skipped: {result.get('already_enriched_count', 0):,}")
+            if result.get('skipped_failed_count') is not None:
+                print(f"   🚫 Previously failed skipped: {result.get('skipped_failed_count', 0):,}")
             if result.get('api_calls_saved'):
                 print(f"   💰 API calls saved by deduplication: {result.get('api_calls_saved', 0):,}")
                 print(f"   💵 Estimated cost savings: {result.get('estimated_cost_savings', '$0.00')}")
@@ -198,38 +221,69 @@ def _export_combined_to_csv(enriched_data, filename):
     if not enriched_data:
         logger.warning("No enriched data to export")
         return
+
+    # Flatten nested dicts, stringify arrays/objects into JSON strings
+    def _flatten(obj, prefix='', out=None):
+        if out is None:
+            out = {}
+        if obj is None:
+            if prefix:
+                out[prefix] = ''
+            return out
+        # Treat booleans as empty (PDL sometimes returns presence booleans)
+        if isinstance(obj, bool):
+            if prefix:
+                out[prefix] = ''
+            return out
+        if isinstance(obj, list):
+            out[prefix] = json.dumps(obj, ensure_ascii=False)
+            return out
+        if isinstance(obj, dict):
+            if not obj and prefix:
+                out[prefix] = ''
+                return out
+            for k, v in obj.items():
+                key = f"{prefix}.{k}" if prefix else k
+                _flatten(v, key, out)
+            return out
+        # Primitive
+        val = '' if str(obj).strip().lower() in {'nan', 'none', 'null'} else str(obj)
+        out[prefix] = val
+        return out
+
     rows = []
-    for data in enriched_data:
-        pdl_data = data.get('enriched_data', {}).get('pdl_data', {})
-        original_data = data.get('enriched_data', {}).get('original_data', {})
-        row = {
-            'patent_number': data.get('patent_number'),
-            'patent_title': data.get('patent_title'),
-            'original_name': data.get('original_name'),
-            'person_type': data.get('enriched_data', {}).get('person_type'),
-            'match_score': data.get('match_score'),
-            'api_method': data.get('enriched_data', {}).get('api_method'),
-            'original_first_name': original_data.get('first_name'),
-            'original_last_name': original_data.get('last_name'),
-            'original_city': original_data.get('city'),
-            'original_state': original_data.get('state'),
-            'original_country': original_data.get('country'),
-            'enriched_full_name': pdl_data.get('full_name'),
-            'enriched_first_name': pdl_data.get('first_name'),
-            'enriched_last_name': pdl_data.get('last_name'),
-            'enriched_emails': _safe_join_list(pdl_data.get('emails')),
-            'enriched_phone_numbers': _safe_join_list(pdl_data.get('phone_numbers')),
-            'enriched_linkedin_url': pdl_data.get('linkedin_url'),
-            'enriched_current_title': pdl_data.get('job_title'),
-            'enriched_current_company': pdl_data.get('job_company_name'),
-            'enriched_city': pdl_data.get('location_locality'),
-            'enriched_state': pdl_data.get('location_region'),
-            'enriched_country': pdl_data.get('location_country'),
-            'enriched_industry': pdl_data.get('industry'),
-        }
-        rows.append(row)
-    pd.DataFrame(rows).to_csv(filename, index=False)
-    logger.info(f"Exported {len(rows)} combined records to {filename}")
+    headers = set()
+    for rec in enriched_data:
+        flat = _flatten(rec)
+        rows.append(flat)
+        for k in flat.keys():
+            headers.add(k)
+
+    headers = sorted(headers)
+    # Build DataFrame with all headers, fill missing keys with ''
+    normalized = [{h: r.get(h, '') for h in headers} for r in rows]
+    df = pd.DataFrame(normalized, columns=headers)
+    df.fillna('', inplace=True)
+
+    # Simplify column names to last dotted segment, deduplicating with suffixes
+    def _simplify_headers(cols):
+        mapping = {}
+        counts = {}
+        simple_cols = []
+        for c in cols:
+            base = c.split('.')[-1]
+            n = counts.get(base, 0) + 1
+            counts[base] = n
+            name = base if n == 1 else f"{base}_{n}"
+            mapping[c] = name
+            simple_cols.append(name)
+        return mapping, simple_cols
+
+    _, simple_cols = _simplify_headers(headers)
+    df.columns = simple_cols
+
+    df.to_csv(filename, index=False)
+    logger.info(f"Exported {len(rows)} combined records to {filename} with {len(headers)} columns")
 
 if __name__ == "__main__":
     exit_code = main()

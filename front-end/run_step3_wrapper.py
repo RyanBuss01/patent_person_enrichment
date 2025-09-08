@@ -192,8 +192,6 @@ def main():
         # Run the enrichment using existing runner
         logger.info("Starting data enrichment...")
         print(f"💎 Enriching patent inventor and assignee data")
-        if config.get('PEOPLEDATALABS_API_KEY') == 'YOUR_PDL_API_KEY':
-            print(f"⚠️  Using mock data - configure PEOPLEDATALABS_API_KEY for real enrichment")
         
         result = run_enrichment(config)
         

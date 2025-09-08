@@ -13,7 +13,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Add the parent directory to sys.path so we can import our modules
-sys.path.append(str(Path(__file__).parent.parent))
+sys.path.append(str(Path(__file__).parent.paresnt))
 
 from runners.integrate_existing_data import run_existing_data_integration
 

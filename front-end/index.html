@@ -204,6 +204,15 @@
             transform: translateY(-2px);
         }
         
+        .btn-success {
+            background: #28a745;
+            color: white;
+        }
+        .btn-success:hover {
+            background: #218838;
+            transform: translateY(-2px);
+        }
+        
         .btn-secondary {
             background: #95a5a6;
             color: white;
@@ -384,6 +393,21 @@
             padding: 20px;
             margin-top: 20px;
         }
+        .verification-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        .tab-button {
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 1px solid #ddd;
+            background: #f8f9fa;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        .tab-button.active { background: #e2e6ea; border-color: #ced4da; }
+        .tab-button:disabled { background: #f1f3f5; color: #adb5bd; cursor: not-allowed; }
         
         .verification-header {
             display: flex;
@@ -514,6 +538,19 @@
         .btn-skip:hover {
             background: #5a6268;
         }
+
+        .btn-update-db {
+            background: #14532d; /* dark green */
+            color: #ffffff;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        .btn-update-db:hover {
+            background: #0f3f22;
+        }
         
         .verification-complete {
             background: #d4edda;
@@ -562,6 +599,38 @@
         .hidden {
             display: none;
         }
+        /* Temporarily hide Steps 3–5 without removing markup */
+        .step-coming-soon#step3,
+        .step-coming-soon#step4,
+        .step-coming-soon#step5 {
+            display: none !important;
+        }
+        /* CSV Export widget styling */
+        .export-widget {
+            margin: 24px auto 32px;
+            max-width: 1100px;
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+            padding: 16px 20px;
+        }
+        .export-widget h3 {
+            margin: 0 0 12px 0;
+            font-size: 18px;
+            font-weight: 600;
+            color: #2c3e50;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .export-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: center;
+        }
     </style>
 </head>
 <body>
@@ -569,6 +638,13 @@
         <div class="header">
             <h1>🔬 Patent Processing Pipeline</h1>
             <p>Download, process, and enrich patent data through automated pipeline steps</p>
+            <!-- Moved CSV export buttons to bottom widget
+            <div style="margin-top:12px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap;">
+                <button class="btn btn-success" onclick="exportCurrentEnrichments()">⬇️ Export Current Enrichments (CSV)</button>
+                <button class="btn btn-success" onclick="exportNewEnrichments()">⬇️ Export New Enrichments (CSV)</button>
+                <button class="btn btn-success" onclick="exportAllEnrichments()">⬇️ Export All Enrichments (CSV)</button>
+            </div>
+            -->
         </div>
         
         <div class="content">
@@ -578,6 +654,7 @@
                 <div class="status-grid" id="statusGrid">
                     <!-- Status items will be populated by JavaScript -->
                 </div>
+                <!-- HIDE END: Steps 3-5 commented out -->
             </div>
             
             <!-- Pipeline Steps -->
@@ -598,10 +675,14 @@
                         <button class="btn btn-test" onclick="runStep0Quick()" id="step0QuickBtn">
                             ⚡ Quick Download (7 days)
                         </button>
+                        <button class="btn btn-success" onclick="triggerCsvUpload()" id="step0UploadBtn">
+                            ⬆️ Upload CSV/XLSX
+                        </button>
                         <button class="btn btn-secondary" onclick="showSample('step0')" id="step0Sample">
                             📋 View Sample
                         </button>
                     </div>
+                    <input type="file" id="step0CsvInput" accept=".csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx" style="display:none" />
                     
                     <!-- Download Configuration Interface -->
                     <div class="download-config hidden" id="downloadConfig">
@@ -643,6 +724,8 @@
                                     <option value="500">500 patents</option>
                                     <option value="1000" selected>1,000 patents</option>
                                     <option value="2000">2,000 patents</option>
+                                    <option value="5000">5,000 patents</option>
+                                    <option value="10000">10,000 patents</option>
                                 </select>
                             </div>
                         </div>
@@ -718,6 +801,10 @@
                                 Person 1 of 10
                             </div>
                         </div>
+                        <div class="verification-tabs">
+                            <button id="tabMoved" class="tab-button" onclick="switchVerificationTab('moved')">Same Name • New Address (<span id="tabMovedCount">0</span>)</button>
+                            <button id="tabPotential" class="tab-button" onclick="switchVerificationTab('potential')">Score 10-24 Matches (<span id="tabPotentialCount">0</span>)</button>
+                        </div>
                         
                         <div id="verificationContent">
                             <!-- Person cards will be populated here -->
@@ -755,10 +842,16 @@
                         <button class="btn btn-primary" onclick="runStep2(false)" id="step2Btn" disabled>
                             💎 Full Enrichment
                         </button>
+                        <button class="btn btn-primary" onclick="runStep2Express()" id="step2ExpressBtn" disabled>
+                            ⚡ Full Enrichment Express
+                        </button>
                         <button class="btn btn-secondary" onclick="showSample('step2')" id="step2Sample">
                             👥 View Enriched Sample
                         </button>
                     </div>
+                    
+                    <!-- Cost estimate before enrichment -->
+                    <div class="file-info hidden" id="step2CostEstimate"></div>
                     
                     <!-- Progress display for Step 2 -->
                     <div class="progress-info hidden" id="step2Progress">
@@ -767,6 +860,7 @@
                             <div class="progress-fill" style="width: 0%" id="step2ProgressBar"></div>
                         </div>
                         <div class="elapsed-time" id="step2ElapsedTime">Elapsed: 0s</div>
+                        <div id="step2LiveProgress" class="hidden" style="margin-top:6px; color:#2c3e50; font-weight:600;"></div>
                     </div>
                     
                     <div class="file-info hidden" id="step2Files">
@@ -776,6 +870,7 @@
                     <div class="sample-data hidden" id="step2SampleData"></div>
                 </div>
                 
+                <!-- HIDE START: Steps 3-5 commented out -->
                 <!-- Step 3: Integration with Microsoft Dynamics CRM -->
                 <div class="step step-coming-soon" id="step3">
                     <div class="step-header">
@@ -796,7 +891,7 @@
                             📊 View CRM Data
                         </button>
                     </div>
-                </div>
+                </div> <!-- end step3 -->
                 
                 <!-- Step 4: Automating Email Outreach -->
                 <div class="step step-coming-soon" id="step4">
@@ -818,7 +913,7 @@
                             ✏️ Edit Templates
                         </button>
                     </div>
-                </div>
+                </div> <!-- end step4 -->
                 
                 <!-- Step 5: Reporting -->
                 <div class="step step-coming-soon" id="step5">
@@ -840,7 +935,23 @@
                             📋 Export Data
                         </button>
                     </div>
-                </div>
+                </div> <!-- end step5 -->
+            </div>
+        </div>
+
+        <!-- CSV Export Widget (Bottom) -->
+        <div class="export-widget">
+            <h3>⬇️ Full CSV Exports</h3>
+            <div class="export-actions" style="margin-bottom: 8px;">
+                <button class="btn btn-success" onclick="exportCurrentEnrichments()">Current Enrichments</button>
+                <button class="btn btn-success" onclick="exportNewEnrichments()">New Enrichments</button>
+                <button class="btn btn-success" onclick="exportAllEnrichments()">All Enrichments</button>
+            </div>
+            <h3>🧾 Formatted CSV Exports</h3>
+            <div class="export-actions">
+                <button class="btn btn-secondary" onclick="exportCurrentEnrichmentsFormatted()">Current (Formatted)</button>
+                <button class="btn btn-secondary" onclick="exportNewEnrichmentsFormatted()">New (Formatted)</button>
+                <button class="btn btn-secondary" onclick="exportAllEnrichmentsFormatted()">All (Formatted)</button>
             </div>
         </div>
     </div>
@@ -848,7 +959,9 @@
     <script>
         // Global state
         let currentStatus = {};
-        let verificationData = [];
+        let potentialVerificationData = [];
+        let movedVerificationData = [];
+        let currentTab = 'moved';
         let currentVerificationIndex = 0;
         let verificationDecisions = {};
         let pollingIntervals = new Map(); // Track active polling intervals
@@ -898,6 +1011,11 @@
                     <div class="count">${currentStatus.counts?.enrichedData || 0}</div>
                     <small>${currentStatus.step2?.enrichedData?.exists ? 'Available' : 'Not found'}</small>
                 </div>
+                <div class="status-item">
+                    <h4>New Enrichments</h4>
+                    <div class="count">${currentStatus.counts?.newEnrichments || 0}</div>
+                    <small>${currentStatus.step2?.enrichmentResults?.exists ? 'This run' : 'Not run yet'}</small>
+                </div>
             `;
             
             // Update step statuses - don't override running states
@@ -905,14 +1023,70 @@
             updateStepStatus('step1', currentStatus.step1?.integrationResults?.exists, currentStatus.step1?.running);
             updateStepStatus('step2', currentStatus.step2?.enrichedData?.exists, currentStatus.step2?.running);
 
+            // Last run timestamps under step titles
+            try {
+                const lr = currentStatus.lastRun || {};
+                const setLastRun = (stepId, ts) => {
+                    const header = document.querySelector(`#${stepId} .step-title`);
+                    if (!header) return;
+                    let span = header.querySelector('.last-run');
+                    if (!span) {
+                        span = document.createElement('span');
+                        span.className = 'last-run';
+                        span.style.fontSize = '0.8em';
+                        span.style.color = '#6c757d';
+                        span.style.marginLeft = '8px';
+                        header.appendChild(span);
+                    }
+                    span.textContent = ts ? `(Last run: ${new Date(ts).toLocaleString()})` : '';
+                };
+                setLastRun('step0', lr.step0);
+                setLastRun('step1', lr.step1);
+                setLastRun('step2', lr.step2);
+            } catch (e) { /* ignore */ }
+
             // Enable Step 2 buttons when Step 1 produced people
             try {
                 const canEnrich = currentStatus.step1?.newPeople?.exists;
                 const step2Btn = document.getElementById('step2Btn');
                 const step2TestBtn = document.getElementById('step2TestBtn');
+                const step2ExpressBtn = document.getElementById('step2ExpressBtn');
                 if (canEnrich) {
                     if (step2Btn) step2Btn.disabled = false;
                     if (step2TestBtn) step2TestBtn.disabled = false;
+                    if (step2ExpressBtn) step2ExpressBtn.disabled = false;
+                }
+                // Update verification tab counts if present
+                const movedCount = currentStatus.counts?.movedCandidates || 0;
+                const tabMoved = document.getElementById('tabMoved');
+                const tabPotential = document.getElementById('tabPotential');
+                const tabMovedCount = document.getElementById('tabMovedCount');
+                const tabPotentialCount = document.getElementById('tabPotentialCount');
+                if (tabMovedCount) tabMovedCount.textContent = movedCount;
+                if (tabMoved) tabMoved.disabled = movedCount === 0;
+
+                // Update enrichment cost estimate card
+                const costDiv = document.getElementById('step2CostEstimate');
+                if (costDiv) {
+                    const people = Number(currentStatus.counts?.newPeople || 0);
+                    if (people > 0) {
+                        const maxCost = (people * 0.10);
+                        const estCost = (people * 0.10 * 0.20);
+                        const fmt = (n) => `$${n.toFixed(1)}`; // round to nearest 0.1
+                        costDiv.innerHTML = `
+                            <h4>💰 Enrichment Cost Estimate</h4>
+                            <div class="file-stats">
+                                <div class="file-stat"><span>People to enrich:</span><span>${people.toLocaleString()}</span></div>
+                                <div class="file-stat"><span>Max cost (@ $0.10 each):</span><span>${fmt(maxCost)}</span></div>
+                                <div class="file-stat"><span>Estimated cost (20% hit rate):</span><span>${fmt(estCost)}</span></div>
+                            </div>
+                            <div style="margin-top:8px; font-size:0.85em; color:#6c757d;">Actual cost depends on matches returned.</div>
+                        `;
+                        costDiv.classList.remove('hidden');
+                    } else {
+                        costDiv.classList.add('hidden');
+                        costDiv.innerHTML = '';
+                    }
                 }
             } catch (e) { /* no-op */ }
         }
@@ -1031,10 +1205,13 @@
                             showOutput(stepId, status.output);
                             showFileInfo(stepId, status.files);
                             
-                            if (stepId === 'step1' && status.potentialMatches && status.potentialMatches.length > 0) {
-                                document.getElementById('step1VerifyBtn').classList.remove('hidden');
-                                verificationData = status.potentialMatches;
-                                console.log(`Found ${status.potentialMatches.length} potential matches for verification`);
+                            if (stepId === 'step1') {
+                                const hasPotential = Array.isArray(status.potentialMatches) && status.potentialMatches.length > 0;
+                                const hasMoved = Array.isArray(status.movedCandidates) && status.movedCandidates.length > 0;
+                                if (hasPotential || hasMoved) {
+                                    document.getElementById('step1VerifyBtn').classList.remove('hidden');
+                                    console.log(`Review available: potential=${hasPotential ? status.potentialMatches.length : 0}, moved=${hasMoved ? status.movedCandidates.length : 0}`);
+                                }
                             }
                             
                             updateStatus();
@@ -1206,7 +1383,6 @@
                     if (result.files) showFileInfo('step1', result.files);
                     if (result.potentialMatches && result.potentialMatches.length > 0) {
                         document.getElementById('step1VerifyBtn').classList.remove('hidden');
-                        verificationData = result.potentialMatches;
                     }
                     updateStatus();
                 } else {
@@ -1220,118 +1396,203 @@
             }
         }
 
-        // Start verification process
+        // Start verification process (load both datasets and show tabs)
         async function startVerification() {
             try {
-                const response = await fetch('/api/verification-data');
-                const result = await response.json();
-                
-                if (result.success && result.potentialMatches.length > 0) {
-                    verificationData = result.potentialMatches;
-                    currentVerificationIndex = 0;
-                    verificationDecisions = {};
-                    
-                    document.getElementById('verificationInterface').classList.remove('hidden');
-                    document.getElementById('verificationComplete').classList.add('hidden');
-                    showCurrentVerificationItem();
-                } else {
-                    alert('No potential matches found for verification.');
+                const [potResp, movResp] = await Promise.all([
+                    fetch('/api/verification-data').then(r => r.json()).catch(() => ({ success: false })),
+                    fetch('/api/moved-candidates').then(r => r.json()).catch(() => ({ success: false }))
+                ]);
+                potentialVerificationData = (potResp.success ? (potResp.potentialMatches || []) : []);
+                movedVerificationData = (movResp.success ? (movResp.movedCandidates || []) : []);
+                if (potentialVerificationData.length === 0 && movedVerificationData.length === 0) {
+                    alert('No items to review.');
+                    return;
                 }
+                verificationDecisions = {};
+                const tabMovedCount = document.getElementById('tabMovedCount');
+                const tabPotentialCount = document.getElementById('tabPotentialCount');
+                const tabMoved = document.getElementById('tabMoved');
+                const tabPotential = document.getElementById('tabPotential');
+                if (tabMovedCount) tabMovedCount.textContent = movedVerificationData.length;
+                if (tabPotentialCount) tabPotentialCount.textContent = potentialVerificationData.length;
+                if (tabMoved) tabMoved.disabled = movedVerificationData.length === 0;
+                if (tabPotential) tabPotential.disabled = potentialVerificationData.length === 0;
+                currentTab = movedVerificationData.length > 0 ? 'moved' : 'potential';
+                currentVerificationIndex = 0;
+                document.getElementById('verificationInterface').classList.remove('hidden');
+                document.getElementById('verificationComplete').classList.add('hidden');
+                switchVerificationTab(currentTab);
             } catch (error) {
                 console.error('Error starting verification:', error);
                 alert('Error loading verification data.');
             }
         }
+
+        function switchVerificationTab(tab) {
+            currentTab = tab;
+            const tabMoved = document.getElementById('tabMoved');
+            const tabPotential = document.getElementById('tabPotential');
+            if (tabMoved) tabMoved.classList.toggle('active', currentTab === 'moved');
+            if (tabPotential) tabPotential.classList.toggle('active', currentTab === 'potential');
+            const data = (currentTab === 'moved') ? movedVerificationData : potentialVerificationData;
+            if (currentVerificationIndex >= data.length) currentVerificationIndex = 0;
+            showCurrentVerificationItem();
+        }
         
-        // Show current verification item
+        // Show current verification item (tab-aware)
         function showCurrentVerificationItem() {
-            if (currentVerificationIndex >= verificationData.length) {
+            const data = (currentTab === 'moved') ? movedVerificationData : potentialVerificationData;
+            const otherData = (currentTab === 'moved') ? potentialVerificationData : movedVerificationData;
+            if (data.length === 0 && otherData.length === 0) {
                 showVerificationComplete();
                 return;
             }
-            
-            const person = verificationData[currentVerificationIndex];
+            if (data.length === 0) {
+                // Switch to other tab if current is empty
+                switchVerificationTab(currentTab === 'moved' ? 'potential' : 'moved');
+                return;
+            }
+            if (currentVerificationIndex >= data.length) {
+                showVerificationComplete();
+                return;
+            }
+
+            const person = data[currentVerificationIndex];
             const counter = document.getElementById('verificationCounter');
             const content = document.getElementById('verificationContent');
-            
-            counter.textContent = `Person ${currentVerificationIndex + 1} of ${verificationData.length}`;
-            
-            let matchesHtml = '';
-            if (person.potential_matches && person.potential_matches.length > 0) {
-                person.potential_matches.forEach((match, index) => {
-                    matchesHtml += `
-                        <div class="match-candidate">
-                            <div class="match-score">Match Score: ${match[1]}</div>
-                            <div><strong>Name:</strong> ${match[0].first_name || ''} ${match[0].last_name || ''}</div>
-                            <div><strong>Location:</strong> ${match[0].city || ''}, ${match[0].state || ''}</div>
-                            <div><strong>Source:</strong> ${match[0].source_file || match[0].source || 'Unknown'}</div>
+            counter.textContent = `Person ${currentVerificationIndex + 1} of ${data.length}`;
+
+            if (currentTab === 'moved') {
+                const p = person.new_person || {};
+                const m = person.existing_person || {};
+                content.innerHTML = `
+                    <div class="person-card">
+                        <div class="person-info">
+                            <div class="person-details">
+                                <h5>👤 New Person from Patent</h5>
+                                <div class="detail-row"><span class="detail-label">Name:</span><span>${p.first_name || ''} ${p.last_name || ''}</span></div>
+                                <div class="detail-row"><span class="detail-label">City:</span><span>${p.city || 'Unknown'}</span></div>
+                                <div class="detail-row"><span class="detail-label">State:</span><span>${p.state || 'Unknown'}</span></div>
+                                <div class="detail-row"><span class="detail-label">Patent:</span><span>${p.patent_number || 'Unknown'}</span></div>
+                                <div class="detail-row"><span class="detail-label">Role:</span><span>${p.person_type || 'Unknown'}</span></div>
+                                <div class="detail-row"><span class="detail-label">Match Score:</span><span>${person.matched_score || p.match_score || 'No score'}</span></div>
+                            </div>
+                            <div class="match-candidates">
+                                <h5>🏷️ Existing Person In Database</h5>
+                                <div class="match-candidate">
+                                    <div class="match-score">Top Match Score: ${person.matched_score || ''}</div>
+                                    <div><strong>Name:</strong> ${m.first_name || ''} ${m.last_name || ''}</div>
+                                    <div><strong>Location:</strong> ${m.city || ''}, ${m.state || ''}</div>
+                                    <div><strong>Source:</strong> ${m.source_file || m.source || 'Unknown'}</div>
+                                </div>
+                                <div style="color:#6c757d; font-size:0.9em;">Same name with different address. You can enrich using the new address and later update the existing record.</div>
+                            </div>
                         </div>
-                    `;
-                });
+                        <div class="verification-actions">
+                            <button class="btn-accept" onclick="makeVerificationDecision('existing')">✅ Mark as Existing (No Enrich)</button>
+                            <button class="btn-reject" onclick="makeVerificationDecision('new')">➕ Enrich From New Address</button>
+                            <button class="btn-update-db" onclick="updateExistingAddressInDB()">⬆️ Update In Database</button>
+                            <button class="btn-skip" onclick="makeVerificationDecision('skip')">⏭️ Skip for Now</button>
+                        </div>
+                    </div>
+                `;
             } else {
-                matchesHtml = '<div style="color: #6c757d; font-style: italic;">No specific matches found (scored 10-24)</div>';
+                let matchesHtml = '';
+                if (person.potential_matches && person.potential_matches.length > 0) {
+                    person.potential_matches.forEach((match) => {
+                        matchesHtml += `
+                            <div class="match-candidate">
+                                <div class="match-score">Match Score: ${match[1]}</div>
+                                <div><strong>Name:</strong> ${match[0].first_name || ''} ${match[0].last_name || ''}</div>
+                                <div><strong>Location:</strong> ${match[0].city || ''}, ${match[0].state || ''}</div>
+                                <div><strong>Source:</strong> ${match[0].source_file || match[0].source || 'Unknown'}</div>
+                            </div>
+                        `;
+                    });
+                } else {
+                    matchesHtml = '<div style="color: #6c757d; font-style: italic;">No specific matches found (scored 10-24)</div>';
+                }
+                content.innerHTML = `
+                    <div class="person-card">
+                        <div class="person-info">
+                            <div class="person-details">
+                                <h5>👤 New Person from Patent</h5>
+                                <div class="detail-row"><span class="detail-label">Name:</span><span>${person.first_name || ''} ${person.last_name || ''}</span></div>
+                                <div class="detail-row"><span class="detail-label">City:</span><span>${person.city || 'Unknown'}</span></div>
+                                <div class="detail-row"><span class="detail-label">State:</span><span>${person.state || 'Unknown'}</span></div>
+                                <div class="detail-row"><span class="detail-label">Patent:</span><span>${person.patent_number || 'Unknown'}</span></div>
+                                <div class="detail-row"><span class="detail-label">Role:</span><span>${person.person_type || 'Unknown'}</span></div>
+                                <div class="detail-row"><span class="detail-label">Match Score:</span><span>${person.match_score || 'No score'}</span></div>
+                            </div>
+                            <div class="match-candidates">
+                                <h5>🔍 Potential Existing Matches</h5>
+                                ${matchesHtml}
+                            </div>
+                        </div>
+                        <div class="verification-actions">
+                            <button class="btn-accept" onclick="makeVerificationDecision('existing')">✅ Mark as Existing Person</button>
+                            <button class="btn-reject" onclick="makeVerificationDecision('new')">➕ Add to Enrichment List</button>
+                            <button class="btn-skip" onclick="makeVerificationDecision('skip')">⏭️ Skip for Now</button>
+                        </div>
+                    </div>
+                `;
             }
-            
-            content.innerHTML = `
-                <div class="person-card">
-                    <div class="person-info">
-                        <div class="person-details">
-                            <h5>👤 New Person from Patent</h5>
-                            <div class="detail-row">
-                                <span class="detail-label">Name:</span>
-                                <span>${person.first_name || ''} ${person.last_name || ''}</span>
-                            </div>
-                            <div class="detail-row">
-                                <span class="detail-label">City:</span>
-                                <span>${person.city || 'Unknown'}</span>
-                            </div>
-                            <div class="detail-row">
-                                <span class="detail-label">State:</span>
-                                <span>${person.state || 'Unknown'}</span>
-                            </div>
-                            <div class="detail-row">
-                                <span class="detail-label">Patent:</span>
-                                <span>${person.patent_number || 'Unknown'}</span>
-                            </div>
-                            <div class="detail-row">
-                                <span class="detail-label">Role:</span>
-                                <span>${person.person_type || 'Unknown'}</span>
-                            </div>
-                            <div class="detail-row">
-                                <span class="detail-label">Match Score:</span>
-                                <span>${person.match_score || 'No score'}</span>
-                            </div>
-                        </div>
-                        <div class="match-candidates">
-                            <h5>🔍 Potential Existing Matches</h5>
-                            ${matchesHtml}
-                        </div>
-                    </div>
-                    <div class="verification-actions">
-                        <button class="btn-accept" onclick="makeVerificationDecision('existing')">
-                            ✅ Mark as Existing Person
-                        </button>
-                        <button class="btn-reject" onclick="makeVerificationDecision('new')">
-                            ➕ Add to Enrichment List
-                        </button>
-                        <button class="btn-skip" onclick="makeVerificationDecision('skip')">
-                            ⏭️ Skip for Now
-                        </button>
-                    </div>
-                </div>
-            `;
         }
         
         // Make verification decision
         function makeVerificationDecision(decision) {
-            const person = verificationData[currentVerificationIndex];
-            verificationDecisions[person.person_id] = {
-                decision: decision,
-                person: person
-            };
-            
+            const data = (currentTab === 'moved') ? movedVerificationData : potentialVerificationData;
+            const raw = data[currentVerificationIndex];
+            const person = (currentTab === 'moved') ? (raw.new_person || {}) : raw;
+            if (!person || !person.person_id) { return; }
+            verificationDecisions[person.person_id] = { decision, person, tab: currentTab };
             currentVerificationIndex++;
             showCurrentVerificationItem();
+        }
+
+        // Update existing person address in SQL and mark as existing in decisions
+        async function updateExistingAddressInDB() {
+            if (currentTab !== 'moved') { return; }
+            const item = movedVerificationData[currentVerificationIndex];
+            if (!item) return;
+            const p = item.new_person || {};
+            const existing = item.existing_person || {};
+            const orig = existing.original_record || {};
+            const existingId = orig.id || existing.id; // prefer original SQL id
+            if (!existingId) {
+                alert('Missing existing person ID; cannot update.');
+                return;
+            }
+            const payload = {
+                existing_id: existingId,
+                city: p.city || '',
+                state: p.state || '',
+                country: p.country || '',
+                address: p.address || '',
+                zip: p.zip || ''
+            };
+            try {
+                const resp = await fetch('/api/step1/update-existing-address', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const result = await resp.json();
+                if (!resp.ok || !result.success) {
+                    const msg = result && result.error ? result.error : 'Update failed';
+                    alert('Error updating database: ' + msg);
+                    return;
+                }
+                // Mark as existing in decisions and advance
+                if (p.person_id) {
+                    verificationDecisions[p.person_id] = { decision: 'existing', person: p, tab: 'moved', updated_db: true };
+                }
+                currentVerificationIndex++;
+                showCurrentVerificationItem();
+            } catch (e) {
+                alert('Network error updating database: ' + e.message);
+            }
         }
         
         // Show verification complete
@@ -1411,6 +1672,37 @@
                 const result = await response.json();
                 if (result.success && (result.status === 'started' || result.processing === true)) {
                     console.log('Step 2 started, beginning polling...');
+                    startPolling('step2');
+                } else if (result.success) {
+                    setStepCompleted(stepId, true);
+                    showOutput(stepId, result.output);
+                    if (result.files) showFileInfo(stepId, result.files);
+                    updateStatus();
+                } else {
+                    setStepCompleted(stepId, false);
+                    showOutput(stepId, `Error: ${result.error}`);
+                }
+            } catch (error) {
+                setStepCompleted(stepId, false);
+                showOutput(stepId, `Network error: ${error.message}`);
+            }
+            if (btn) btn.disabled = false;
+        }
+
+        // Run Step 2 (Express mode: skip prior failed)
+        async function runStep2Express() {
+            const stepId = 'step2';
+            setStepRunning(stepId);
+            const btn = document.getElementById('step2ExpressBtn');
+            if (btn) btn.disabled = true;
+            try {
+                const response = await fetch('/api/step2/express', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const result = await response.json();
+                if (result.success && (result.status === 'started' || result.processing === true)) {
+                    console.log('Step 2 (express) started, beginning polling...');
                     startPolling('step2');
                 } else if (result.success) {
                     setStepCompleted(stepId, true);
@@ -1529,6 +1821,92 @@
             });
             pollingIntervals.clear();
         });
+
+        // Export helpers
+        function exportCurrentEnrichments() {
+            window.open('/api/export/current-enrichments', '_blank');
+        }
+        function exportNewEnrichments() {
+            window.open('/api/export/new-enrichments', '_blank');
+        }
+        function exportAllEnrichments() {
+            window.open('/api/export/all-enrichments', '_blank');
+        }
+        function exportCurrentEnrichmentsFormatted() {
+            window.open('/api/export/current-enrichments-formatted', '_blank');
+        }
+        function exportNewEnrichmentsFormatted() {
+            window.open('/api/export/new-enrichments-formatted', '_blank');
+        }
+        function exportAllEnrichmentsFormatted() {
+            window.open('/api/export/all-enrichments-formatted', '_blank');
+        }
+
+        // Poll Step 2 progress periodically and show (processed/total)
+        async function pollStep2Progress() {
+            try {
+                const resp = await fetch('/api/step2/progress');
+                const p = await resp.json();
+                const el = document.getElementById('step2LiveProgress');
+                if (!el) return;
+                if (p && (p.total || p.processed)) {
+                    const processed = p.processed || 0;
+                    const total = p.total || 0;
+                    el.textContent = `Progress: (${processed}/${total})`;
+                    el.classList.remove('hidden');
+                } else {
+                    el.classList.add('hidden');
+                    el.textContent = '';
+                }
+            } catch (_) { /* ignore */ }
+        }
+        setInterval(pollStep2Progress, 12000); // every ~12s
+        document.addEventListener('DOMContentLoaded', pollStep2Progress);
+
+        // CSV Upload for Step 0
+        function triggerCsvUpload() {
+            const inp = document.getElementById('step0CsvInput');
+            if (!inp) return;
+            inp.value = '';
+            inp.onchange = async (e) => {
+                const file = e.target.files && e.target.files[0];
+                if (!file) return;
+                try {
+                    setStepRunning('step0');
+                    let resp;
+                    if (file.name.toLowerCase().endsWith('.xlsx') || (file.type && file.type.includes('spreadsheet'))) {
+                        const buf = await file.arrayBuffer();
+                        resp = await fetch('/api/step0/upload-xlsx', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
+                            body: buf
+                        });
+                    } else {
+                        const text = await file.text();
+                        resp = await fetch('/api/step0/upload-csv', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'text/csv' },
+                            body: text
+                        });
+                    }
+                    const result = await resp.json();
+                    if (!resp.ok || !result.success) {
+                        setStepCompleted('step0', false);
+                        const msg = `Error processing file: ${result.error || resp.statusText}` + (result.stderr ? `\n\n${result.stderr}` : '');
+                        showOutput('step0', msg);
+                        return;
+                    }
+                    setStepCompleted('step0', true);
+                    showOutput('step0', result.output || 'File uploaded successfully');
+                    if (result.files) showFileInfo('step0', result.files);
+                    updateStatus();
+                } catch (err) {
+                    setStepCompleted('step0', false);
+                    showOutput('step0', `Error: ${err.message}`);
+                }
+            };
+            inp.click();
+        }
     </script>
 </body>
 </html>
