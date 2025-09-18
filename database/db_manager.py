@@ -190,17 +190,86 @@ class ExistingDataDAO:
         """Load existing people for matching"""
         query = """
         SELECT id, first_name, last_name, city, state, country, 
-               address, zip, phone, email, company_name, record_type, source_file
+            address, zip, phone, email, company_name, record_type, source_file,
+            issue_id, inventor_id, mod_user
         FROM existing_people
         WHERE (first_name IS NOT NULL AND first_name != '') 
-           OR (last_name IS NOT NULL AND last_name != '')
+        OR (last_name IS NOT NULL AND last_name != '')
         """
         
         if limit:
             query += f" LIMIT {limit}"
         
         return self.db.execute_query(query)
-    
+
+    def find_people_by_lastnames_batch(self, last_names: List[str], limit_per_name: int = 1000) -> List[Dict[str, Any]]:
+        """
+        OPTIMIZED with deduplication and pagination: Find all people for multiple last names
+        Uses DISTINCT to eliminate exact duplicates on the 4 key matching fields
+        Uses pagination to ensure all records are returned regardless of MySQL limits
+        """
+        if not last_names:
+            return []
+            
+        try:
+            # Create placeholders for IN clause
+            placeholders = ', '.join(['%s'] * len(last_names))
+            
+            # UPDATED query to include the missing fields: address, email, issue_id, inventor_id, mod_user
+            base_query = f"""
+            SELECT DISTINCT 
+                LOWER(TRIM(first_name)) as first_name,
+                LOWER(TRIM(last_name)) as last_name, 
+                LOWER(TRIM(city)) as city, 
+                LOWER(TRIM(state)) as state,
+                country, address, zip, phone, email, company_name, record_type, source_file,
+                issue_id, inventor_id, mod_user
+            FROM existing_people 
+            WHERE LOWER(TRIM(last_name)) IN ({placeholders})
+            ORDER BY last_name, first_name, city, state
+            """
+            
+            # Implement pagination to get ALL records
+            page_size = 50000  # Reasonable page size to avoid memory issues
+            all_results = []
+            offset = 0
+            cleaned_names = [name.strip().lower() for name in last_names]
+            
+            with self.db.get_connection() as conn:
+                with conn.cursor(dictionary=True) as cursor:
+                    
+                    while True:
+                        # Add pagination to the query
+                        paginated_query = base_query + f" LIMIT {page_size} OFFSET {offset}"
+                        
+                        cursor.execute(paginated_query, tuple(cleaned_names))
+                        page_results = cursor.fetchall()
+                        
+                        if not page_results:
+                            break  # No more results
+                        
+                        all_results.extend(page_results)
+                        
+                        logger.info(f"Batch query page {offset//page_size + 1}: {len(page_results)} records (total so far: {len(all_results)})")
+                        
+                        # If we got fewer results than page_size, we're done
+                        if len(page_results) < page_size:
+                            break
+                            
+                        offset += page_size
+                        
+                        # Safety check to prevent infinite loops
+                        if offset > 1000000:  # Max 1M records per batch
+                            logger.warning(f"Reached maximum offset limit for batch query")
+                            break
+            
+            logger.info(f"Batch query for {len(last_names)} last names returned {len(all_results)} total DISTINCT records across {offset//page_size + 1} pages")
+            return all_results
+            
+        except Exception as e:
+            logger.error(f"Error in batch query for last names {last_names[:5]}...: {e}")
+            return []
+
     def bulk_insert_patents(self, patents: List[Dict[str, Any]]) -> int:
         """Bulk insert existing patents"""
         return self.db.insert_batch('existing_patents', patents)

@@ -51,7 +51,10 @@ def write_progress_update(stage, details=""):
     }
     
     # Print for immediate server capture
-    print(f"PROGRESS: {stage} - {details}")
+    if details:
+        print(f"PROGRESS: {stage} - {details}")
+    else:
+        print(f"PROGRESS: {stage}")
     sys.stdout.flush()
     
     # Also write to a progress file for persistence
@@ -115,7 +118,7 @@ def main():
         
         # Stage 2: Run the download with progress monitoring
         logger.info("Download process starting...")
-        write_progress_update("Connecting to API", "Initializing PatentsView API connection")
+        write_progress_update("Downloading patents")
         
         # This is where the long-running process happens
         result = run_patent_download(config)

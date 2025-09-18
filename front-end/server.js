@@ -8,6 +8,7 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const EXPORT_DEBUG = String(process.env.EXPORT_DEBUG || 'false').toLowerCase() === 'true';
 
 // Global state for tracking running processes
 const runningProcesses = new Map();
@@ -127,9 +128,11 @@ function runPythonScriptAsync(scriptPath, args = [], stepId) {
             MAX_RESULTS: process.env.MAX_RESULTS || '1000'
         };
         
-        const python = spawn(pythonExec, [scriptPath, ...args], {
+        // Force unbuffered Python stdout for real-time logs (-u) and env var
+        const spawnArgs = ['-u', scriptPath, ...args];
+        const python = spawn(pythonExec, spawnArgs, {
             cwd: path.join(__dirname, '..'),
-            env: env
+            env: { ...env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' }
         });
 
         
@@ -200,6 +203,28 @@ function runPythonScriptAsync(scriptPath, args = [], stepId) {
             reject({ success: false, error: error.message, stderr, stdout });
         });
     });
+}
+
+// Helper: write cycle-start marker to visually reset step states
+function markCycleReset(reason = 'step0') {
+    try {
+        const outDir = path.join(__dirname, '..', 'output');
+        if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+        const payload = { reason, timestamp: new Date().toISOString() };
+        fs.writeFileSync(path.join(outDir, 'cycle_start.json'), JSON.stringify(payload, null, 2));
+    } catch (e) {
+        console.warn('Failed to write cycle_start.json:', e.message);
+    }
+}
+
+function readCycleStart() {
+    try {
+        const p = path.join(__dirname, '..', 'output', 'cycle_start.json');
+        if (!fs.existsSync(p)) return null;
+        const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+        const ts = data && data.timestamp ? new Date(data.timestamp) : null;
+        return ts && !isNaN(ts.getTime()) ? ts : null;
+    } catch (_) { return null; }
 }
 
 // Helper function to create a configuration dict for Python scripts
@@ -313,6 +338,8 @@ app.post('/api/step0', async (req, res) => {
     
     try {
         console.log('Starting Step 0: Download Patents from PatentsView API (Async)');
+        // Mark start of a new cycle to visually reset downstream steps (1 & 2)
+        markCycleReset('step0_download');
         // Reset current-run enrichment outputs so counts start at 0 for this cycle
         try {
             const outDir = path.join(__dirname, '..', 'output');
@@ -351,6 +378,9 @@ app.post('/api/step0', async (req, res) => {
                 console.log('Step 0 completed successfully');
                 
                 // Store completion result for status endpoint
+                try {
+                    fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), (result && result.output) ? String(result.output) : '');
+                } catch (e) { console.warn('Could not persist last_step0_output.txt:', e.message); }
                 runningProcesses.set(stepId + '_completed', {
                     completed: true,
                     success: true,
@@ -363,6 +393,10 @@ app.post('/api/step0', async (req, res) => {
                 console.error('Step 0 failed:', error);
                 
                 // Store error result for status endpoint
+                try {
+                    const msg = [error.error || error.message || 'Step 0 failed', error.stderr || '', error.stdout || ''].filter(Boolean).join('\n\n');
+                    fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), msg);
+                } catch (e) { /* ignore */ }
                 runningProcesses.set(stepId + '_completed', {
                     completed: true,
                     success: false,
@@ -391,6 +425,51 @@ app.post('/api/step0', async (req, res) => {
     }
 });
 
+// Alternate Step 0: Run legacy extractor but write standard outputs
+app.post('/api/step0/extract', async (req, res) => {
+    const stepId = 'step0';
+    if (runningProcesses.has(stepId)) {
+        return res.json({ success: false, error: 'Step 0 is already running' });
+    }
+    try {
+        console.log('Starting Step 0 (Alternate): Extract patents (Async)');
+        // Mark start of a new cycle to visually reset downstream steps (1 & 2)
+        markCycleReset('step0_extract');
+        // Reset current-run enrichment outputs
+        try {
+            const outDir = path.join(__dirname, '..', 'output');
+            if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+            fs.writeFileSync(path.join(outDir, 'enriched_patents.json'), '[]');
+            const resetMeta = { reset: true, reset_by: 'step0_alternate', timestamp: new Date().toISOString() };
+            fs.writeFileSync(path.join(outDir, 'enrichment_results.json'), JSON.stringify(resetMeta, null, 2));
+            const csvPath = path.join(outDir, 'enriched_patents.csv');
+            if (fs.existsSync(csvPath)) fs.unlinkSync(csvPath);
+        } catch (e) { console.warn('Could not reset enrichment output files:', e.message); }
+
+        const { daysBack = 7, maxResults = 1000 } = req.body || {};
+        const args = ['--days-back', String(daysBack), '--max-results', String(maxResults)];
+        runPythonScriptAsync('front-end/run_step0_extract_wrapper.py', args, stepId)
+            .then((result) => {
+                const files = getStep0Files();
+                try {
+                    fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), (result && result.output) ? String(result.output) : '');
+                } catch (e) { /* ignore */ }
+                runningProcesses.set(stepId + '_completed', { completed: true, success: true, output: result.output, files });
+            })
+            .catch((error) => {
+                try {
+                    const msg = [error.error || error.message || 'Step 0 failed', error.stderr || '', error.stdout || ''].filter(Boolean).join('\n\n');
+                    fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), msg);
+                } catch (e) { /* ignore */ }
+                runningProcesses.set(stepId + '_completed', { completed: true, success: false, error: error.error || error.message, stderr: error.stderr, stdout: error.stdout });
+            });
+        return res.json({ success: true, status: 'started', processing: true, message: 'Alternate Step 0 started. Use /api/step0/status to check progress.' });
+    } catch (error) {
+        console.error('Alternate Step 0 startup error:', error);
+        return res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // Step 0: Upload CSV of patents/inventors (alternate input)
 app.post('/api/step0/upload-csv', express.text({ type: ['text/csv', 'text/plain', 'application/octet-stream'], limit: '50mb' }), async (req, res) => {
     const stepId = 'step0_upload';
@@ -400,6 +479,8 @@ app.post('/api/step0/upload-csv', express.text({ type: ['text/csv', 'text/plain'
             return res.status(400).json({ success: false, error: 'No CSV content received' });
         }
 
+        // Mark start of a new cycle to visually reset downstream steps (1 & 2)
+        markCycleReset('step0_csv_upload');
         // Reset current-run enrichment outputs so counts start at 0 for this cycle
         try {
             const outDir = path.join(__dirname, '..', 'output');
@@ -430,8 +511,14 @@ app.post('/api/step0/upload-csv', express.text({ type: ['text/csv', 'text/plain'
                 return res.status(500).json({ success: false, error: `Parser exited with code ${code}`, stderr, stdout });
             }
         });
-        // Write CSV body to stdin
-        proc.stdin.write(req.body);
+        // Write CSV body to stdin (ensure trailing newline so last row is read)
+        try {
+            let body = (typeof req.body === 'string') ? req.body : String(req.body || '');
+            if (!body.endsWith('\n')) body += '\n';
+            proc.stdin.write(body);
+        } catch (e) {
+            console.error('Error writing CSV body to parser:', e);
+        }
         proc.stdin.end();
     } catch (error) {
         console.error('Upload CSV failed:', error);
@@ -472,6 +559,7 @@ app.post('/api/step0/upload-xlsx', express.raw({ type: ['application/vnd.openxml
         proc.on('close', (code) => {
             if (code === 0) {
                 const files = getStep0Files();
+                try { fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), stdout || ''); } catch (e) { /* ignore */ }
                 return res.json({ success: true, message: 'XLSX uploaded and processed', files, output: stdout });
             } else {
                 return res.status(500).json({ success: false, error: `Parser exited with code ${code}`, stderr, stdout });
@@ -481,6 +569,50 @@ app.post('/api/step0/upload-xlsx', express.raw({ type: ['application/vnd.openxml
         proc.stdin.end();
     } catch (error) {
         console.error('Upload XLSX failed:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Step 0: Upload XML (alternate direct ingest)
+app.post('/api/step0/upload-xml', express.raw({ type: ['application/xml', 'text/xml', 'application/octet-stream'], limit: '500mb' }), async (req, res) => {
+    const stepId = 'step0_upload_xml';
+    try {
+        console.log('XML upload hit. content-type=', req.headers['content-type'], 'length=', req.headers['content-length']);
+        const buf = req.body;
+        if (!buf || !buf.length) {
+            return res.status(400).json({ success: false, error: 'No XML data received' });
+        }
+        // Mark start of a new cycle to visually reset downstream steps (1 & 2)
+        markCycleReset('step0_xml_upload');
+        try {
+            const outDir = path.join(__dirname, '..', 'output');
+            if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+            fs.writeFileSync(path.join(outDir, 'enriched_patents.json'), '[]');
+            const resetMeta = { reset: true, reset_by: 'xml_upload', timestamp: new Date().toISOString() };
+            fs.writeFileSync(path.join(outDir, 'enrichment_results.json'), JSON.stringify(resetMeta, null, 2));
+            const csvPath = path.join(outDir, 'enriched_patents.csv');
+            if (fs.existsSync(csvPath)) fs.unlinkSync(csvPath);
+        } catch (e) { console.warn('Could not reset enrichment output files on XML upload:', e.message); }
+
+        const pythonExec = resolvePython();
+        const scriptPath = path.join(__dirname, '..', 'scripts', 'process_uploaded_xml.py');
+        const env = { ...process.env, PYTHONPATH: path.join(__dirname, '..') };
+        const proc = spawn(pythonExec, [scriptPath], { env, cwd: path.join(__dirname, '..') });
+        let stdout = '', stderr = '';
+        proc.stdout.on('data', d => { stdout += d.toString(); });
+        proc.stderr.on('data', d => { const s = d.toString(); stderr += s; console.error(s); });
+        proc.on('close', (code) => {
+            if (code === 0) {
+                const files = getStep0Files();
+                try { fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), stdout || ''); } catch (e) { /* ignore */ }
+                return res.json({ success: true, message: 'XML uploaded and processed', files, output: stdout });
+            }
+            return res.status(500).json({ success: false, error: `Parser exited with code ${code}`, stderr, stdout });
+        });
+        proc.stdin.write(buf);
+        proc.stdin.end();
+    } catch (error) {
+        console.error('Upload XML failed:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -547,6 +679,21 @@ app.get('/api/step0/status', (req, res) => {
     });
 });
 
+// Get latest persisted Step 0 output (for refresh)
+app.get('/api/step0/latest-output', (req, res) => {
+    try {
+        const outPath = path.join(__dirname, '..', 'output', 'last_step0_output.txt');
+        let output = '';
+        if (fs.existsSync(outPath)) {
+            output = fs.readFileSync(outPath, 'utf8');
+        }
+        const files = getStep0Files();
+        return res.json({ success: true, output, files });
+    } catch (e) {
+        return res.status(500).json({ success: false, error: e.message });
+    }
+});
+
 // Step 1: Integrate Existing Data (was Step 0)
 app.post('/api/step1', async (req, res) => {
     const stepId = 'step1';
@@ -568,6 +715,9 @@ app.post('/api/step1', async (req, res) => {
                 console.log('Step 1 completed successfully');
                 
                 // Store completion result for status endpoint
+                try {
+                    fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step1_output.txt'), (result && result.output) ? String(result.output) : '');
+                } catch (e) { console.warn('Could not persist last_step1_output.txt:', e.message); }
                 runningProcesses.set(stepId + '_completed', {
                     completed: true,
                     success: true,
@@ -581,6 +731,10 @@ app.post('/api/step1', async (req, res) => {
                 console.error('Step 1 failed:', error);
                 
                 // Store error result for status endpoint
+                try {
+                    const msg = [error.error || error.message || 'Step 1 failed', error.stderr || '', error.stdout || ''].filter(Boolean).join('\n\n');
+                    fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step1_output.txt'), msg);
+                } catch (e) { /* ignore */ }
                 runningProcesses.set(stepId + '_completed', {
                     completed: true,
                     success: false,
@@ -684,6 +838,25 @@ app.get('/api/step1/status', (req, res) => {
         running: false,
         error: 'Step 1 has not been started or status was already retrieved'
     });
+});
+
+// Get latest persisted Step 1 output (for refresh)
+app.get('/api/step1/latest-output', (req, res) => {
+    try {
+        const outPath = path.join(__dirname, '..', 'output', 'last_step1_output.txt');
+        let output = '';
+        if (fs.existsSync(outPath)) {
+            output = fs.readFileSync(outPath, 'utf8');
+        }
+        const files = {
+            newPeople: getFileStats('output/new_people_for_enrichment.json'),
+            newPatents: getFileStats('output/filtered_new_patents.json'),
+            integrationResults: getFileStats('output/integration_results.json')
+        };
+        return res.json({ success: true, output, files });
+    } catch (e) {
+        return res.status(500).json({ success: false, error: e.message });
+    }
 });
 
 // Step 2 Status endpoint for polling
@@ -1006,6 +1179,10 @@ app.post('/api/step2', async (req, res) => {
                     enrichedCsv: getFileStats('output/enriched_patents.csv'),
                     enrichmentResults: getFileStats('output/enrichment_results.json')
                 };
+                // Persist last output log for retrieval after refresh
+                try {
+                    fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_output.txt'), (result && result.output) ? String(result.output) : '');
+                } catch (e) { console.warn('Could not persist last_step2_output.txt:', e.message); }
                 runningProcesses.set(stepId + '_completed', {
                     completed: true,
                     success: true,
@@ -1017,6 +1194,10 @@ app.post('/api/step2', async (req, res) => {
             })
             .catch((error) => {
                 console.error('Step 2 failed:', error);
+                try {
+                    const msg = [error.error || error.message || 'Step 2 failed', error.stderr || '', error.stdout || ''].filter(Boolean).join('\n\n');
+                    fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_output.txt'), msg);
+                } catch (e) { /* ignore */ }
                 runningProcesses.set(stepId + '_completed', {
                     completed: true,
                     success: false,
@@ -1061,6 +1242,9 @@ app.post('/api/step2/express', async (req, res) => {
                     enrichedCsv: getFileStats('output/enriched_patents.csv'),
                     enrichmentResults: getFileStats('output/enrichment_results.json')
                 };
+                try {
+                    fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_output.txt'), (result && result.output) ? String(result.output) : '');
+                } catch (e) { /* ignore */ }
                 runningProcesses.set(stepId + '_completed', {
                     completed: true,
                     success: true,
@@ -1072,6 +1256,10 @@ app.post('/api/step2/express', async (req, res) => {
             })
             .catch((error) => {
                 console.error('Step 2 (express) failed:', error);
+                try {
+                    const msg = [error.error || error.message || 'Step 2 failed', error.stderr || '', error.stdout || ''].filter(Boolean).join('\n\n');
+                    fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_output.txt'), msg);
+                } catch (e) { /* ignore */ }
                 runningProcesses.set(stepId + '_completed', {
                     completed: true,
                     success: false,
@@ -1086,6 +1274,29 @@ app.post('/api/step2/express', async (req, res) => {
         console.error('Step 2 (express) startup error:', error);
         res.status(500).json({ success: false, error: error.message });
     }
+});
+
+// Step 2: Rebuild CSVs from SQL (no API calls)
+app.post('/api/step2/rebuild-csvs', async (req, res) => {
+  try {
+    const stepId = `step2-rebuild-${Date.now()}`;
+    const pythonExec = resolvePython();
+    const args = ['front-end/run_step2_wrapper.py', '--rebuild'];
+    console.log('Starting Step 2: Rebuild CSVs (no API calls)');
+    runPythonScriptAsync('front-end/run_step2_wrapper.py', args, stepId)
+      .then((result) => {
+        const msg = result && result.output ? String(result.output) : '';
+        fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_output.txt'), msg);
+      })
+      .catch((err) => {
+        const msg = `Step 2 Rebuild failed: ${err && err.message ? err.message : String(err)}`;
+        fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_output.txt'), msg);
+      });
+    res.json({ success: true, status: 'started', processing: true, message: 'Rebuild CSVs started. Use /api/step2/status to check progress.' });
+  } catch (e) {
+    console.error('Failed to start Step 2 rebuild:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 // Step 3: Data Enrichment (was Step 2)
@@ -1182,6 +1393,56 @@ app.get('/api/status', (req, res) => {
             running: runningProcesses.has('step2')
         }
     };
+    // Apply cycle reset: treat Step 1/2 results as not completed if older than cycle start
+    try {
+        const cycleStartTs = readCycleStart();
+        if (cycleStartTs) {
+            try {
+                if (status.step1 && status.step1.integrationResults && status.step1.integrationResults.exists) {
+                    const m = status.step1.integrationResults.modified;
+                    if (m && new Date(m).getTime() <= cycleStartTs.getTime()) {
+                        status.step1.integrationResults.exists = false;
+                    }
+                }
+            } catch (_) {}
+            try {
+                if (status.step2) {
+                    // Mask enrichmentResults
+                    if (status.step2.enrichmentResults && status.step2.enrichmentResults.exists) {
+                        const m = status.step2.enrichmentResults.modified;
+                        if (m && new Date(m).getTime() <= cycleStartTs.getTime()) {
+                            status.step2.enrichmentResults.exists = false;
+                        }
+                    }
+                    // Mask enrichedData (used by UI to mark Completed)
+                    if (status.step2.enrichedData && status.step2.enrichedData.exists) {
+                        const m2 = status.step2.enrichedData.modified;
+                        if (m2 && new Date(m2).getTime() <= cycleStartTs.getTime()) {
+                            status.step2.enrichedData.exists = false;
+                        }
+                    }
+                    // Mask enrichedCsv as well for consistency
+                    if (status.step2.enrichedCsv && status.step2.enrichedCsv.exists) {
+                        const m3 = status.step2.enrichedCsv.modified;
+                        if (m3 && new Date(m3).getTime() <= cycleStartTs.getTime()) {
+                            status.step2.enrichedCsv.exists = false;
+                        }
+                    }
+                }
+            } catch (_) {}
+            // If enrichment_results.json contains a reset flag, force Step 2 to appear not completed
+            try {
+                const enr = readJsonFile('output/enrichment_results.json');
+                const enrStats = status.step2 && status.step2.enrichmentResults;
+                const enrWasReset = enr && enr.reset === true && (!enrStats || !enrStats.modified || (new Date(enrStats.modified).getTime() >= cycleStartTs.getTime()));
+                if (enrWasReset && status.step2) {
+                    if (status.step2.enrichmentResults) status.step2.enrichmentResults.exists = false;
+                    if (status.step2.enrichedData) status.step2.enrichedData.exists = false;
+                    if (status.step2.enrichedCsv) status.step2.enrichedCsv.exists = false;
+                }
+            } catch (_) { /* ignore */ }
+        }
+    } catch (_) { /* ignore */ }
     
     // Add file counts
     const downloadedPatents = readJsonFile('output/downloaded_patents.json');
@@ -1204,7 +1465,14 @@ app.get('/api/status', (req, res) => {
     status.lastRun = {
         step0: status.step0.downloadResults.modified || null,
         step1: status.step1.integrationResults.modified || null,
-        step2: status.step2.enrichmentResults.modified || null
+        step2: (() => {
+            // Hide last run timestamp if this is a reset marker
+            try {
+                const enr = readJsonFile('output/enrichment_results.json');
+                if (enr && enr.reset === true) return null;
+            } catch (_) {}
+            return status.step2.enrichmentResults.modified || null;
+        })()
     };
     
     // Add verification info
@@ -1265,7 +1533,9 @@ app.listen(PORT, () => {
     console.log('🚀 Patent Processing Pipeline Server Started (RESTRUCTURED PIPELINE)');
     console.log('📁 Available endpoints:');
     console.log('   POST /api/step0 - Download patents from PatentsView API (NEW)');
+    console.log('   POST /api/step0/extract - Alternate Step 0 (legacy extractor)');
     console.log('   GET  /api/step0/status - Check Step 0 progress');
+    console.log('   POST /api/step0/upload-xml - Upload raw XML to ingest');
     console.log('   POST /api/step1 - Integrate with existing data (was Step 0)');
     console.log('   GET  /api/step1/status - Check Step 1 progress');
     console.log('   GET  /api/verification-data - Get people needing verification');
@@ -1297,6 +1567,27 @@ function writeCsv(res, filename, headers, rows) {
     res.end();
 }
 
+function writeCsvToFile(filePath, headers, rows) {
+    try {
+        const full = path.join(__dirname, '..', filePath);
+        const dir = path.dirname(full);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        const fd = fs.openSync(full, 'w');
+        fs.writeSync(fd, headers.join(',') + '\n');
+        for (const row of rows) {
+            const line = headers.map(h => csvEscape(row[h])).join(',') + '\n';
+            fs.writeSync(fd, line);
+        }
+        fs.closeSync(fd);
+        const stats = fs.statSync(full);
+        console.log(`[export] Wrote CSV file ${filePath} (${stats.size} bytes, rows=${rows.length})`);
+        return true;
+    } catch (e) {
+        console.error('[export] Failed writing CSV file', filePath, e);
+        return false;
+    }
+}
+
 // Simplify dotted headers to last segment; ensure uniqueness with suffixes.
 function simplifyHeadersAndRows(headers, rows) {
     const counts = new Map();
@@ -1318,6 +1609,221 @@ function simplifyHeadersAndRows(headers, rows) {
         return o;
     });
     return { headers: display, rows: remappedRows };
+}
+
+// Minimal hydrator: only fetch inventor_id, mod_user, title from SQL by name+city+state
+async function hydrateThreeFields(arr, label = 'hydrate_three_fields') {
+    let conn;
+    try {
+        const mysql = require('mysql2/promise');
+        conn = await mysql.createConnection({
+            host: process.env.DB_HOST || 'localhost',
+            port: Number(process.env.DB_PORT || 3306),
+            database: process.env.DB_NAME || 'patent_data',
+            user: process.env.DB_USER || 'root',
+            password: process.env.DB_PASSWORD || 'password'
+        });
+    } catch (e) {
+        console.warn('[export] Could not connect to DB to hydrate (3 fields):', e.message);
+        return arr; // return unmodified if no DB
+    }
+
+    const cache = new Map();
+    const patentTitleCache = new Map();
+    const norm = (v) => (v || '').toString().trim();
+    const keyOf = (first, last, city, state) => `${norm(first).toLowerCase()}|${norm(last).toLowerCase()}|${norm(city).toLowerCase()}|${norm(state).toLowerCase()}`;
+    const debug = { queried: 0, foundExact: 0, foundNoCity: 0, assigned: { inventor_id:0, mod_user:0, title:0, patent_no:0, mail_to_add1:0, mail_to_zip:0 }, errors: 0, columns: [], selected: {} };
+
+    // Build select list dynamically based on available columns (existing_people)
+    let selectCols = `inventor_id, mod_user, title, patent_no, mail_to_add1, mail_to_zip`;
+    try {
+        const [colRows] = await conn.execute('SHOW COLUMNS FROM existing_people');
+        const cols = Array.isArray(colRows) ? colRows.map(r => r.Field || r.COLUMN_NAME || r.field).filter(Boolean) : [];
+        debug.columns = cols;
+        const pick = (want, alts=[]) => {
+            if (cols.includes(want)) return want;
+            for (const a of alts) if (cols.includes(a)) return a;
+            return null;
+        };
+        const mapping = {
+            inventor_id: pick('inventor_id'),
+            mod_user: pick('mod_user'),
+            title: pick('title'),
+            patent_no: pick('patent_no'),
+            mail_to_add1: pick('mail_to_add1', ['address','mail_to_add_1','addr1']),
+            mail_to_zip: pick('mail_to_zip', ['zip','postal_code'])
+        };
+        debug.selected = mapping;
+        const parts = [];
+        for (const [alias, col] of Object.entries(mapping)) {
+            if (!col) continue;
+            parts.push(col === alias ? col : `${col} AS ${alias}`);
+        }
+        if (parts.length > 0) selectCols = parts.join(', ');
+        // Prefer rows that actually have these fields populated
+        const orderParts = [];
+        if (mapping.patent_no) orderParts.push(`(${mapping.patent_no} IS NOT NULL AND ${mapping.patent_no} <> '') DESC`);
+        if (mapping.title) orderParts.push(`(${mapping.title} IS NOT NULL AND ${mapping.title} <> '') DESC`);
+        if (mapping.mail_to_add1) orderParts.push(`(${mapping.mail_to_add1} IS NOT NULL AND ${mapping.mail_to_add1} <> '') DESC`);
+        if (mapping.mail_to_zip) orderParts.push(`(${mapping.mail_to_zip} IS NOT NULL AND ${mapping.mail_to_zip} <> '') DESC`);
+        var hydrateOrderClause = orderParts.length ? ` ORDER BY ${orderParts.join(', ')}` : '';
+    } catch (e) {
+        console.warn('[export][hydrate] SHOW COLUMNS failed:', e.message);
+    }
+
+    // Build select list for existing_people_new separately (may have different columns)
+    let selectColsNew = selectCols;
+    let hydrateOrderClauseNew = hydrateOrderClause || '';
+    try {
+        const [colRows2] = await conn.execute('SHOW COLUMNS FROM existing_people_new');
+        const cols2 = Array.isArray(colRows2) ? colRows2.map(r => r.Field || r.COLUMN_NAME || r.field).filter(Boolean) : [];
+        const pick2 = (want, alts=[]) => {
+            if (cols2.includes(want)) return want;
+            for (const a of alts) if (cols2.includes(a)) return a;
+            return null;
+        };
+        const mapping2 = {
+            inventor_id: pick2('inventor_id'),
+            mod_user: pick2('mod_user'),
+            title: pick2('title'),
+            patent_no: pick2('patent_no'),
+            mail_to_add1: pick2('mail_to_add1', ['address','mail_to_add_1','addr1']),
+            mail_to_zip: pick2('mail_to_zip', ['zip','postal_code'])
+        };
+        const parts2 = [];
+        for (const [alias, col] of Object.entries(mapping2)) {
+            if (!col) continue;
+            parts2.push(col === alias ? col : `${col} AS ${alias}`);
+        }
+        if (parts2.length > 0) selectColsNew = parts2.join(', ');
+        const orderParts2 = [];
+        if (mapping2.patent_no) orderParts2.push(`(${mapping2.patent_no} IS NOT NULL AND ${mapping2.patent_no} <> '') DESC`);
+        if (mapping2.title) orderParts2.push(`(${mapping2.title} IS NOT NULL AND ${mapping2.title} <> '') DESC`);
+        if (mapping2.mail_to_add1) orderParts2.push(`(${mapping2.mail_to_add1} IS NOT NULL AND ${mapping2.mail_to_add1} <> '') DESC`);
+        if (mapping2.mail_to_zip) orderParts2.push(`(${mapping2.mail_to_zip} IS NOT NULL AND ${mapping2.mail_to_zip} <> '') DESC`);
+        hydrateOrderClauseNew = orderParts2.length ? ` ORDER BY ${orderParts2.join(', ')}` : '';
+    } catch (e) {
+        // Table may not exist; ignore
+    }
+    const makeQuery = (table) => `SELECT ${selectCols} FROM ${table}
+                   WHERE first_name = ? AND last_name = ?
+                     AND IFNULL(city,'') = ? AND IFNULL(state,'') = ?${typeof hydrateOrderClause === 'string' ? hydrateOrderClause : ''}
+                   LIMIT 1`;
+    const makeQueryNew = (table) => `SELECT ${selectColsNew} FROM ${table}
+                    WHERE first_name = ? AND last_name = ?
+                      AND IFNULL(city,'') = ? AND IFNULL(state,'') = ?${typeof hydrateOrderClauseNew === 'string' ? hydrateOrderClauseNew : ''}
+                    LIMIT 1`;
+
+    for (const item of arr) {
+        // Try to locate original person fields from enriched structures
+        const edRoot = (item && item.enrichment_result && item.enrichment_result.enriched_data)
+            ? item.enrichment_result.enriched_data
+            : (item && item.enriched_data) || null;
+        const original = edRoot ? (edRoot.original_data || edRoot.original_person || item.original_person || {}) : (item || {});
+        const first = original.first_name || item.first_name || '';
+        const last = original.last_name || item.last_name || '';
+        const city = original.city || item.city || '';
+        const state = original.state || item.state || '';
+        const k = keyOf(first, last, city, state);
+        if (cache.has(k)) {
+            Object.assign(item, cache.get(k));
+            continue;
+        }
+        try {
+            let [rows] = await conn.execute(makeQuery('existing_people'), [norm(first), norm(last), norm(city), norm(state)]);
+            debug.queried++;
+            if (!rows || rows.length === 0) {
+                [rows] = await conn.execute(makeQueryNew('existing_people_new'), [norm(first), norm(last), norm(city), norm(state)]);
+            }
+            let source = 'exact';
+            // Fallback: ignore city if still not found
+            if (!rows || rows.length === 0) {
+                const makeQueryNoCity = (table) => `SELECT ${selectCols} FROM ${table}
+                    WHERE first_name = ? AND last_name = ?
+                      AND IFNULL(state,'') = ?${typeof hydrateOrderClause === 'string' ? hydrateOrderClause : ''}
+                    LIMIT 1`;
+                [rows] = await conn.execute(makeQueryNoCity('existing_people'), [norm(first), norm(last), norm(state)]);
+                if (!rows || rows.length === 0) {
+                    const makeQueryNoCityNew = (table) => `SELECT ${selectColsNew} FROM ${table}
+                        WHERE first_name = ? AND last_name = ?
+                          AND IFNULL(state,'') = ?${typeof hydrateOrderClauseNew === 'string' ? hydrateOrderClauseNew : ''}
+                        LIMIT 1`;
+                    [rows] = await conn.execute(makeQueryNoCityNew('existing_people_new'), [norm(first), norm(last), norm(state)]);
+                }
+                source = 'no_city';
+            }
+            const extra = rows && rows[0] ? rows[0] : {};
+            cache.set(k, extra);
+            // Only attach the three fields explicitly
+            item._hydrated_fields = item._hydrated_fields || [];
+            if (rows && rows.length > 0) {
+                if (source === 'exact') debug.foundExact++; else debug.foundNoCity++;
+            }
+            if (extra.inventor_id != null) { item.inventor_id = extra.inventor_id; debug.assigned.inventor_id++; item._hydrated_fields.push('inventor_id'); }
+            if (extra.mod_user != null) { item.mod_user = extra.mod_user; debug.assigned.mod_user++; item._hydrated_fields.push('mod_user'); }
+            if (extra.title != null) { item.title = extra.title; debug.assigned.title++; item._hydrated_fields.push('title'); }
+            if (extra.patent_no != null) { item.patent_no = extra.patent_no; debug.assigned.patent_no++; item._hydrated_fields.push('patent_no'); }
+            if (extra.mail_to_add1 != null) { item.mail_to_add1 = extra.mail_to_add1; debug.assigned.mail_to_add1++; item._hydrated_fields.push('mail_to_add1'); }
+            if (extra.mail_to_zip != null) { item.mail_to_zip = extra.mail_to_zip; debug.assigned.mail_to_zip++; item._hydrated_fields.push('mail_to_zip'); }
+            // Ensure patent_no at least reflects patent_number if present
+            if (!item.patent_no && (original.patent_number || item.patent_number)) {
+                item.patent_no = original.patent_number || item.patent_number;
+            }
+            // If title is still empty, try to resolve from downloaded_patents by patent_number
+            const pn = (original.patent_number || item.patent_number || item.patent_no || '').toString().trim();
+            if (!item.title && pn) {
+                if (!patentTitleCache.has(pn)) {
+                    try {
+                        const [prow] = await conn.execute("SELECT patent_title FROM downloaded_patents WHERE patent_number = ? LIMIT 1", [pn]);
+                        const title = (prow && prow[0] && (prow[0].patent_title || prow[0].title)) || '';
+                        patentTitleCache.set(pn, title || '');
+                    } catch (_) {
+                        patentTitleCache.set(pn, '');
+                    }
+                }
+                const t = patentTitleCache.get(pn);
+                if (t) { item.title = t; item._hydrated_fields.push('title'); }
+            }
+        } catch (e) {
+            // On query error, just skip hydration for this item
+            cache.set(k, {});
+            debug.errors++;
+            if (debug.errors <= 5) console.warn('[export][hydrate] query error for', {first, last, city, state}, e.message);
+        }
+    }
+    try { await conn.end(); } catch (_) {}
+    try {
+        const dir = ensureLogsDir();
+        if (dir) {
+            const fname = `${String(label).replace(/\s+/g,'_').toLowerCase()}_hydration_summary.json`;
+            const out = path.join(dir, fname);
+            fs.writeFileSync(out, JSON.stringify({ debug, generated_at: new Date().toISOString() }, null, 2));
+            if (EXPORT_DEBUG) console.log(`[export][diag] hydration summary written: ${out}`);
+        } else {
+            console.log('[export][diag] hydration summary (no logs dir):', debug);
+        }
+    } catch (_) {}
+    return arr;
+}
+
+// Build a stable person signature to dedupe across sources (enriched vs step1 lists)
+function personSignature(item) {
+    // Try to locate original person fields from enriched structures
+    const edRoot = (item && (item.enrichment_result && item.enrichment_result.enriched_data))
+        ? item.enrichment_result.enriched_data
+        : (item && item.enriched_data) || null;
+    const original = edRoot ? (edRoot.original_data || edRoot.original_person || item.original_person || {}) : (item || {});
+
+    const get = (k) => {
+        const v = (original && original[k]) ?? item[k] ?? '';
+        return typeof v === 'string' ? v.trim().toLowerCase() : String(v || '').trim().toLowerCase();
+    };
+    const first = get('first_name');
+    const last = get('last_name');
+    const city = get('city');
+    const state = get('state');
+    const patent = (original.patent_number || item.patent_number || '').toString().trim();
+    return `${first}_${last}_${city}_${state}_${patent}`;
 }
 
 function extractEnrichedRow(item) {
@@ -1344,6 +1850,31 @@ function extractEnrichedRow(item) {
         company: company || ''
     };
 }
+
+function extractExistingRow(item) {
+    // Map a Step 1 existing person (already in DB) into the unified export shape
+    return {
+        first_name: item.first_name || '',
+        last_name: item.last_name || '',
+        city: item.city || '',
+        state: item.state || '',
+        country: item.country || 'US',
+        patent_number: item.patent_number || '',
+        patent_title: item.patent_title || '',
+        person_type: item.person_type || 'inventor',
+        match_score: item.match_score || '',
+        email: '',
+        linkedin_url: '',
+        job_title: '',
+        company: ''
+    };
+}
+
+const UNIFIED_HEADERS = [
+    'first_name','last_name','city','state','country',
+    'patent_number','patent_title','person_type','match_score',
+    'email','linkedin_url','job_title','company'
+];
 
 function extractNewPersonRow(item) {
     // Flatten a row from new_people_for_enrichment.json for CSV export
@@ -1401,23 +1932,13 @@ function buildFlatRowsFromEnriched(data) {
 // Export current run enrichments from output/enriched_patents.json
 app.get('/api/export/current-enrichments', (req, res) => {
     try {
-        // Prefer current cycle combined file (new + matched existing)
-        let data = readJsonFile('output/current_cycle_enriched.json');
-        if (!data || !Array.isArray(data) || data.length === 0) {
-            data = readJsonFile('output/enriched_patents.json');
+        const outPath = path.join(__dirname, '..', 'output', 'current_enrichments.csv');
+        if (!fs.existsSync(outPath)) {
+            return res.status(404).json({ error: 'current_enrichments.csv not found. Run Step 2 first.' });
         }
-        if (!data || !Array.isArray(data) || data.length === 0) {
-            return res.status(404).json({ error: 'No current enriched data found. Run Step 2 first.' });
-        }
-        // Flatten each record and build dynamic headers
-        const rows = buildFlatRowsFromEnriched(data);
-        const headerSet = new Set();
-        for (const r of rows) {
-            for (const k of Object.keys(r)) headerSet.add(k);
-        }
-        const headers = Array.from(headerSet).sort();
-        const simplified = simplifyHeadersAndRows(headers, rows);
-        writeCsv(res, 'current_enrichments.csv', simplified.headers, simplified.rows);
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename="current_enrichments.csv"');
+        fs.createReadStream(outPath).pipe(res);
     } catch (e) {
         console.error('Export current enrichments failed:', e);
         res.status(500).json({ error: e.message });
@@ -1427,18 +1948,13 @@ app.get('/api/export/current-enrichments', (req, res) => {
 // Export only new enrichments from this Step 2 run
 app.get('/api/export/new-enrichments', (req, res) => {
     try {
-        const data = readJsonFile('output/enriched_patents_new_this_run.json');
-        if (!data || !Array.isArray(data) || data.length === 0) {
-            return res.status(404).json({ error: 'No new enrichments in this run. Run Step 2 with new people.' });
+        const outPath = path.join(__dirname, '..', 'output', 'new_enrichments.csv');
+        if (!fs.existsSync(outPath)) {
+            return res.status(404).json({ error: 'new_enrichments.csv not found. Run Step 2 first.' });
         }
-        const rows = buildFlatRowsFromEnriched(data);
-        const headerSet = new Set();
-        for (const r of rows) {
-            for (const k of Object.keys(r)) headerSet.add(k);
-        }
-        const headers = Array.from(headerSet).sort();
-        const simplified = simplifyHeadersAndRows(headers, rows);
-        writeCsv(res, 'new_enrichments.csv', simplified.headers, simplified.rows);
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename="new_enrichments.csv"');
+        fs.createReadStream(outPath).pipe(res);
     } catch (e) {
         console.error('Export new enrichments failed:', e);
         res.status(500).json({ error: e.message });
@@ -1450,7 +1966,7 @@ function sanitizeForCsv(val) {
     if (val === null || val === undefined) return '';
     if (typeof val === 'boolean') return '';
     const s = String(val).trim();
-    if (/^(nan|null|none|true|false)$/i.test(s)) {
+    if (/^(nan|null|none)$/i.test(s)) {
         // PDL may return presence booleans or 'nan'-like strings; treat as empty
         return '';
     }
@@ -1463,6 +1979,21 @@ function firstNonEmpty(...vals) {
         if (s !== '') return s;
     }
     return '';
+}
+// Helpers to safely extract address details from PDL payloads
+function pickPdlStreet(pdl) {
+  if (!pdl) return '';
+  // Per request: use only the company street address field
+  const s = firstNonEmpty(pdl.job_company_location_street_address);
+  if (s) return s;
+  return '';
+}
+function pickPdlZip(pdl) {
+  if (!pdl) return '';
+  // Per request: use only the company postal code field
+  const z = firstNonEmpty(pdl.job_company_location_postal_code);
+  if (z) return z;
+  return '';
 }
 const FORMATTED_HEADERS = [
   'issue_id','new_issue_rec_num','inventor_id','patent_no','title','issue_date',
@@ -1479,43 +2010,49 @@ function buildFormattedRow(item) {
   const ed = hasSqlRoot ? item.enrichment_result.enriched_data : (item.enriched_data || {});
   const original = ed.original_data || ed.original_person || item.original_person || {};
   const pdl = ed.pdl_data || (hasSqlRoot ? (item.enrichment_result.enriched_data && item.enrichment_result.enriched_data.pdl_data) : {}) || {};
+  const existing = ed.existing_record || {}; // backfilled from SQL at save time when available
   // choose an email if present
   let email = '';
   if (Array.isArray(pdl.emails) && pdl.emails.length > 0) {
     const e0 = pdl.emails[0];
     email = (typeof e0 === 'string') ? e0 : (e0 && (e0.address || e0.email || ''));
   }
-  const street = firstNonEmpty(pdl.job_company_location_street_address, pdl.location_street_address);
+  const streetFromPdl = pickPdlStreet(pdl);
+  // Prefer the PDL company street address first
+  const street = firstNonEmpty(streetFromPdl, item.mail_to_add1, existing.mail_to_add1);
   const line2 = firstNonEmpty(pdl.job_company_location_address_line_2, pdl.location_address_line_2);
   const city = firstNonEmpty(pdl.job_company_location_locality, pdl.location_locality, original.city, item.city);
-  const state = firstNonEmpty(pdl.job_company_location_region, pdl.location_region, original.state, item.state);
-  const zip = firstNonEmpty(pdl.job_company_location_postal_code, pdl.location_postal_code);
+  // Do not override state with PDL; preserve original/existing which are 2-letter by default
+  const state = firstNonEmpty(item.mail_to_state, existing.mail_to_state, original.state, item.state);
+  const zipFromPdl = pickPdlZip(pdl);
+  // Prefer the PDL company postal code first
+  const zip = firstNonEmpty(zipFromPdl, item.mail_to_zip, existing.mail_to_zip);
   const country = firstNonEmpty(pdl.job_company_location_country, pdl.location_country, original.country, item.country);
   const first = firstNonEmpty(original.first_name, item.first_name, (item.enrichment_result && item.enrichment_result.original_name && item.enrichment_result.original_name.split(' ')[0]));
   const last = firstNonEmpty(original.last_name, item.last_name, (item.enrichment_result && item.enrichment_result.original_name && item.enrichment_result.original_name.split(' ').slice(1).join(' ')));
   const full = (first || last) ? `${first} ${last}`.trim() : '';
   const formatted = {
-    issue_id: '',
-    new_issue_rec_num: '',
-    inventor_id: '',
-    patent_no: firstNonEmpty(original.patent_number, item.patent_number, (item.enrichment_result && item.enrichment_result.patent_number)),
-    title: firstNonEmpty(item.patent_title, original.patent_title, (item.enrichment_result && item.enrichment_result.patent_title)),
-    issue_date: '',
-    mail_to_assignee: '',
-    mail_to_name: sanitizeForCsv(full),
-    mail_to_add1: street,
-    mail_to_add2: line2,
-    mail_to_add3: '',
-    mail_to_city: city,
-    mail_to_state: state,
-    mail_to_zip: zip,
-    mail_to_country: country,
-    mail_to_send_key: '',
+    issue_id: item.issue_id || '',
+    new_issue_rec_num: item.new_issue_rec_num || '',
+    inventor_id: firstNonEmpty(item.inventor_id, existing.inventor_id),
+    patent_no: firstNonEmpty(item.patent_no, existing.patent_no, original.patent_number, item.patent_number, (item.enrichment_result && item.enrichment_result.patent_number)),
+    title: firstNonEmpty(item.title, existing.title, item.patent_title, original.patent_title, (item.enrichment_result && item.enrichment_result.patent_title)),
+    issue_date: item.issue_date || '',
+    mail_to_assignee: item.mail_to_assignee || '',
+    mail_to_name: sanitizeForCsv(firstNonEmpty(item.mail_to_name, full)),
+    mail_to_add1: firstNonEmpty(item.mail_to_add1, existing.mail_to_add1, street),
+    mail_to_add2: firstNonEmpty(item.mail_to_add2, line2),
+    mail_to_add3: item.mail_to_add3 || '',
+    mail_to_city: firstNonEmpty(item.mail_to_city, city),
+    mail_to_state: firstNonEmpty(item.mail_to_state, state),
+    mail_to_zip: firstNonEmpty(item.mail_to_zip, existing.mail_to_zip, zip),
+    mail_to_country: firstNonEmpty(item.mail_to_country, country),
+    mail_to_send_key: item.mail_to_send_key || '',
     inventor_first: first,
     inventor_last: last,
-    mod_user: '',
-    bar_code: '',
-    inventor_contact: email
+    mod_user: firstNonEmpty(item.mod_user, existing.mod_user),
+    bar_code: item.bar_code || '',
+    inventor_contact: firstNonEmpty(item.inventor_contact, email)
   };
   // Ensure all keys exist
   for (const h of FORMATTED_HEADERS) {
@@ -1529,17 +2066,169 @@ function writeFormattedCsv(res, filename, data) {
   writeCsv(res, filename, FORMATTED_HEADERS, rows);
 }
 
+function writeFormattedCsvToFile(filePath, data) {
+  const rows = data.map(buildFormattedRow);
+  return writeCsvToFile(filePath, FORMATTED_HEADERS, rows);
+}
+
+// Build the unified CURRENT scope for both normal and formatted exports
+// CURRENT = people involved in this run only:
+//   - current_cycle_enriched.json (newly_enriched + matched_existing)
+//   - step1 existing people (existing_people_in_db.json or existing_people_found.json)
+// Then dedupe by signature and, when possible, overlay the enriched
+// version from the full snapshot so details are present for skipped entries.
+function getCurrentScopeRecordsForExport() {
+  // Helper signature for current scope: ignore patent number; use only name+city+state
+  const sigByPerson = (item) => {
+    const edRoot = (item && (item.enrichment_result && item.enrichment_result.enriched_data))
+      ? item.enrichment_result.enriched_data
+      : (item && item.enriched_data) || null;
+    const original = edRoot ? (edRoot.original_data || edRoot.original_person || item.original_person || {}) : (item || {});
+    const norm = (v) => (v == null ? '' : String(v)).trim().toLowerCase();
+    const first = norm(original.first_name || item.first_name);
+    const last = norm(original.last_name || item.last_name);
+    const city = norm(original.city || item.city);
+    const state = norm(original.state || item.state);
+    return `${first}|${last}|${city}|${state}`;
+  };
+
+  // Load current-cycle records (newly_enriched + matched_existing saved by Step 2)
+  let current = readJsonFile('output/current_cycle_enriched.json');
+  if (!Array.isArray(current)) current = [];
+
+  // Step 1 existing people for this run
+  const step1ExistingRaw = readJsonFile('output/existing_people_in_db.json') || readJsonFile('output/existing_people_found.json') || [];
+
+  // Dedupe current by person
+  const curSeen = new Set();
+  const currentDedup = [];
+  for (const it of current) {
+    const s = sigByPerson(it);
+    if (!s) continue;
+    if (curSeen.has(s)) continue;
+    curSeen.add(s);
+    currentDedup.push(it);
+  }
+
+  // Merge current + step1 existing, preferring enriched entries on duplicates
+  const combined = currentDedup.concat((Array.isArray(step1ExistingRaw) ? step1ExistingRaw : []).filter(it => !!sigByPerson(it)));
+  const merged = dedupeBySignature(combined);
+
+  // Build enrichment overlay map from full snapshot (allows skipped/already-enriched to have details)
+  let fullSnapshot = readJsonFile('output/enriched_patents.json');
+  if (!Array.isArray(fullSnapshot)) fullSnapshot = [];
+  const enrichedMap = new Map();
+  for (const rec of fullSnapshot) {
+    const s = sigByPerson(rec);
+    if (s) enrichedMap.set(s, rec);
+  }
+
+  // Overlay for merged set
+  const currentOverlaid = merged.map(it => {
+    const s = sigByPerson(it);
+    if (s && enrichedMap.has(s)) return enrichedMap.get(s);
+    return it;
+  });
+  const scoped = currentOverlaid;
+
+  console.log(`[export] CURRENT scope -> current_cycle=${current.length}, step1_existing=${Array.isArray(step1ExistingRaw)?step1ExistingRaw.length:0},` +
+              ` current_dedup=${currentDedup.length}, merged=${merged.length}, final=${scoped.length}`);
+  return scoped;
+}
+
+// Dedupe helpers: keep one row per person signature; prefer rows that have enriched_data
+function dedupeBySignature(items) {
+  const seen = new Map();
+  for (const it of items) {
+    const sig = personSignature(it);
+    if (!sig) continue;
+    if (!seen.has(sig)) {
+      seen.set(sig, it);
+      continue;
+    }
+    const cur = seen.get(sig);
+    const curHasEnriched = !!(cur && (cur.enriched_data || (cur.enrichment_result && cur.enrichment_result.enriched_data)));
+    const itHasEnriched = !!(it && (it.enriched_data || (it.enrichment_result && it.enrichment_result.enriched_data)));
+    // Prefer entries that carry enriched data; otherwise keep the first
+    if (itHasEnriched && !curHasEnriched) {
+      seen.set(sig, it);
+    }
+  }
+  return Array.from(seen.values());
+}
+
+// Diagnostics for formatted exports
+function ensureLogsDir() {
+  try {
+    const dir = path.join(__dirname, '..', 'output', 'logs');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  } catch (_) { return null; }
+}
+
+function gatherFieldStats(data) {
+  const fields = ['patent_no','mail_to_add1','mail_to_zip','title','inventor_id','mod_user'];
+  const stats = { total: data.length, from_item: {}, from_existing_record: {}, hydrated: {}, missing: {} };
+  for (const f of fields) {
+    stats.from_item[f] = 0;
+    stats.from_existing_record[f] = 0;
+    stats.hydrated[f] = 0;
+    stats.missing[f] = 0;
+  }
+  const sample = [];
+  let hydratedList = [];
+  for (const it of data) {
+    const edRoot = (it && it.enrichment_result && it.enrichment_result.enriched_data) ? it.enrichment_result.enriched_data : (it && it.enriched_data) || {};
+    const existing = (edRoot && edRoot.existing_record) || {};
+    for (const f of Object.keys(stats.from_item)) {
+      const hasItem = it && it[f] != null && String(it[f]).trim() !== '';
+      const hasExisting = existing && existing[f] != null && String(existing[f]).trim() !== '';
+      hydratedList = Array.isArray(it._hydrated_fields) ? it._hydrated_fields : [];
+      const wasHydrated = Array.isArray(hydratedList) && hydratedList.includes(f);
+      if (hasItem) stats.from_item[f]++;
+      if (hasExisting) stats.from_existing_record[f]++;
+      if (wasHydrated) stats.hydrated[f]++;
+      if (!(hasItem || hasExisting || wasHydrated)) stats.missing[f]++;
+    }
+    if (sample.length < 25) {
+      sample.push({
+        name: `${it.first_name || ''} ${it.last_name || ''}`.trim(),
+        city: it.city || '', state: it.state || '',
+        from_item: {
+          patent_no: it.patent_no || '', mail_to_add1: it.mail_to_add1 || '', mail_to_zip: it.mail_to_zip || '', title: it.title || '', inventor_id: it.inventor_id || '', mod_user: it.mod_user || ''
+        },
+        from_existing_record: existing,
+        hydrated_fields: Array.isArray(hydratedList) ? hydratedList : []
+      });
+    }
+  }
+  return { stats, sample };
+}
+
+function logFormattedExportDiagnostics(label, data) {
+  try {
+    const { stats, sample } = gatherFieldStats(data);
+    console.log(`[export][diag] ${label} total=${stats.total} fields:`, stats);
+    const dir = ensureLogsDir();
+    if (dir) {
+      const out = path.join(dir, `${label.replace(/\s+/g,'_').toLowerCase()}_formatted_diag.json`);
+      fs.writeFileSync(out, JSON.stringify({ label, stats, sample, generated_at: new Date().toISOString() }, null, 2));
+    }
+  } catch (e) {
+    console.warn('[export][diag] Failed to write diagnostics:', e.message);
+  }
+}
+
 // Formatted exports
 app.get('/api/export/current-enrichments-formatted', (req, res) => {
   try {
-    let data = readJsonFile('output/current_cycle_enriched.json');
-    if (!data || !Array.isArray(data) || data.length === 0) {
-      data = readJsonFile('output/enriched_patents.json');
+    const outPath = path.join(__dirname, '..', 'output', 'current_enrichments_formatted.csv');
+    if (!fs.existsSync(outPath)) {
+      return res.status(404).json({ error: 'current_enrichments_formatted.csv not found. Run Step 2 first.' });
     }
-    if (!data || !Array.isArray(data) || data.length === 0) {
-      return res.status(404).json({ error: 'No current enriched data found. Run Step 2 first.' });
-    }
-    writeFormattedCsv(res, 'current_enrichments_formatted.csv', data);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="current_enrichments_formatted.csv"');
+    fs.createReadStream(outPath).pipe(res);
   } catch (e) {
     console.error('Export current formatted failed:', e);
     res.status(500).json({ error: e.message });
@@ -1548,11 +2237,13 @@ app.get('/api/export/current-enrichments-formatted', (req, res) => {
 
 app.get('/api/export/new-enrichments-formatted', (req, res) => {
   try {
-    const data = readJsonFile('output/enriched_patents_new_this_run.json');
-    if (!data || !Array.isArray(data) || data.length === 0) {
-      return res.status(404).json({ error: 'No new enrichments in this run. Run Step 2 with new people.' });
+    const outPath = path.join(__dirname, '..', 'output', 'new_enrichments_formatted.csv');
+    if (!fs.existsSync(outPath)) {
+      return res.status(404).json({ error: 'new_enrichments_formatted.csv not found. Run Step 2 first.' });
     }
-    writeFormattedCsv(res, 'new_enrichments_formatted.csv', data);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="new_enrichments_formatted.csv"');
+    fs.createReadStream(outPath).pipe(res);
   } catch (e) {
     console.error('Export new formatted failed:', e);
     res.status(500).json({ error: e.message });
@@ -1566,9 +2257,47 @@ app.get('/api/export/all-enrichments-formatted', (req, res) => {
     if (!data || !Array.isArray(data) || data.length === 0) {
       return res.status(404).json({ error: 'No enriched data snapshot found.' });
     }
-    writeFormattedCsv(res, 'all_enrichments_formatted.csv', data);
+    hydrateThreeFields(data, 'all_enrichments_formatted').then((hydrated) => {
+      writeFormattedCsv(res, 'all_enrichments_formatted.csv', hydrated);
+      logFormattedExportDiagnostics('all_enrichments', hydrated);
+    }).catch((e) => {
+      console.warn('[export] Hydration (3 fields) failed for all formatted, sending unhydrated:', e.message);
+      writeFormattedCsv(res, 'all_enrichments_formatted.csv', data);
+      logFormattedExportDiagnostics('all_enrichments_unhydrated', data);
+    });
   } catch (e) {
     console.error('Export all formatted failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Contact CSV Exports (pre-formatted contact CSVs)
+app.get('/api/export/contact-current', (req, res) => {
+  try {
+    const outPath = path.join(__dirname, '..', 'output', 'contact_current.csv');
+    if (!fs.existsSync(outPath)) {
+      return res.status(404).json({ error: 'contact_current.csv not found. Run Step 2 first.' });
+    }
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="contact_current.csv"');
+    fs.createReadStream(outPath).pipe(res);
+  } catch (e) {
+    console.error('Export contact current failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/export/contact-new', (req, res) => {
+  try {
+    const outPath = path.join(__dirname, '..', 'output', 'contact_new.csv');
+    if (!fs.existsSync(outPath)) {
+      return res.status(404).json({ error: 'contact_new.csv not found. Run Step 2 first.' });
+    }
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="contact_new.csv"');
+    fs.createReadStream(outPath).pipe(res);
+  } catch (e) {
+    console.error('Export contact new failed:', e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1581,6 +2310,25 @@ app.get('/api/step2/progress', (req, res) => {
         res.json({ running, ...p });
     } catch (e) {
         res.json({ running: runningProcesses.has('step2') });
+    }
+});
+
+// Get latest persisted Step 2 output (for refresh)
+app.get('/api/step2/latest-output', (req, res) => {
+    try {
+        const outPath = path.join(__dirname, '..', 'output', 'last_step2_output.txt');
+        let output = '';
+        if (fs.existsSync(outPath)) {
+            output = fs.readFileSync(outPath, 'utf8');
+        }
+        const files = {
+            enrichedData: getFileStats('output/enriched_patents.json'),
+            enrichedCsv: getFileStats('output/enriched_patents.csv'),
+            enrichmentResults: getFileStats('output/enrichment_results.json')
+        };
+        return res.json({ success: true, output, files });
+    } catch (e) {
+        return res.status(500).json({ success: false, error: e.message });
     }
 });
 

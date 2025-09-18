@@ -682,14 +682,14 @@
             
             <!-- Pipeline Steps -->
             <div class="pipeline-steps">
-                <!-- NEW Step 0: Download Patents -->
+                <!-- NEW Step 0: Download/Extract Patents -->
                 <div class="step" id="step0">
                     <div class="step-header">
-                        <div class="step-title">Step 0: Download Patents (PatentsView API)</div>
+                        <div class="step-title">Step 0: Download/Extract Patents</div>
                         <div class="step-status status-ready" id="step0Status">Ready</div>
                     </div>
                     <div class="step-description">
-                        Download recent patent data directly from the USPTO PatentsView API. Choose between smart mode (automatic date detection) or manual mode (custom date range) to get the latest patents for processing.
+                        Download via PatentsView API or use the alternate extractor. You can also upload CSV/XLSX or raw XML directly from USPTO.
                     </div>
                     <div class="step-actions">
                         <button class="btn btn-primary" onclick="toggleDownloadConfig()" id="step0ConfigBtn">
@@ -701,15 +701,29 @@
                         <button class="btn btn-success" onclick="triggerCsvUpload()" id="step0UploadBtn">
                             ⬆️ Upload CSV/XLSX
                         </button>
+                        <button class="btn btn-success" onclick="triggerXmlUpload()" id="step0XmlUploadBtn">
+                            ⬆️ Upload XML
+                        </button>
                         <button class="btn btn-secondary" onclick="showSample('step0')" id="step0Sample">
                             📋 View Sample
                         </button>
                     </div>
                     <input type="file" id="step0CsvInput" accept=".csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx" style="display:none" />
+                    <input type="file" id="step0XmlInput" accept=".xml,text/xml,application/xml" style="display:none" />
                     
                     <!-- Download Configuration Interface -->
                     <div class="download-config hidden" id="downloadConfig">
                         <div class="config-header">🔧 Download Configuration</div>
+                        <div class="config-modes" style="grid-template-columns: 1fr 1fr; margin-bottom: 12px;">
+                            <div class="mode-option active" onclick="selectRunner('download')" id="runnerDownload">
+                                <h4>🌐 PatentsView API</h4>
+                                <p>Primary API downloader</p>
+                            </div>
+                            <div class="mode-option" onclick="selectRunner('extract')" id="runnerExtract">
+                                <h4>🧰 Alternate Extract</h4>
+                                <p>Legacy extractor (same outputs)</p>
+                            </div>
+                        </div>
                         
                         <div class="config-modes">
                             <div class="mode-option active" onclick="selectMode('smart')" id="smartMode">
@@ -749,6 +763,8 @@
                                     <option value="2000">2,000 patents</option>
                                     <option value="5000">5,000 patents</option>
                                     <option value="10000">10,000 patents</option>
+                                    <option value="20000">20,000 patents</option>
+                                    <option value="50000">50,000 patents</option>
                                 </select>
                             </div>
                         </div>
@@ -860,13 +876,16 @@
                     </div>
                     <div class="step-actions">
                         <button class="btn btn-test" onclick="runStep2(true)" id="step2TestBtn">
-                            🧪 Test Enrichment (2 people)
+                            🧪 Test Enrichment (5 people)
                         </button>
                         <button class="btn btn-primary" onclick="runStep2(false)" id="step2Btn" disabled>
                             💎 Full Enrichment
                         </button>
                         <button class="btn btn-primary" onclick="runStep2Express()" id="step2ExpressBtn" disabled>
                             ⚡ Full Enrichment Express
+                        </button>
+                        <button class="btn btn-secondary" onclick="rebuildCsvs()" id="step2RebuildBtn">
+                            🧱 Rebuild CSVs (no API calls)
                         </button>
                         <button class="btn btn-secondary" onclick="showSample('step2')" id="step2Sample">
                             👥 View Enriched Sample
@@ -964,17 +983,22 @@
 
         <!-- CSV Export Widget (Bottom) -->
         <div class="export-widget">
-            <h3>⬇️ Full CSV Exports</h3>
-            <div class="export-actions" style="margin-bottom: 8px;">
-                <button class="btn btn-success" onclick="exportCurrentEnrichments()">Current Enrichments</button>
-                <button class="btn btn-success" onclick="exportNewEnrichments()">New Enrichments</button>
-                <button class="btn btn-success" onclick="exportAllEnrichments()">All Enrichments</button>
-            </div>
             <h3>🧾 Formatted CSV Exports</h3>
+            <div class="export-actions" style="margin-bottom: 8px;">
+                <button class="btn btn-success" onclick="exportCurrentEnrichmentsFormatted()">Current (Formatted)</button>
+                <button class="btn btn-success" onclick="exportNewEnrichmentsFormatted()">New (Formatted)</button>
+                <button class="btn btn-success" onclick="exportAllEnrichmentsFormatted()">All (Formatted)</button>
+            </div>
+            <h3>📇 Contact CSV Exports</h3>
+            <div class="export-actions" style="margin-bottom: 8px;">
+                <button class="btn btn-primary" onclick="exportContactCurrent()">Current Contacts</button>
+                <button class="btn btn-primary" onclick="exportContactNew()">New Contacts</button>
+            </div>
+            <h3>⬇️ Full CSV Exports</h3>
             <div class="export-actions">
-                <button class="btn btn-secondary" onclick="exportCurrentEnrichmentsFormatted()">Current (Formatted)</button>
-                <button class="btn btn-secondary" onclick="exportNewEnrichmentsFormatted()">New (Formatted)</button>
-                <button class="btn btn-secondary" onclick="exportAllEnrichmentsFormatted()">All (Formatted)</button>
+                <button class="btn btn-secondary" onclick="exportCurrentEnrichments()">Current Enrichments</button>
+                <button class="btn btn-secondary" onclick="exportNewEnrichments()">New Enrichments</button>
+                <button class="btn btn-secondary" onclick="exportAllEnrichments()">All Enrichments</button>
             </div>
         </div>
     </div>
@@ -989,6 +1013,7 @@
         let verificationDecisions = {};
         let pollingIntervals = new Map(); // Track active polling intervals
         let downloadMode = 'smart'; // Default to smart mode
+        let step0Runner = 'download'; // 'download' | 'extract'
         
         // Initialize page
         document.addEventListener('DOMContentLoaded', function() {
@@ -1046,6 +1071,22 @@
             updateStepStatus('step1', currentStatus.step1?.integrationResults?.exists, currentStatus.step1?.running);
             updateStepStatus('step2', currentStatus.step2?.enrichedData?.exists, currentStatus.step2?.running);
 
+            // Auto-resume polling on page load/refresh if a step is running
+            try {
+                if (currentStatus.step0?.running && !pollingIntervals.has('step0')) {
+                    setStepRunning('step0');
+                    startPolling('step0');
+                }
+                if (currentStatus.step1?.running && !pollingIntervals.has('step1')) {
+                    setStepRunning('step1');
+                    startPolling('step1');
+                }
+                if (currentStatus.step2?.running && !pollingIntervals.has('step2')) {
+                    setStepRunning('step2');
+                    startPolling('step2');
+                }
+            } catch (e) { /* ignore */ }
+
             // Last run timestamps under step titles
             try {
                 const lr = currentStatus.lastRun || {};
@@ -1094,7 +1135,7 @@
                     const people = Number(currentStatus.counts?.newPeople || 0);
                     if (people > 0) {
                         const maxCost = (people * 0.10);
-                        const estCost = (people * 0.10 * 0.20);
+                        const estCost = (people * 0.10 * 0.75);
                         const fmt = (n) => `$${n.toFixed(1)}`; // round to nearest 0.1
                         costDiv.innerHTML = `
                             <h4>💰 Enrichment Cost Estimate</h4>
@@ -1109,10 +1150,10 @@
                                 </div>
                                 <div class="cost-card est">
                                     <div class="cost-line">
-                                        <div class="cost-title">Estimated Cost (20% hit rate)</div>
+                                        <div class="cost-title">Estimated Cost (75% hit rate)</div>
                                         <div class="cost-value">${fmt(estCost)}</div>
                                     </div>
-                                    <div class="cost-note">Assuming ~20% of ${people.toLocaleString()} match</div>
+                                    <div class="cost-note">Assuming ~75% of ${people.toLocaleString()} match</div>
                                 </div>
                             </div>
                         `;
@@ -1122,6 +1163,54 @@
                         costDiv.innerHTML = '';
                     }
                 }
+
+                // If not currently polling step2 and results exist, load the latest persisted output so it shows after refresh
+                try {
+                    if (!pollingIntervals.has('step2') && (currentStatus.step2?.enrichedData?.exists === true)) {
+                        const outEl = document.getElementById('step2Output');
+                        const alreadyShown = outEl && !outEl.classList.contains('hidden') && (outEl.textContent || '').trim().length > 0;
+                        if (!alreadyShown) {
+                            fetch('/api/step2/latest-output').then(r => r.json()).then(data => {
+                                if (data && data.success && data.output) {
+                                    showOutput('step2', data.output);
+                                    if (data.files) showFileInfo('step2', data.files);
+                                }
+                            }).catch(() => {});
+                        }
+                    }
+                } catch (_) { /* ignore */ }
+
+                // If not currently polling step0, load the latest persisted output so it shows after refresh
+                try {
+                    if (!pollingIntervals.has('step0')) {
+                        const outEl0 = document.getElementById('step0Output');
+                        const alreadyShown0 = outEl0 && !outEl0.classList.contains('hidden') && (outEl0.textContent || '').trim().length > 0;
+                        if (!alreadyShown0) {
+                            fetch('/api/step0/latest-output').then(r => r.json()).then(data => {
+                                if (data && data.success && data.output) {
+                                    showOutput('step0', data.output);
+                                    if (data.files) showFileInfo('step0', data.files);
+                                }
+                            }).catch(() => {});
+                        }
+                    }
+                } catch (_) { /* ignore */ }
+
+                // If not currently polling step1 and results exist, load the latest persisted output so it shows after refresh
+                try {
+                    if (!pollingIntervals.has('step1') && (currentStatus.step1?.integrationResults?.exists === true)) {
+                        const outEl1 = document.getElementById('step1Output');
+                        const alreadyShown1 = outEl1 && !outEl1.classList.contains('hidden') && (outEl1.textContent || '').trim().length > 0;
+                        if (!alreadyShown1) {
+                            fetch('/api/step1/latest-output').then(r => r.json()).then(data => {
+                                if (data && data.success && data.output) {
+                                    showOutput('step1', data.output);
+                                    if (data.files) showFileInfo('step1', data.files);
+                                }
+                            }).catch(() => {});
+                        }
+                    }
+                } catch (_) { /* ignore */ }
             } catch (e) { /* no-op */ }
         }
         
@@ -1297,6 +1386,13 @@
             const config = document.getElementById('downloadConfig');
             config.classList.toggle('hidden');
         }
+
+        function selectRunner(mode) {
+            step0Runner = mode; // 'download' or 'extract'
+            const isDownload = mode === 'download';
+            document.getElementById('runnerDownload').classList.toggle('active', isDownload);
+            document.getElementById('runnerExtract').classList.toggle('active', !isDownload);
+        }
         
         // Select download mode
         function selectMode(mode) {
@@ -1315,12 +1411,23 @@
         // Quick download with default settings
         async function runStep0Quick() {
             setStepRunning('step0');
+            // Immediately reset Step 1 and Step 2 visuals for a new cycle
+            try {
+                updateStepStatus('step1', false, false);
+                updateStepStatus('step2', false, false);
+                const o1 = document.getElementById('step1Output'); if (o1) { o1.textContent = ''; o1.classList.add('hidden'); }
+                const f1 = document.getElementById('step1Files'); if (f1) { f1.innerHTML = ''; f1.classList.add('hidden'); }
+                const o2 = document.getElementById('step2Output'); if (o2) { o2.textContent = ''; o2.classList.add('hidden'); }
+                const f2 = document.getElementById('step2Files'); if (f2) { f2.innerHTML = ''; f2.classList.add('hidden'); }
+            } catch (_) { /* ignore */ }
             
             try {
-                const response = await fetch('/api/step0', {
+                const endpoint = step0Runner === 'extract' ? '/api/step0/extract' : '/api/step0';
+                const response = await fetch(endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
+                        // downloader respects mode; extractor just uses daysBack/maxResults
                         mode: 'smart',
                         daysBack: 7,
                         maxResults: 1000
@@ -1351,30 +1458,42 @@
         // Run Step 0 with configured settings
         async function runStep0Configured() {
             setStepRunning('step0');
+            // Immediately reset Step 1 and Step 2 visuals for a new cycle
+            try {
+                updateStepStatus('step1', false, false);
+                updateStepStatus('step2', false, false);
+                const o1 = document.getElementById('step1Output'); if (o1) { o1.textContent = ''; o1.classList.add('hidden'); }
+                const f1 = document.getElementById('step1Files'); if (f1) { f1.innerHTML = ''; f1.classList.add('hidden'); }
+                const o2 = document.getElementById('step2Output'); if (o2) { o2.textContent = ''; o2.classList.add('hidden'); }
+                const f2 = document.getElementById('step2Files'); if (f2) { f2.innerHTML = ''; f2.classList.add('hidden'); }
+            } catch (_) { /* ignore */ }
             
             try {
-                const config = {
-                    mode: downloadMode,
-                    maxResults: parseInt(document.getElementById('maxResults').value)
-                };
-                
-                if (downloadMode === 'smart') {
-                    config.daysBack = parseInt(document.getElementById('daysBack').value);
+                const endpoint = step0Runner === 'extract' ? '/api/step0/extract' : '/api/step0';
+                let payload = { maxResults: parseInt(document.getElementById('maxResults').value) };
+                if (step0Runner === 'extract') {
+                    // extractor ignores manual/smart; pass daysBack only
+                    payload.daysBack = downloadMode === 'smart' ? parseInt(document.getElementById('daysBack').value) : 7;
                 } else {
-                    config.startDate = document.getElementById('startDate').value;
-                    config.endDate = document.getElementById('endDate').value;
-                    
-                    if (!config.startDate || !config.endDate) {
-                        alert('Please select both start and end dates for manual mode.');
-                        setStepCompleted('step0', false);
-                        return;
+                    // downloader respects smart/manual
+                    payload.mode = downloadMode;
+                    if (downloadMode === 'smart') {
+                        payload.daysBack = parseInt(document.getElementById('daysBack').value);
+                    } else {
+                        payload.startDate = document.getElementById('startDate').value;
+                        payload.endDate = document.getElementById('endDate').value;
+                        if (!payload.startDate || !payload.endDate) {
+                            alert('Please select both start and end dates for manual mode.');
+                            setStepCompleted('step0', false);
+                            return;
+                        }
                     }
                 }
-                
-                const response = await fetch('/api/step0', {
+
+                const response = await fetch(endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(config)
+                    body: JSON.stringify(payload)
                 });
                 
                 const result = await response.json();
@@ -1754,9 +1873,19 @@
             if (btn) btn.disabled = false;
         }
         
-        // Show output
+        // Show output (Step 1/2 only when completed)
         function showOutput(stepId, output) {
             const outputEl = document.getElementById(stepId + 'Output');
+            if (!outputEl) return;
+            if (stepId === 'step1' || stepId === 'step2') {
+                const stepEl = document.getElementById(stepId);
+                if (!stepEl || !stepEl.classList.contains('completed')) {
+                    // Hide output if not completed for steps 1 and 2
+                    outputEl.textContent = '';
+                    outputEl.classList.add('hidden');
+                    return;
+                }
+            }
             outputEl.textContent = output;
             outputEl.classList.remove('hidden');
         }
@@ -1875,6 +2004,32 @@
         function exportAllEnrichmentsFormatted() {
             window.open('/api/export/all-enrichments-formatted', '_blank');
         }
+        function exportContactCurrent() {
+            window.open('/api/export/contact-current', '_blank');
+        }
+        function exportContactNew() {
+            window.open('/api/export/contact-new', '_blank');
+        }
+
+        async function rebuildCsvs() {
+            try {
+                const btn = document.getElementById('step2RebuildBtn');
+                if (btn) { btn.disabled = true; btn.textContent = 'Rebuilding CSVs...'; }
+                const resp = await fetch('/api/step2/rebuild-csvs', { method: 'POST' });
+                if (!resp.ok) {
+                    const js = await resp.json().catch(() => ({}));
+                    alert('Failed to start rebuild: ' + (js.error || resp.statusText));
+                } else {
+                    alert('Rebuild started. Check status in Step 2 output and then export.');
+                }
+            } catch (e) {
+                console.error('Rebuild error:', e);
+                alert('Rebuild error: ' + e.message);
+            } finally {
+                const btn = document.getElementById('step2RebuildBtn');
+                if (btn) { btn.disabled = false; btn.textContent = '🧱 Rebuild CSVs (no API calls)'; }
+            }
+        }
 
         // Poll Step 2 progress periodically and show (processed/total)
         async function pollStep2Progress() {
@@ -1907,6 +2062,15 @@
                 if (!file) return;
                 try {
                     setStepRunning('step0');
+                    // Immediately reset Step 1 and Step 2 visuals for a new cycle
+                    try {
+                        updateStepStatus('step1', false, false);
+                        updateStepStatus('step2', false, false);
+                        const o1 = document.getElementById('step1Output'); if (o1) { o1.textContent = ''; o1.classList.add('hidden'); }
+                        const f1 = document.getElementById('step1Files'); if (f1) { f1.innerHTML = ''; f1.classList.add('hidden'); }
+                        const o2 = document.getElementById('step2Output'); if (o2) { o2.textContent = ''; o2.classList.add('hidden'); }
+                        const f2 = document.getElementById('step2Files'); if (f2) { f2.innerHTML = ''; f2.classList.add('hidden'); }
+                    } catch (_) { /* ignore */ }
                     let resp;
                     if (file.name.toLowerCase().endsWith('.xlsx') || (file.type && file.type.includes('spreadsheet'))) {
                         const buf = await file.arrayBuffer();
@@ -1932,6 +2096,50 @@
                     }
                     setStepCompleted('step0', true);
                     showOutput('step0', result.output || 'File uploaded successfully');
+                    if (result.files) showFileInfo('step0', result.files);
+                    updateStatus();
+                } catch (err) {
+                    setStepCompleted('step0', false);
+                    showOutput('step0', `Error: ${err.message}`);
+                }
+            };
+            inp.click();
+        }
+
+        // XML Upload for Step 0
+        function triggerXmlUpload() {
+            const inp = document.getElementById('step0XmlInput');
+            if (!inp) return;
+            inp.value = '';
+            inp.onchange = async (e) => {
+                const file = e.target.files && e.target.files[0];
+                if (!file) return;
+                try {
+                    setStepRunning('step0');
+                    // Immediately reset Step 1 and Step 2 visuals for a new cycle
+                    try {
+                        updateStepStatus('step1', false, false);
+                        updateStepStatus('step2', false, false);
+                        const o1 = document.getElementById('step1Output'); if (o1) { o1.textContent = ''; o1.classList.add('hidden'); }
+                        const f1 = document.getElementById('step1Files'); if (f1) { f1.innerHTML = ''; f1.classList.add('hidden'); }
+                        const o2 = document.getElementById('step2Output'); if (o2) { o2.textContent = ''; o2.classList.add('hidden'); }
+                        const f2 = document.getElementById('step2Files'); if (f2) { f2.innerHTML = ''; f2.classList.add('hidden'); }
+                    } catch (_) { /* ignore */ }
+                    const buf = await file.arrayBuffer();
+                    const resp = await fetch('/api/step0/upload-xml', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/xml' },
+                        body: buf
+                    });
+                    const result = await resp.json();
+                    if (!resp.ok || !result.success) {
+                        setStepCompleted('step0', false);
+                        const msg = `Error processing XML: ${result.error || resp.statusText}` + (result.stderr ? `\n\n${result.stderr}` : '');
+                        showOutput('step0', msg);
+                        return;
+                    }
+                    setStepCompleted('step0', true);
+                    showOutput('step0', result.output || 'XML uploaded successfully');
                     if (result.files) showFileInfo('step0', result.files);
                     updateStatus();
                 } catch (err) {

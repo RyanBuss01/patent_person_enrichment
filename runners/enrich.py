@@ -3,6 +3,7 @@
 # Step 3: Data Enrichment using PeopleDataLabs API
 # =============================================================================
 import logging
+import os
 import json
 import time
 import pandas as pd
@@ -240,9 +241,9 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
                 'skipped_failed_count': skipped_failed_count
             }
         
-        # Limit for test mode (hard cap to 2 people)
-        if bool(config.get('TEST_MODE')) and len(new_people_to_enrich) > 2:
-            new_people_to_enrich = new_people_to_enrich[:2]
+        # Limit for test mode (hard cap to 5 people)
+        if bool(config.get('TEST_MODE')) and len(new_people_to_enrich) > 5:
+            new_people_to_enrich = new_people_to_enrich[:5]
             print(f"TEST MODE: Limited to {len(new_people_to_enrich)} people")
         
         print(f"STEP 4: Enriching {len(new_people_to_enrich)} people...")
@@ -321,12 +322,62 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def load_existing_enriched_people() -> List[Dict[str, Any]]:
-    """Load all existing enriched people from database in one query"""
+    """Load all existing enriched people from database in one query.
+    Be tolerant of schema differences (e.g., missing mail_to_add1) by probing columns and building a safe SELECT.
+    """
     try:
         db_config = DatabaseConfig.from_env()
         db_manager = DatabaseManager(db_config)
-        
-        query = "SELECT * FROM enriched_people ORDER BY enriched_at DESC"
+
+        # Discover available columns on existing_people
+        cols = []
+        try:
+            col_rows = db_manager.execute_query("SHOW COLUMNS FROM existing_people") or []
+            cols = [r.get('Field') or r.get('COLUMN_NAME') or r.get('field') for r in col_rows if isinstance(r, dict)]
+        except Exception:
+            cols = []
+
+        def _pick(want: str, alts: List[str] = None) -> str:
+            alts = alts or []
+            if want in cols:
+                return want
+            for a in alts:
+                if a in cols:
+                    return a
+            return ''
+
+        # Map to aliases expected by downstream code
+        mapping = {
+            'issue_id': _pick('issue_id'),
+            'new_issue_rec_num': _pick('new_issue_rec_num', ['issue_rec_num','rec_num']),
+            'inventor_id': _pick('inventor_id'),
+            'patent_no': _pick('patent_no', ['patent_number','patent_num']),
+            'title': _pick('title', ['patent_title','invention_title']),
+            'issue_date': _pick('issue_date', ['date','patent_date']),
+            'bar_code': _pick('bar_code', ['barcode']),
+            'mod_user': _pick('mod_user', ['modified_by','last_modified_by']),
+            'mail_to_assignee': _pick('mail_to_assignee', ['assignee','assign_name']),
+            'mail_to_name': _pick('mail_to_name'),
+            'mail_to_add1': _pick('mail_to_add1', ['address','addr1','mail_to_add_1'])
+        }
+
+        select_parts = []
+        for alias, col in mapping.items():
+            if not col:
+                continue
+            if col == alias:
+                select_parts.append(f"ex.{col}")
+            else:
+                select_parts.append(f"ex.{col} AS {alias}")
+        select_clause = ', '.join(select_parts) if select_parts else ''
+
+        query = (
+            f"SELECT ep.*{(', ' + select_clause) if select_clause else ''} "
+            "FROM enriched_people ep "
+            "LEFT JOIN existing_people ex ON ep.first_name = ex.first_name AND ep.last_name = ex.last_name "
+            "AND IFNULL(ep.city,'') = IFNULL(ex.city,'') AND IFNULL(ep.state,'') = IFNULL(ex.state,'') "
+            "ORDER BY ep.enriched_at DESC"
+        )
         results = db_manager.execute_query(query)
         
         enriched_data = []
@@ -342,7 +393,19 @@ def load_existing_enriched_people() -> List[Dict[str, Any]]:
                     'patent_title': enrichment_data.get('original_person', {}).get('patent_title', ''),
                     'match_score': enrichment_data.get('enrichment_result', {}).get('match_score', 0),
                     'enriched_data': enrichment_data,
-                    'enriched_at': row.get('enriched_at')
+                    'enriched_at': row.get('enriched_at'),
+                    # propagate selected existing_people fields when available
+                    'issue_id': row.get('issue_id'),
+                    'new_issue_rec_num': row.get('new_issue_rec_num'),
+                    'inventor_id': row.get('inventor_id'),
+                    'patent_no': row.get('patent_no'),
+                    'title': row.get('title'),
+                    'issue_date': row.get('issue_date'),
+                    'bar_code': row.get('bar_code'),
+                    'mod_user': row.get('mod_user'),
+                    'mail_to_assignee': row.get('mail_to_assignee'),
+                    'mail_to_name': row.get('mail_to_name'),
+                    'mail_to_add1': row.get('mail_to_add1') or row.get('address')
                 }
                 enriched_data.append(enriched_record)
                 
@@ -350,6 +413,17 @@ def load_existing_enriched_people() -> List[Dict[str, Any]]:
                 logger.warning(f"Error parsing enriched row {row.get('id')}: {e}")
                 continue
         
+        # Fallback: if DB has no enriched rows, try local snapshot to preserve duplicate protection
+        if not enriched_data:
+            try:
+                snap_path = Path('output') / 'enriched_patents.json'
+                if snap_path.exists() and snap_path.stat().st_size > 0:
+                    with open(snap_path, 'r') as f:
+                        local_data = json.load(f)
+                    if isinstance(local_data, list):
+                        return local_data
+            except Exception:
+                pass
         return enriched_data
         
     except Exception as e:
@@ -410,7 +484,7 @@ def is_already_enriched(person: Dict[str, Any], existing_enriched: List[Dict[str
             return True
         
         # First initial match (lower confidence)
-        if (first_name and last_name and state and
+        if (first_name and last_name and state and existing_first and
             first_name[0] == existing_first[0] and last_name == existing_last and
             state == existing_state):
             return True
@@ -440,7 +514,7 @@ def find_existing_enriched_match(person: Dict[str, Any], existing_enriched: List
             first_name == existing_first and last_name == existing_last and
             state == existing_state):
             return existing
-        if (first_name and last_name and state and
+        if (first_name and last_name and state and existing_first and
             first_name[0] == existing_first[0] and last_name == existing_last and
             state == existing_state):
             return existing
@@ -508,7 +582,7 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any], pr
 
     for i, person in enumerate(people):
         # Secondary safety: enforce test mode cap inside the loop
-        if bool(config.get('TEST_MODE')) and i >= 2:
+        if bool(config.get('TEST_MODE')) and i >= 5:
             break
         progress = i + 1
         total = len(people)
@@ -518,6 +592,47 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any], pr
         print(f"  Person data: first_name='{person.get('first_name')}', last_name='{person.get('last_name')}', city='{person.get('city')}', state='{person.get('state')}'")
         
         try:
+            # Secondary guard: check DB directly for existing enrichment to avoid duplicate API calls
+            try:
+                if cursor is not None and conn is not None:
+                    fn = (person.get('first_name') or '').strip()
+                    ln = (person.get('last_name') or '').strip()
+                    st = (person.get('state') or '').strip()
+                    ct = (person.get('city') or '').strip()
+                    pn = (person.get('patent_number') or '').strip()
+                    # Try with city + patent when available
+                    params = [fn, ln, st, ct]
+                    query = (
+                        "SELECT 1 FROM enriched_people WHERE first_name=%s AND last_name=%s "
+                        "AND IFNULL(state,'')=%s AND IFNULL(city,'')=%s"
+                    )
+                    if pn:
+                        query += " AND IFNULL(patent_number,'')=%s"
+                        params.append(pn)
+                    query += " LIMIT 1"
+                    cursor.execute(query, tuple(params))
+                    hit = cursor.fetchone()
+                    if not hit and ct:
+                        # Retry ignoring city
+                        params2 = [fn, ln, st]
+                        query2 = (
+                            "SELECT 1 FROM enriched_people WHERE first_name=%s AND last_name=%s "
+                            "AND IFNULL(state,'')=%s"
+                        )
+                        if pn:
+                            query2 += " AND IFNULL(patent_number,'')=%s"
+                            params2.append(pn)
+                        query2 += " LIMIT 1"
+                        cursor.execute(query2, tuple(params2))
+                        hit = cursor.fetchone()
+                    if hit:
+                        print("  Skipping: already enriched in DB")
+                        processed_counter += 1
+                        write_progress_safely()
+                        continue
+            except Exception:
+                # On any DB check error, proceed to API path
+                pass
             # Real API path only – clean person data
             clean_person = {
                 'first_name': str(person.get('first_name', '')).strip(),
@@ -533,6 +648,49 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any], pr
             result = enricher.enrich_people_list([clean_person])
             enrichment_result = result[0] if (result and len(result) > 0) else None
             
+            # Verbose per-person debug in TEST MODE
+            try:
+                if bool(config.get('TEST_MODE')):
+                    def _bool_presence(pdl: Dict[str, Any]) -> bool:
+                        try:
+                            if not isinstance(pdl, dict):
+                                return False
+                            keys = [
+                                'location_street_address','location_postal_code',
+                                'job_company_location_street_address','job_company_location_postal_code',
+                                'street_addresses'
+                            ]
+                            for k in keys:
+                                v = pdl.get(k)
+                                if isinstance(v, bool):
+                                    return True
+                            return False
+                        except Exception:
+                            return False
+                    if enrichment_result is None:
+                        print("  DEBUG: No enrichment result (None)")
+                    else:
+                        ed = enrichment_result.get('enriched_data', {})
+                        pdl = ed.get('pdl_data', {})
+                        method = ed.get('api_method', 'unknown')
+                        api_raw = enrichment_result.get('api_raw', {}) or {}
+                        likelihood = None
+                        matches = None
+                        best_score = None
+                        if isinstance(api_raw.get('enrichment'), dict):
+                            likelihood = api_raw.get('enrichment', {}).get('likelihood')
+                        if isinstance(api_raw.get('identify'), dict):
+                            try:
+                                matches = len(api_raw.get('identify', {}).get('matches') or [])
+                                if matches:
+                                    best_score = (api_raw.get('identify', {}).get('matches')[0] or {}).get('match_score')
+                            except Exception:
+                                pass
+                        presence = _bool_presence(pdl)
+                        print(f"  DEBUG: Method={method} Likelihood={likelihood} IdentifyMatches={matches} BestScore={best_score} PresenceAddr={presence}")
+            except Exception:
+                pass
+
             if enrichment_result is not None:
                 enriched_results.append(enrichment_result)
                 new_added_counter += 1
@@ -541,8 +699,12 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any], pr
                     if cursor is not None and conn is not None:
                         _save_single_enrichment(cursor, enrichment_result)
                         conn.commit()
+                        if bool(config.get('TEST_MODE')):
+                            print("  DEBUG: Saved enrichment to SQL")
                 except Exception as e:
                     logger.error(f"  Error saving enrichment for {person_name}: {e}")
+                    if bool(config.get('TEST_MODE')):
+                        print(f"  DEBUG: Save error: {e}")
             else:
                 # Record failure (no enrichment result)
                 try:
@@ -550,6 +712,8 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any], pr
                         # Use cleaned person when available
                         _record_failed_enrichment(cursor, db_config.engine if 'db_config' in locals() else 'mysql', clean_person, 'not_found', None)
                         conn.commit()
+                        if bool(config.get('TEST_MODE')):
+                            print("  DEBUG: Recorded failed enrichment in failed_enrichments")
                 except Exception as e:
                     logger.warning(f"  Could not record failed enrichment for {person_name}: {e}")
             
@@ -588,12 +752,182 @@ def _save_single_enrichment(cursor, result: Dict[str, Any]):
     if not original_data:
         # Support alternate key name from API variations
         original_data = result.get('enriched_data', {}).get('original_person', {})
+    # Optionally backfill key fields from existing_people for formatted exports
+    existing_record = {}
+    try:
+        fn = (original_data.get('first_name') or '').strip()
+        ln = (original_data.get('last_name') or '').strip()
+        ct = (original_data.get('city') or '').strip()
+        st = (original_data.get('state') or '').strip()
+        # Pull a few columns we need for formatted CSV; support fallbacks for address/zip via SQL
+        select_cols = (
+            "inventor_id, mod_user, title, patent_no, mail_to_add1, mail_to_zip, address, zip"
+        )
+        def _normalize_row(r):
+            if not r:
+                return {}
+            if isinstance(r, dict):
+                return {
+                    'inventor_id': r.get('inventor_id'),
+                    'mod_user': r.get('mod_user'),
+                    'title': r.get('title'),
+                    'patent_no': r.get('patent_no'),
+                    # prefer explicit mail_to_add1/zip, fallback to address/zip
+                    'mail_to_add1': (r.get('mail_to_add1') or r.get('address') or ''),
+                    'mail_to_zip': (r.get('mail_to_zip') or r.get('zip') or '')
+                }
+            cols = ['inventor_id','mod_user','title','patent_no','mail_to_add1','mail_to_zip','address','zip']
+            out = { c: (r[i] if i < len(r) else None) for i, c in enumerate(cols) }
+            out['mail_to_add1'] = out.get('mail_to_add1') or out.get('address') or ''
+            out['mail_to_zip'] = out.get('mail_to_zip') or out.get('zip') or ''
+            return { k: out.get(k) for k in ['inventor_id','mod_user','title','patent_no','mail_to_add1','mail_to_zip'] }
+
+        # Try existing_people (exact match including city)
+        q1 = (
+            f"SELECT {select_cols} FROM existing_people "
+            "WHERE first_name=%s AND last_name=%s AND IFNULL(city,'')=%s AND IFNULL(state,'')=%s LIMIT 1"
+        )
+        cursor.execute(q1, (fn, ln, ct, st))
+        row = cursor.fetchone()
+        if not row:
+            # Try existing_people_new (exact)
+            q1b = (
+                f"SELECT {select_cols} FROM existing_people_new "
+                "WHERE first_name=%s AND last_name=%s AND IFNULL(city,'')=%s AND IFNULL(state,'')=%s LIMIT 1"
+            )
+            try:
+                cursor.execute(q1b, (fn, ln, ct, st))
+                row = cursor.fetchone()
+            except Exception:
+                row = None
+        if not row:
+            # Fallback: existing_people ignoring city
+            q2 = (
+                f"SELECT {select_cols} FROM existing_people "
+                "WHERE first_name=%s AND last_name=%s AND IFNULL(state,'')=%s LIMIT 1"
+            )
+            cursor.execute(q2, (fn, ln, st))
+            row = cursor.fetchone()
+        if not row:
+            # Fallback: existing_people_new ignoring city
+            q2b = (
+                f"SELECT {select_cols} FROM existing_people_new "
+                "WHERE first_name=%s AND last_name=%s AND IFNULL(state,'')=%s LIMIT 1"
+            )
+            try:
+                cursor.execute(q2b, (fn, ln, st))
+                row = cursor.fetchone()
+            except Exception:
+                row = None
+
+        existing_record = _normalize_row(row)
+    except Exception:
+        # Non-fatal: enrichment proceeds even if backfill fails
+        existing_record = {}
+
+    # Derive mail_to_add1 and mail_to_zip from PDL when available
+    def _pick_pdl_street(pdl: Dict[str, Any]) -> str:
+        if not isinstance(pdl, dict):
+            return ''
+        vals = [
+            pdl.get('job_company_location_street_address'),
+            pdl.get('location_street_address')
+        ]
+        for v in vals:
+            if v and str(v).strip():
+                return str(v).strip()
+        try:
+            sa = (pdl.get('street_addresses') or [])
+            if isinstance(sa, list) and sa:
+                first = sa[0] or {}
+                v = first.get('street_address') or first.get('formatted_address')
+                if v and str(v).strip():
+                    return str(v).strip()
+        except Exception:
+            pass
+        # Try company experience location
+        try:
+            exp = pdl.get('experience')
+            if isinstance(exp, list) and exp:
+                # Prefer primary, then scan all experiences for any street_address
+                primary = next((e for e in exp if e and e.get('is_primary')), None)
+                if primary:
+                    loc = ((primary.get('company') or {}).get('location') or {})
+                    v = loc.get('street_address') or loc.get('address_line_2')
+                    if v and str(v).strip():
+                        return str(v).strip()
+                # Scan all entries for the first with a street_address
+                for e in exp:
+                    try:
+                        loc = ((e.get('company') or {}).get('location') or {})
+                        v = loc.get('street_address') or loc.get('address_line_2')
+                        if v and str(v).strip():
+                            return str(v).strip()
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return ''
+
+    def _pick_pdl_zip(pdl: Dict[str, Any]) -> str:
+        if not isinstance(pdl, dict):
+            return ''
+        vals = [
+            pdl.get('job_company_location_postal_code'),
+            pdl.get('location_postal_code')
+        ]
+        for v in vals:
+            if v and str(v).strip():
+                return str(v).strip()
+        try:
+            sa = (pdl.get('street_addresses') or [])
+            if isinstance(sa, list) and sa:
+                first = sa[0] or {}
+                v = first.get('postal_code')
+                if v and str(v).strip():
+                    return str(v).strip()
+        except Exception:
+            pass
+        # Try company experience location
+        try:
+            exp = pdl.get('experience')
+            if isinstance(exp, list) and exp:
+                # Prefer primary, then scan all experiences for any postal_code
+                primary = next((e for e in exp if e and e.get('is_primary')), None)
+                if primary:
+                    loc = ((primary.get('company') or {}).get('location') or {})
+                    v = loc.get('postal_code')
+                    if v and str(v).strip():
+                        return str(v).strip()
+                for e in exp:
+                    try:
+                        loc = ((e.get('company') or {}).get('location') or {})
+                        v = loc.get('postal_code')
+                        if v and str(v).strip():
+                            return str(v).strip()
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return ''
+
+    pdl_data = (result.get('enriched_data') or {}).get('pdl_data') or {}
+    pdl_street = _pick_pdl_street(pdl_data)
+    pdl_zip = _pick_pdl_zip(pdl_data)
+
     enrichment_data = {
         "original_person": original_data,
         "enrichment_result": result,
         "enrichment_metadata": {
             "enriched_at": time.strftime('%Y-%m-%dT%H:%M:%SZ'),
             "api_cost": 0.03
+        },
+        # Persist selected existing_people fields for reliable formatted exports later
+        "existing_record": {
+            **(existing_record or {}),
+            # Fill address fields from PDL where not already present
+            "mail_to_add1": (existing_record or {}).get('mail_to_add1') or pdl_street or '',
+            "mail_to_zip": (existing_record or {}).get('mail_to_zip') or pdl_zip or ''
         }
     }
     insert_query = """
@@ -614,6 +948,14 @@ def _save_single_enrichment(cursor, result: Dict[str, Any]):
         0.03
     )
     cursor.execute(insert_query, params)
+    # Optional debug logging
+    try:
+        if os.environ.get('ENRICH_DEBUG', 'false').lower() == 'true':
+            filled = [k for k,v in (existing_record or {}).items() if str(v or '').strip() != '']
+            if filled:
+                print(f"ENRICH DEBUG: backfilled existing_record fields -> {filled}")
+    except Exception:
+        pass
 
 
 def save_enrichments_to_database(enriched_results: List[Dict[str, Any]]):

@@ -74,6 +74,25 @@ def write_progress_update(stage, details=""):
     except Exception as e:
         logger.warning(f"Could not write progress file: {e}")
 
+def _log_field_presence_step1_from_files():
+    try:
+        existing_file = Path('output') / 'existing_people_in_db.json'
+        if not existing_file.exists():
+            return
+        with existing_file.open('r') as f:
+            data = json.load(f)
+        fields = ['patent_no','title','mail_to_add1','mail_to_zip','mod_user','inventor_id']
+        stats = { 'total': len(data) }
+        for field in fields:
+            stats[field] = sum(1 for p in data if str(p.get(field, '')).strip() != '')
+        print(f"STEP1 DIAG: existing_people_in_db fields -> {stats}")
+        log_dir = Path('output') / 'logs'
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with (log_dir / 'step1_field_presence.json').open('w') as out:
+            json.dump({ 'stats': stats, 'generated_at': datetime.now().isoformat() }, out, indent=2)
+    except Exception as e:
+        logger.warning(f"Could not compute step1 field presence diagnostics: {e}")
+
 def analyze_and_log_match_scores():
     """Fixed version: Analyze match scores from BOTH output files"""
     try:
@@ -312,11 +331,19 @@ def main():
         # NEW: Print filtering summary first
         print_filtering_summary(result)
         
+        def safe_format_number(value, default=0):
+            """Safely format a number with commas, handling string values"""
+            try:
+                return f"{int(value):,}"
+            except (ValueError, TypeError):
+                return str(value)
+
         print(f"📊 INTEGRATION SUMMARY:")
-        print(f"   🗃️  Existing patents in DB: {result.get('existing_patents_count', 0):,}")
-        print(f"   👥 Existing people in DB: {result.get('existing_people_count', 0):,}")
-        print(f"   🆕 New patents found: {result.get('new_patents_count', 0):,}")
-        print(f"   🆕 New people found: {result.get('new_people_count', 0):,}")
+        print(f"   🗃️  Existing patents in DB: {safe_format_number(result.get('existing_patents_count', 0))}")
+        print(f"   👥 Existing people in DB: {safe_format_number(result.get('existing_people_count', 0))}")
+        print(f"   🆕 New patents found: {safe_format_number(result.get('new_patents_count', 0))}")
+        print(f"   🆕 New people found: {safe_format_number(result.get('new_people_count', 0))}")
+
         if result.get('dedup_new_people_removed') is not None:
             print(f"   🔁 Duplicates removed (new people): {result.get('dedup_new_people_removed', 0):,}")
         print(f"   🔁 Duplicate patents avoided: {result.get('duplicate_patents_count', 0):,}")
@@ -325,6 +352,7 @@ def main():
         
         # Stage 6: Match score analysis
         analyze_and_log_match_scores()
+        _log_field_presence_step1_from_files()
         analyze_inventor_distribution()
         
         # Stage 7: Cost analysis
@@ -333,11 +361,11 @@ def main():
         new_people = result.get('new_people_count', 0)
         if total_xml_people > 0:
             saved_api_calls = total_xml_people - new_people
-            estimated_savings = saved_api_calls * 0.03
+            estimated_savings = saved_api_calls * 0.1
             print(f"\n💰 COST SAVINGS:")
             print(f"   📉 API calls avoided: {saved_api_calls:,}")
             print(f"   💵 Estimated cost saved: ${estimated_savings:.2f}")
-            print(f"   💸 Cost for new people: ${new_people * 0.03:.2f}")
+            print(f"   💸 Cost for new people: ${new_people * 0.1:.2f}")
         
         print(f"\n📁 OUTPUT FILES:")
         if result.get('new_patents_count', 0) > 0:

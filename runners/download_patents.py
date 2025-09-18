@@ -75,25 +75,44 @@ class PatentsViewAPIClient:
         return start_dt.strftime('%Y-%m-%d'), end_dt.strftime('%Y-%m-%d')
     
     def fetch_patents(self, query: Dict, fields: List[str], max_results: int = 1000) -> List[Dict]:
-        """Fetch patents with pagination and rate limiting using GET method like the working example"""
+        """CORRECT: Fetch patents using proper PatentsView API cursor-based pagination"""
         all_patents = []
-        per_page = 100  # Use per_page like the working example
-        page = 1
+        seen_patent_ids = set()
+        # Use larger page size to support high max_results efficiently
+        # PatentsView PatentSearch API supports up to 1000 per request
+        page_size = min(1000, max_results)
+        cursor = None
+        page_count = 0
+        # Safety limit scaled to requested results (allow a small buffer of +5 pages)
+        max_pages = max(100, (max_results + page_size - 1) // page_size + 5)
         
-        logger.info(f"Starting patent fetch with PatentSearch API (GET method) - query: {query}, max_results: {max_results}")
+        logger.info(f"Starting patent fetch - query: {query}, max_results: {max_results}")
         
-        while len(all_patents) < max_results:
+        while len(all_patents) < max_results and page_count < max_pages:
             self._respect_rate_limit()
+            page_count += 1
             
-            logger.info(f"Fetching page {page}, current total: {len(all_patents)}")
-            
-            # FIXED: Use GET method with URL parameters like the working example
+            # Build correct parameters according to documentation
             params = {
                 "q": json.dumps(query),
                 "f": json.dumps(fields),
-                "per_page": per_page,
-                "page": page
             }
+            
+            # Build options object for pagination
+            options = {"size": min(page_size, max_results - len(all_patents))}
+            
+            # Add cursor for pagination (after first request)
+            if cursor is not None:
+                options["after"] = cursor
+            
+            params["o"] = json.dumps(options)
+            
+            # Add sorting for consistent cursor pagination
+            sort_spec = [{"patent_id": "asc"}]  # Sort by patent_id for cursor pagination
+            params["s"] = json.dumps(sort_spec)
+            
+            logger.info(f"Page {page_count}: Requesting {options['size']} patents" + 
+                    (f" after cursor {cursor}" if cursor else " (first page)"))
             
             try:
                 response = requests.get(
@@ -108,35 +127,54 @@ class PatentsViewAPIClient:
                 if response.status_code == 200:
                     data = response.json()
                     
-                    # Check for API errors in response
                     if data.get("error"):
                         error_msg = data.get("message", "Unknown API error")
                         logger.error(f"API returned error: {error_msg}")
                         break
                     
-                    # FIXED: Handle both possible response formats
+                    # Extract patents from response
                     patents = data.get("data", {}).get("patents", []) or data.get("patents", [])
                     
                     if not patents:
-                        logger.info("No more patents available from API")
+                        logger.info(f"No more patents available (page {page_count})")
                         break
                     
-                    all_patents.extend(patents)
-                    logger.info(f"Retrieved {len(patents)} patents from page {page}")
+                    # Process patents and check for duplicates
+                    new_patents = []
+                    duplicates_count = 0
                     
-                    # Check if we have all available patents
-                    total_available = data.get("total_hits", 0) or data.get("data", {}).get("total_hits", 0)
-                    if total_available > 0:
-                        logger.info(f"Total available patents: {total_available}")
+                    for patent in patents:
+                        patent_id = patent.get('patent_id', '')
+                        if patent_id and patent_id not in seen_patent_ids:
+                            seen_patent_ids.add(patent_id)
+                            new_patents.append(patent)
+                        elif patent_id:
+                            duplicates_count += 1
+                    
+                    all_patents.extend(new_patents)
+                    
+                    # Log results
+                    total_hits = data.get("total_hits", 0)
+                    logger.info(f"Page {page_count}: {len(patents)} received, "
+                            f"{len(new_patents)} new, {duplicates_count} duplicates, "
+                            f"total unique: {len(all_patents)}, total_hits: {total_hits}")
+                    
+                    # Set cursor for next page (last patent_id from current page)
+                    if patents and len(all_patents) < max_results:
+                        # Use the LAST patent's ID as cursor for next page
+                        last_patent = patents[-1]
+                        cursor = last_patent.get('patent_id')
+                        logger.info(f"Next cursor: {cursor}")
+                    else:
+                        logger.info("No cursor set - stopping pagination")
+                        break
+                    
+                    # Stop if no new patents (API exhausted)
+                    if len(new_patents) == 0:
+                        logger.info("No new patents received - stopping")
+                        break
                         
-                        if len(all_patents) >= total_available:
-                            logger.info(f"Retrieved all {total_available} available patents")
-                            break
-                    
-                    page += 1
-                    
                 elif response.status_code == 400:
-                    # FIXED: Better error handling for 400 errors
                     try:
                         error_data = response.json()
                         error_msg = error_data.get("message", response.text)
@@ -144,7 +182,7 @@ class PatentsViewAPIClient:
                         error_msg = response.text
                     
                     logger.error(f"API request failed (400 Bad Request): {error_msg}")
-                    logger.error(f"Query that failed: {params}")
+                    logger.error(f"Parameters: {params}")
                     break
                     
                 elif response.status_code == 429:
@@ -160,9 +198,156 @@ class PatentsViewAPIClient:
                 logger.error(f"Request failed: {e}")
                 break
         
-        final_patents = all_patents[:max_results]  # Ensure we don't exceed max_results
-        logger.info(f"Patent fetch complete: {len(final_patents)} patents retrieved")
+        final_patents = all_patents[:max_results]
+        logger.info(f"Patent fetch complete: {len(final_patents)} unique patents retrieved in {page_count} pages")
+        
         return final_patents
+
+    def _try_pagination_strategy(self, query: Dict, fields: List[str], max_results: int, 
+                            per_page: int, seen_patent_ids: set, strategy_name: str, 
+                            sort_param: List[Dict] = None) -> Dict:
+        """Try a specific pagination strategy"""
+        logger.info(f"Trying pagination strategy: {strategy_name}")
+        
+        patents = []
+        page = 1
+        consecutive_duplicate_pages = 0
+        max_duplicate_pages = 5  # Allow more duplicate pages before giving up
+        # Scale page cap to requested results (with buffer), keep an overall ceiling
+        max_pages = min(2000, max(100, (max_results + per_page - 1) // per_page + 5))
+        
+        while len(patents) < max_results and page <= max_pages and consecutive_duplicate_pages < max_duplicate_pages:
+            self._respect_rate_limit()
+            
+            params = {
+                "q": json.dumps(query),
+                "f": json.dumps(fields),
+                "per_page": per_page,
+                "page": page,
+            }
+            
+            if sort_param:
+                params["s"] = json.dumps(sort_param)
+            
+            try:
+                response = requests.get(
+                    self.base_url,
+                    headers=self.headers,
+                    params=params,
+                    timeout=30
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    if data.get("error"):
+                        logger.error(f"API error: {data.get('message', 'Unknown error')}")
+                        break
+                    
+                    page_patents = data.get("data", {}).get("patents", []) or data.get("patents", [])
+                    
+                    if not page_patents:
+                        logger.info(f"{strategy_name}: Empty page {page}")
+                        consecutive_duplicate_pages += 1
+                        page += 1
+                        continue
+                    
+                    # Check for new patents on this page
+                    new_patents_on_page = []
+                    duplicates_on_page = 0
+                    
+                    for patent in page_patents:
+                        patent_id = patent.get('patent_id', '')
+                        if patent_id and patent_id not in seen_patent_ids:
+                            new_patents_on_page.append(patent)
+                            seen_patent_ids.add(patent_id)
+                        elif patent_id:
+                            duplicates_on_page += 1
+                    
+                    patents.extend(new_patents_on_page)
+                    
+                    logger.info(f"{strategy_name} page {page}: {len(page_patents)} received, "
+                            f"{len(new_patents_on_page)} new, {duplicates_on_page} duplicates, "
+                            f"total unique: {len(patents)}")
+                    
+                    # Check total available
+                    total_available = data.get("total_hits", 0) or data.get("data", {}).get("total_hits", 0)
+                    if total_available > 0:
+                        logger.info(f"{strategy_name}: Total available = {total_available}")
+                    
+                    # Only increment duplicate page counter if we got ALL duplicates
+                    if len(new_patents_on_page) == 0 and len(page_patents) > 0:
+                        consecutive_duplicate_pages += 1
+                        logger.warning(f"{strategy_name}: Page {page} had all duplicates ({consecutive_duplicate_pages}/{max_duplicate_pages})")
+                    else:
+                        consecutive_duplicate_pages = 0  # Reset counter when we get new patents
+                    
+                    # Continue to next page
+                    page += 1
+                    
+                else:
+                    logger.error(f"{strategy_name}: API error {response.status_code}: {response.text}")
+                    break
+                    
+            except requests.exceptions.RequestException as e:
+                logger.error(f"{strategy_name}: Request failed: {e}")
+                break
+        
+        logger.info(f"{strategy_name} strategy complete: {len(patents)} patents")
+        return {'patents': patents, 'seen_ids': seen_patent_ids}
+
+    def _try_offset_pagination(self, query: Dict, fields: List[str], max_results: int, 
+                            per_page: int, seen_patent_ids: set) -> List[Dict]:
+        """Try offset-based pagination as fallback"""
+        logger.info("Trying offset-based pagination...")
+        
+        patents = []
+        offset = 0
+        max_offset_attempts = 50  # Limit offset attempts
+        
+        while len(patents) < max_results and offset < max_offset_attempts * per_page:
+            self._respect_rate_limit()
+            
+            params = {
+                "q": json.dumps(query),
+                "f": json.dumps(fields),
+                "per_page": per_page,
+                "offset": offset,
+            }
+            
+            try:
+                response = requests.get(
+                    self.base_url,
+                    headers=self.headers,
+                    params=params,
+                    timeout=30
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    page_patents = data.get("data", {}).get("patents", []) or data.get("patents", [])
+                    
+                    if not page_patents:
+                        logger.info(f"Offset {offset}: No more patents")
+                        break
+                    
+                    new_patents = [p for p in page_patents 
+                                if p.get('patent_id') and p.get('patent_id') not in seen_patent_ids]
+                    
+                    patents.extend(new_patents)
+                    logger.info(f"Offset {offset}: {len(page_patents)} received, {len(new_patents)} new")
+                    
+                    offset += per_page
+                else:
+                    logger.error(f"Offset pagination failed: {response.status_code}")
+                    break
+                    
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Offset pagination request failed: {e}")
+                break
+        
+        logger.info(f"Offset pagination complete: {len(patents)} patents")
+        return patents
 
 class PatentDownloader:
     """Main patent download orchestrator with fixes for current API"""
@@ -519,6 +704,12 @@ def run_patent_download(config: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as e:
             logger.warning(f"Could not create CSV file: {e}")
         
+        # Also persist to SQL for downstream hydration (best-effort)
+        try:
+            _save_download_to_sql(processed_patents)
+        except Exception as e:
+            logger.warning(f"Could not save downloaded patents to SQL: {e}")
+        
         # Create summary results
         results = {
             'success': True,
@@ -555,3 +746,93 @@ def run_patent_download(config: Dict[str, Any]) -> Dict[str, Any]:
             'error': str(e),
             'patents_downloaded': 0
         }
+
+
+def _save_download_to_sql(patents: List[Dict[str, Any]]):
+    """Save downloaded patents and their inventors into SQL tables.
+    Creates tables if missing: downloaded_patents, downloaded_people.
+    """
+    if not patents:
+        return
+    try:
+        from database.db_manager import DatabaseManager, DatabaseConfig
+    except Exception as e:
+        raise RuntimeError(f"DB modules unavailable: {e}")
+
+    db = DatabaseManager(DatabaseConfig.from_env())
+
+    # Create tables if not exist (DDL generally autocommits in MySQL)
+    try:
+        db.execute_query(
+            "CREATE TABLE IF NOT EXISTS downloaded_patents ("
+            " id BIGINT PRIMARY KEY AUTO_INCREMENT,"
+            " patent_number VARCHAR(50) NOT NULL UNIQUE,"
+            " patent_title TEXT,"
+            " patent_date DATE,"
+            " patent_abstract TEXT,"
+            " raw_data JSON,"
+            " processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+            " INDEX idx_patent_number (patent_number),"
+            " INDEX idx_patent_date (patent_date)"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        )
+        db.execute_query(
+            "CREATE TABLE IF NOT EXISTS downloaded_people ("
+            " id BIGINT PRIMARY KEY AUTO_INCREMENT,"
+            " patent_number VARCHAR(50),"
+            " first_name VARCHAR(100),"
+            " last_name VARCHAR(100),"
+            " city VARCHAR(100),"
+            " state VARCHAR(50),"
+            " country VARCHAR(100),"
+            " INDEX idx_patent (patent_number),"
+            " INDEX idx_name (first_name,last_name),"
+            " INDEX idx_loc (city,state)"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        )
+    except Exception:
+        pass
+
+    # Prepare batched inserts
+    patent_rows = []
+    people_rows = []
+    for p in patents:
+        pn = (p.get('patent_number') or '').strip()
+        if not pn:
+            continue
+        patent_rows.append({
+            'patent_number': pn,
+            'patent_title': p.get('patent_title') or '',
+            'patent_date': p.get('patent_date') or None,
+            'patent_abstract': p.get('patent_abstract') or '',
+            'raw_data': p,
+        })
+        for inv in (p.get('inventors') or []):
+            people_rows.append({
+                'patent_number': pn,
+                'first_name': (inv.get('first_name') or '')[:100],
+                'last_name': (inv.get('last_name') or '')[:100],
+                'city': (inv.get('city') or '')[:100],
+                'state': (inv.get('state') or '')[:50],
+                'country': (inv.get('country') or '')[:100],
+            })
+
+    # Insert patents (ignore duplicates)
+    if patent_rows:
+        cols = ['patent_number','patent_title','patent_date','patent_abstract','raw_data']
+        placeholders = ', '.join(['%s'] * len(cols))
+        sql = f"INSERT IGNORE INTO downloaded_patents ({', '.join(cols)}) VALUES ({placeholders})"
+        params = [tuple(r.get(c) for c in cols) for r in patent_rows]
+        db.execute_many(sql, params)
+
+    # Insert people (no unique constraint)
+    if people_rows:
+        cols2 = ['patent_number','first_name','last_name','city','state','country']
+        placeholders2 = ', '.join(['%s'] * len(cols2))
+        sql2 = f"INSERT INTO downloaded_people ({', '.join(cols2)}) VALUES ({placeholders2})"
+        # Chunk to avoid packet size issues
+        step = 1000
+        for i in range(0, len(people_rows), step):
+            batch = people_rows[i:i+step]
+            params2 = [tuple(r.get(c) for c in cols2) for r in batch]
+            db.execute_many(sql2, params2)

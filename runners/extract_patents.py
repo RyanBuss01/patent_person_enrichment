@@ -1,6 +1,8 @@
 # =============================================================================
 # runners/extract_patents.py - Fixed for New PatentsView API
-# Step 2: Data Extraction from the US Patent Office
+# Alternate Step 0 runner: Extract patents via PatentsView (legacy flow)
+# Produces the same outputs as the primary Step 0 downloader so downstream
+# steps (integration/enrichment) work without changes.
 # =============================================================================
 import requests
 import pandas as pd
@@ -9,19 +11,24 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
 def extract_patents_api(api_key: str, days_back: int = 7, max_results: int = 1000) -> List[Dict]:
-    """Extract patents from USPTO PatentsView API (New PatentSearch API)"""
+    """Extract patents from USPTO PatentsView API (PatentSearch API).
+
+    Returns the raw API items (with nested inventors/assignees) which will be
+    normalized by process_raw_patents().
+    """
     
     # Calculate date range
     start_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
     logger.info(f"Extracting patents from {start_date} onwards (max {max_results})")
     
     # NEW API setup - Updated endpoint and headers
-    base_url = "https://search.patentsview.org/api/v1/patent/"
+    # prefer the same base endpoint form used elsewhere
+    base_url = "https://search.patentsview.org/api/v1/patent"
     headers = {
         "X-Api-Key": api_key, 
         "Accept": "application/json",
@@ -76,7 +83,8 @@ def extract_patents_api(api_key: str, days_back: int = 7, max_results: int = 100
             
             if response.status_code == 200:
                 data = response.json()
-                patents = data.get("patents", [])
+                # Handle both { data: { patents: [...] } } and { patents: [...] }
+                patents = data.get("data", {}).get("patents", []) or data.get("patents", [])
                 
                 if not patents:
                     logger.info("No more patents found, stopping pagination")
@@ -116,8 +124,71 @@ def extract_patents_api(api_key: str, days_back: int = 7, max_results: int = 100
     logger.info(f"Total patents extracted: {len(all_patents)}")
     return all_patents[:max_results]
 
+
+def _safe_strip(value) -> str:
+    if value is None:
+        return ''
+    return str(value).strip()
+
+
+def _process_inventors_nested(raw_inventors: Optional[List[Dict]]) -> List[Dict]:
+    processed = []
+    for inventor in (raw_inventors or []):
+        item = {
+            'first_name': _safe_strip(inventor.get('inventor_name_first')),
+            'last_name': _safe_strip(inventor.get('inventor_name_last')),
+            'city': _safe_strip(inventor.get('inventor_city')),
+            'state': _safe_strip(inventor.get('inventor_state')),
+            'country': _safe_strip(inventor.get('inventor_country'))
+        }
+        if item['first_name'] or item['last_name']:
+            processed.append(item)
+    return processed
+
+
+def _process_assignees_nested(raw_assignees: Optional[List[Dict]]) -> List[Dict]:
+    processed = []
+    for assignee in (raw_assignees or []):
+        # detect organization vs individual
+        org = _safe_strip(assignee.get('assignee_organization'))
+        first = _safe_strip(assignee.get('assignee_individual_name_first'))
+        last = _safe_strip(assignee.get('assignee_individual_name_last'))
+        obj = {
+            'organization': org,
+            'first_name': first,
+            'last_name': last,
+            'city': _safe_strip(assignee.get('assignee_city')),
+            'state': _safe_strip(assignee.get('assignee_state')),
+            'country': _safe_strip(assignee.get('assignee_country')),
+            'type': 'organization' if org else 'individual'
+        }
+        if obj['organization'] or obj['first_name'] or obj['last_name']:
+            processed.append(obj)
+    return processed
+
+
+def process_raw_patents(raw_patents: List[Dict]) -> List[Dict]:
+    """Normalize raw PatentsView items to our standard structure used by Step 1+.
+
+    Output keys:
+    - patent_number, patent_title, patent_date, patent_abstract
+    - inventors: [{first_name,last_name,city,state,country}]
+    - assignees: [{type,organization,first_name,last_name,city,state,country}]
+    """
+    processed = []
+    for p in raw_patents:
+        processed.append({
+            'patent_number': _safe_strip(p.get('patent_id')),
+            'patent_title': _safe_strip(p.get('patent_title')),
+            'patent_date': _safe_strip(p.get('patent_date')),
+            'patent_abstract': _safe_strip(p.get('patent_abstract')),
+            'inventors': _process_inventors_nested(p.get('inventors')),
+            'assignees': _process_assignees_nested(p.get('assignees'))
+        })
+    return processed
+
 def run_patent_extraction(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Run the patent extraction process"""
+    """Run the patent extraction process and write standard Step 0 outputs."""
     try:
         # Check API key
         api_key = config.get('PATENTSVIEW_API_KEY')
@@ -132,74 +203,102 @@ def run_patent_extraction(config: Dict[str, Any]) -> Dict[str, Any]:
         logger.info("Starting patent extraction from PatentsView API...")
         
         # Extract patents
-        patents = extract_patents_api(
+        raw_patents = extract_patents_api(
             api_key=api_key,
             days_back=config.get('DAYS_BACK', 7),
             max_results=config.get('MAX_RESULTS', 1000)
         )
         
-        if not patents:
+        if not raw_patents:
             return {
                 'success': False, 
                 'error': "No patents extracted - may be due to API issues or no recent patents matching criteria",
                 'total_patents': 0,
                 'suggestion': "Try increasing DAYS_BACK or check API key validity"
             }
+        # Normalize
+        patents = process_raw_patents(raw_patents)
         
         # Save results
         output_dir = config.get('OUTPUT_DIR', 'output')
         os.makedirs(output_dir, exist_ok=True)
-        
-        json_file = os.path.join(output_dir, 'raw_patents.json')
-        csv_file = os.path.join(output_dir, 'raw_patents.csv')
+        # Match Step 0 downloader filenames
+        json_file = os.path.join(output_dir, 'downloaded_patents.json')
+        csv_file = os.path.join(output_dir, 'downloaded_patents.csv')
         
         # Save JSON
         with open(json_file, 'w') as f:
             json.dump(patents, f, indent=2, default=str)
         
-        # Save CSV with flattened structure
+        # Save CSV (flattened similar to main downloader)
         try:
-            # Flatten nested structures for CSV
-            flattened_patents = []
+            csv_rows = []
             for patent in patents:
-                flat_patent = patent.copy()
-                
-                # Flatten inventors
-                if 'inventors' in patent and patent['inventors']:
-                    for i, inventor in enumerate(patent['inventors']):
-                        prefix = f"inventor_{i}_" if i > 0 else "inventor_"
-                        for key, value in inventor.items():
-                            flat_patent[f"{prefix}{key}"] = value
-                
-                # Flatten assignees
-                if 'assignees' in patent and patent['assignees']:
-                    for i, assignee in enumerate(patent['assignees']):
-                        prefix = f"assignee_{i}_" if i > 0 else "assignee_"
-                        for key, value in assignee.items():
-                            flat_patent[f"{prefix}{key}"] = value
-                
-                # Remove nested structures
-                flat_patent.pop('inventors', None)
-                flat_patent.pop('assignees', None)
-                
-                flattened_patents.append(flat_patent)
-            
-            df = pd.DataFrame(flattened_patents)
+                base = {
+                    'patent_number': patent.get('patent_number', ''),
+                    'patent_title': patent.get('patent_title', ''),
+                    'patent_date': patent.get('patent_date', ''),
+                    'patent_abstract': (patent.get('patent_abstract') or '')
+                }
+                abs_txt = base['patent_abstract']
+                if abs_txt and len(abs_txt) > 500:
+                    base['patent_abstract'] = abs_txt[:500] + '...'
+                if patent.get('inventors'):
+                    inv = patent['inventors'][0]
+                    base.update({
+                        'inventor_first_name': inv.get('first_name', ''),
+                        'inventor_last_name': inv.get('last_name', ''),
+                        'inventor_city': inv.get('city', ''),
+                        'inventor_state': inv.get('state', ''),
+                        'inventor_country': inv.get('country', ''),
+                    })
+                if patent.get('assignees'):
+                    ass = patent['assignees'][0]
+                    if (ass.get('type') or '') == 'organization':
+                        base['assignee_organization'] = ass.get('organization', '')
+                    else:
+                        base['assignee_first_name'] = ass.get('first_name', '')
+                        base['assignee_last_name'] = ass.get('last_name', '')
+                    base.update({
+                        'assignee_city': ass.get('city', ''),
+                        'assignee_state': ass.get('state', ''),
+                        'assignee_country': ass.get('country', ''),
+                        'assignee_type': ass.get('type', ''),
+                    })
+                csv_rows.append(base)
+
+            df = pd.DataFrame(csv_rows)
             df.to_csv(csv_file, index=False)
             
         except Exception as csv_error:
             logger.warning(f"Could not create CSV file: {csv_error}")
             # Still continue - JSON file is more important
-        
+        # Write a download_results.json summary to align with Step 0
+        results = {
+            'success': True,
+            'mode': 'alternate',
+            'patents_downloaded': len(patents),
+            'download_parameters': {
+                'days_back': config.get('DAYS_BACK', 7),
+                'max_results': config.get('MAX_RESULTS', 1000)
+            },
+            'output_files': {
+                'json': json_file,
+                'csv': csv_file
+            }
+        }
+        with open(os.path.join(output_dir, 'download_results.json'), 'w') as f:
+            json.dump(results, f, indent=2)
+
         logger.info(f"Saved {len(patents)} patents to {json_file}")
-        
+
         return {
             'success': True,
             'total_patents': len(patents),
             'patents_data': patents,
             'output_files': [json_file, csv_file],
             'api_info': {
-                'endpoint': 'https://search.patentsview.org/api/v1/patent/',
+                'endpoint': 'https://search.patentsview.org/api/v1/patent',
                 'api_version': 'PatentSearch API v2',
                 'date_range': f"Patents from {config.get('DAYS_BACK', 7)} days ago onwards"
             }

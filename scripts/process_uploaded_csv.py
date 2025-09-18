@@ -43,8 +43,9 @@ def main():
         sys.exit(2)
 
     # Try to sniff dialect safely
-    from io import StringIO
-    sio = StringIO(data)
+from io import StringIO
+    # Use newline='' to avoid universal newline translation issues
+    sio = StringIO(data, newline='')
     try:
         sample = sio.read(2048)
         sio.seek(0)
@@ -52,11 +53,13 @@ def main():
     except Exception:
         sio.seek(0)
         dialect = csv.excel
-    reader = csv.DictReader(sio, dialect=dialect)
+    reader = csv.DictReader(sio, dialect=dialect, skipinitialspace=True)
 
     # Map headers (case-insensitive, tolerate variations)
     patents = {}
+    rows_total = 0
     for row in reader:
+        rows_total += 1
         # Normalize keys for safety
         row_l = { norm_header(k): (v or '').strip() for k, v in row.items() }
         pn = clean_patent(row_l.get('patent number') or row_l.get('patent_number') or row_l.get('number'))
@@ -116,8 +119,7 @@ def main():
     with (output_dir / 'download_results.json').open('w') as f:
         json.dump(results, f, indent=2)
 
-    print(f"Processed {len(patents)} patents from uploaded CSV")
+    print(f"Processed {len(patents)} patents from uploaded CSV (rows read: {rows_total})")
 
 if __name__ == '__main__':
     main()
-

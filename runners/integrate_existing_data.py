@@ -1,10 +1,10 @@
 # =============================================================================
 # runners/integrate_existing_data.py
 # Step 1: Compare XML data to existing SQL or CSV data
-# HYBRID: Load from SQL into memory for fast CSV-style matching
-# Replaces the slow SQL approach with fast in-memory processing
+# BATCH SQL APPROACH: Query database per batch instead of loading subset into memory
 # ENHANCED: Added US Patent filtering before database comparison
 # FIXED: Proper US filtering sequence to prevent foreign patents in people counting
+# FIXED: Query full 8M database instead of 50K subset
 # =============================================================================
 
 import logging
@@ -16,21 +16,20 @@ from pathlib import Path
 from datetime import datetime
 import uuid
 import re
+from collections import Counter
 
 from classes.simple_xml_processor import process_xml_files
 
 logger = logging.getLogger(__name__)
 
-class HybridSQLMemoryIntegrator:
-    """Load from SQL database but process in memory for speed"""
+class BatchSQLQueryIntegrator:
+    """Query SQL database per batch instead of loading subset into memory"""
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.existing_patents = set()
-        self.existing_people = []  # List for fast in-memory matching
-        self.loaded_sql_data = False
         
-        # Try to connect to database
+        # Database connection setup
         try:
             from database.db_manager import DatabaseManager, DatabaseConfig, ExistingDataDAO
             
@@ -109,11 +108,7 @@ class HybridSQLMemoryIntegrator:
         }
     
     def _is_us_patent(self, patent: Dict[str, Any]) -> bool:
-        """Keep patents where ALL inventors are US by country OR US state.
-
-        More tolerant than strict 'US' country-only check to handle uploads
-        where country is missing but state is present (e.g., 'CA', 'TX').
-        """
+        """Keep patents where ALL inventors are US by country OR US state."""
 
         inventors = patent.get('inventors', [])
         if not inventors:
@@ -138,56 +133,32 @@ class HybridSQLMemoryIntegrator:
 
         return True
     
-    def load_existing_data_from_sql(self) -> Dict[str, Any]:
-        """Load all data from SQL into memory for fast processing"""
+    def load_existing_patents_only(self) -> Dict[str, Any]:
+        """Load only patents (not people) into memory - patents are smaller dataset"""
         if not self.use_sql:
             return {'success': False, 'error': 'SQL not available'}
             
         start_time = time.time()
-        logger.info("Loading existing data from SQL database into memory...")
-        print("PROGRESS: Loading SQL database into memory for fast processing...")
+        logger.info("Loading existing patents from SQL database...")
+        print("PROGRESS: Loading existing patents from SQL...")
         
         try:
-            # Load patents into set for O(1) lookup
-            print("PROGRESS: Loading existing patents from SQL...")
+            # Only load patents into memory (much smaller than people)
             self.existing_patents = self.existing_dao.load_existing_patents()
-            logger.info(f"Loaded {len(self.existing_patents):,} existing patents")
-            
-            # Load people with reasonable limit to prevent memory issues
-            people_limit = self.config.get('EXISTING_PEOPLE_LIMIT', 50000)
-            print(f"PROGRESS: Loading up to {people_limit:,} existing people from SQL...")
-            
-            sql_people = self.existing_dao.load_existing_people(limit=people_limit)
-            
-            # Convert to fast lookup format (lowercase for matching)
-            self.existing_people = []
-            for person in sql_people:
-                self.existing_people.append({
-                    'first_name': self._clean_string(person.get('first_name', '')).lower(),
-                    'last_name': self._clean_string(person.get('last_name', '')).lower(),
-                    'city': self._clean_string(person.get('city', '')).lower(),
-                    'state': self._clean_string(person.get('state', '')).lower(),
-                    'country': self._clean_string(person.get('country', '')).lower(),
-                    'source': 'sql_database',
-                    'original_record': person  # Keep original for reference
-                })
             
             elapsed = time.time() - start_time
-            logger.info(f"SQL data loaded in {elapsed:.1f}s - {len(self.existing_patents):,} patents, {len(self.existing_people):,} people")
-            print(f"PROGRESS: SQL data loaded in {elapsed:.1f}s - Ready for fast processing")
-            
-            self.loaded_sql_data = True
+            logger.info(f"Patents loaded in {elapsed:.1f}s - {len(self.existing_patents):,} patents")
+            print(f"PROGRESS: Patents loaded - {len(self.existing_patents):,} existing patents in memory")
             
             return {
                 'success': True,
                 'existing_patents_count': len(self.existing_patents),
-                'existing_people_count': len(self.existing_people),
                 'source': 'sql_database',
                 'loading_time_seconds': elapsed
             }
             
         except Exception as e:
-            logger.error(f"Error loading from SQL: {e}")
+            logger.error(f"Error loading patents from SQL: {e}")
             return {'success': False, 'error': str(e)}
     
     def load_existing_data_from_csv(self) -> Dict[str, Any]:
@@ -212,6 +183,9 @@ class HybridSQLMemoryIntegrator:
             logger.info(f"Found {len(csv_files)} CSV files")
             print(f"PROGRESS: Processing {len(csv_files)} CSV files...")
             
+            # For CSV fallback, we still need to implement the old approach since CSV doesn't support SQL queries
+            existing_people = []
+            
             # Limit files for memory management
             MAX_FILES = 20
             files_to_process = csv_files[:MAX_FILES]
@@ -223,29 +197,30 @@ class HybridSQLMemoryIntegrator:
                 try:
                     # Load with row limit to prevent memory issues
                     df = pd.read_csv(csv_file, encoding='utf-8', low_memory=False, nrows=10000)
-                    self._extract_from_dataframe(df, csv_file.name)
+                    self._extract_from_dataframe(df, csv_file.name, existing_people)
                 except Exception as e:
                     logger.error(f"Error loading {csv_file}: {e}")
                     continue
             
             elapsed = time.time() - start_time
-            logger.info(f"CSV data loaded in {elapsed:.1f}s - {len(self.existing_patents):,} patents, {len(self.existing_people):,} people")
+            logger.info(f"CSV data loaded in {elapsed:.1f}s - {len(self.existing_patents):,} patents, {len(existing_people):,} people")
             print(f"PROGRESS: CSV data loaded in {elapsed:.1f}s - Ready for processing")
             
             return {
                 'success': True,
                 'existing_patents_count': len(self.existing_patents),
-                'existing_people_count': len(self.existing_people),
+                'existing_people_count': len(existing_people),
                 'source': 'csv_files',
                 'files_processed': len(files_to_process),
-                'loading_time_seconds': elapsed
+                'loading_time_seconds': elapsed,
+                'existing_people_data': existing_people  # Pass the data for CSV mode
             }
             
         except Exception as e:
             logger.error(f"Error loading from CSV: {e}")
             return {'success': False, 'error': str(e)}
     
-    def _extract_from_dataframe(self, df, filename: str):
+    def _extract_from_dataframe(self, df, filename: str, existing_people: List):
         """Extract patents and people from CSV dataframe"""
         # Patent extraction
         patent_columns = ['patent_number', 'patent_id', 'publication_number', 'doc_number', 'number']
@@ -275,7 +250,7 @@ class HybridSQLMemoryIntegrator:
                 last_name = self._clean_string(row.get(last_name_col, '')).lower()
                 
                 if first_name or last_name:
-                    self.existing_people.append({
+                    existing_people.append({
                         'first_name': first_name,
                         'last_name': last_name,
                         'city': self._clean_string(row.get(city_col, '')).lower() if city_col else '',
@@ -291,8 +266,208 @@ class HybridSQLMemoryIntegrator:
                 return col
         return None
     
-    def find_person_matches_fast(self, target_person: Dict[str, str]) -> List[Tuple[Dict, int]]:
-        """Fast in-memory person matching using VBA-style scoring"""
+    def find_people_matches_batch_sql(self, people_batch: List[Dict]) -> Dict[str, List[Tuple[Dict, int]]]:
+        """Query SQL database for matches for entire batch of people - OPTIMIZED with single query"""
+        if not self.use_sql or not people_batch:
+            return {}
+        
+        batch_matches = {}
+        batch_start_time = time.time()
+        
+        logger.info(f"Starting OPTIMIZED SQL batch matching for {len(people_batch)} people")
+        print(f"PROGRESS: OPTIMIZED SQL Batch - Processing {len(people_batch)} people in this batch")
+        
+        try:
+            # Build efficient batch query
+            # Group people by last name for more efficient querying
+            people_by_lastname = {}
+            for i, person in enumerate(people_batch):
+                last_name = self._clean_string(person.get('last_name', '')).lower()
+                if last_name:
+                    if last_name not in people_by_lastname:
+                        people_by_lastname[last_name] = []
+                    people_by_lastname[last_name].append((i, person))
+            
+            unique_last_names = list(people_by_lastname.keys())
+            logger.info(f"Grouped {len(people_batch)} people into {len(unique_last_names)} unique last names")
+            print(f"PROGRESS: OPTIMIZED SQL - Single query for {len(unique_last_names)} last names")
+            
+            # OPTIMIZED: Single query for ALL last names in the batch
+            query_start = time.time()
+            
+            # Track specific failed people for debugging
+            debug_people_to_track = ['kranz', 'cecil', 'keith']  # Track these last names specifically
+            debug_tracking = {}
+            
+            # Step 1: Check which tracked people are in our search list
+            for track_name in debug_people_to_track:
+                if track_name in unique_last_names:
+                    debug_tracking[track_name] = {'in_search_list': True, 'sql_found': 0, 'grouped': 0, 'lookup_result': 0}
+                    logger.info(f"TRACK DEBUG: '{track_name}' is in our search list")
+                else:
+                    debug_tracking[track_name] = {'in_search_list': False}
+                    logger.info(f"TRACK DEBUG: '{track_name}' is NOT in our search list")
+            
+            try:
+                logger.info(f"SQL QUERY DEBUG: Searching for {len(unique_last_names)} last names...")
+                all_db_people = self.existing_dao.find_people_by_lastnames_batch(unique_last_names)
+                query_time = time.time() - query_start
+                
+                logger.info(f"OPTIMIZED query returned {len(all_db_people)} total DB matches in {query_time:.3f}s")
+                print(f"PROGRESS: OPTIMIZED SQL - {len(all_db_people)} total DB matches in {query_time:.3f}s")
+                
+                # Step 2: Check which tracked people were found in SQL results
+                for track_name in debug_people_to_track:
+                    if debug_tracking[track_name].get('in_search_list'):
+                        sql_matches = [p for p in all_db_people if 
+                                     self._clean_string(p.get('last_name', '')).lower() == track_name]
+                        debug_tracking[track_name]['sql_found'] = len(sql_matches)
+                        logger.info(f"TRACK DEBUG: '{track_name}' SQL results = {len(sql_matches)} people")
+                        for match in sql_matches[:2]:  # Show first 2
+                            logger.info(f"  SQL: '{match.get('first_name')}' '{match.get('last_name')}' '{match.get('city')}' '{match.get('state')}'")
+                
+                # Step 3: Group DB results and check tracked people
+                db_people_by_lastname = {}
+                for db_person in all_db_people:
+                    db_last_name = self._clean_string(db_person.get('last_name', '')).lower()
+                    if db_last_name not in db_people_by_lastname:
+                        db_people_by_lastname[db_last_name] = []
+                    db_people_by_lastname[db_last_name].append(db_person)
+                
+                logger.info(f"Grouped DB results into {len(db_people_by_lastname)} last name groups")
+                print(f"PROGRESS: OPTIMIZED SQL - Grouped DB results for fast matching")
+                
+                # Step 4: Check which tracked people made it into groups
+                for track_name in debug_people_to_track:
+                    if debug_tracking[track_name].get('in_search_list'):
+                        if track_name in db_people_by_lastname:
+                            count = len(db_people_by_lastname[track_name])
+                            debug_tracking[track_name]['grouped'] = count
+                            logger.info(f"TRACK DEBUG: '{track_name}' grouped = {count} people")
+                            for person in db_people_by_lastname[track_name][:2]:
+                                logger.info(f"  Group: '{person.get('first_name')}' '{person.get('last_name')}' '{person.get('city')}' '{person.get('state')}'")
+                        else:
+                            debug_tracking[track_name]['grouped'] = 0
+                            logger.info(f"TRACK DEBUG: '{track_name}' grouped = 0 people (NOT FOUND IN GROUPS)")
+                            # Show actual group keys to debug
+                            actual_keys = sorted(list(db_people_by_lastname.keys()))
+                            similar_keys = [k for k in actual_keys if track_name in k or k in track_name]
+                            logger.info(f"  Similar group keys: {similar_keys}")
+                
+                
+                
+                
+            except Exception as e:
+                logger.error(f"OPTIMIZED SQL query failed: {e}")
+                print(f"PROGRESS: OPTIMIZED SQL FAILED: {e}")
+                all_db_people = []
+                db_people_by_lastname = {}
+            
+            # Now match each person against the relevant DB group
+            total_matches_found = 0
+            debug_successful_matches = []
+            debug_failed_matches = []
+            comparison_count = 0
+            
+            for last_name, people_with_lastname in people_by_lastname.items():
+                db_people_for_lastname = db_people_by_lastname.get(last_name, [])
+                
+                # For each person in our batch with this last name, compare against DB results
+                for batch_index, batch_person in people_with_lastname:
+                    person_key = f"batch_{batch_index}"
+                    batch_matches[person_key] = []
+                    
+                    # Clean the target person's data for matching
+                    target_first_raw = batch_person.get('first_name', '')
+                    target_first = self._clean_name_for_matching(target_first_raw)  # Remove middle initials
+                    target_city = self._clean_string(batch_person.get('city', '')).lower()
+                    target_state = self._clean_string(batch_person.get('state', '')).lower()
+                    
+                    person_matches = 0
+                    best_score_for_person = 0
+                    best_match_for_person = None
+                    
+                    for db_person in db_people_for_lastname:
+                        comparison_count += 1
+                        score = self._calculate_simple_match_score(
+                            target_first, last_name, target_city, target_state,
+                            db_person.get('first_name', ''),
+                            db_person.get('last_name', ''),
+                            db_person.get('city', ''),
+                            db_person.get('state', '')
+                        )
+                        
+                        if score > best_score_for_person:
+                            best_score_for_person = score
+                            best_match_for_person = db_person
+                        
+                        if score > 0:
+                            batch_matches[person_key].append((db_person, score))
+                            person_matches += 1
+                    
+                    # Debug logging for tracked failed people
+                    if last_name in debug_people_to_track and best_score_for_person < 25:
+                        lookup_count = len(db_people_for_lastname)
+                        debug_tracking[last_name]['lookup_result'] = lookup_count
+                        logger.info(f"TRACK DEBUG: '{last_name}' lookup = {lookup_count} candidates for person '{target_first} {last_name} ({target_city}, {target_state})'")
+                        if lookup_count == 0:
+                            logger.info(f"  LOOKUP FAIL: No candidates found for '{last_name}' even though grouping had {debug_tracking[last_name].get('grouped', 'unknown')}")
+                        else:
+                            logger.info(f"  LOOKUP OK: Found {lookup_count} candidates but best score was only {best_score_for_person}")
+                            # Show the best match attempt
+                            if best_match_for_person:
+                                logger.info(f"  Best DB match was: '{best_match_for_person.get('first_name')}' '{best_match_for_person.get('last_name')}' '{best_match_for_person.get('city')}' '{best_match_for_person.get('state')}'")
+                    
+                    # Debug logging for successful and failed matches
+                    if best_score_for_person >= 25:  # Successful match
+                        if len(debug_successful_matches) < 10:
+                            debug_successful_matches.append({
+                                'target': f"'{target_first}' '{last_name}' '{target_city}' '{target_state}'",
+                                'matched': f"'{best_match_for_person.get('first_name', '')}' '{best_match_for_person.get('last_name', '')}' '{best_match_for_person.get('city', '')}' '{best_match_for_person.get('state', '')}'",
+                                'score': best_score_for_person
+                            })
+                    else:  # Failed match
+                        if len(debug_failed_matches) < 20:
+                            debug_failed_matches.append({
+                                'target': f"'{target_first}' '{last_name}' '{target_city}' '{target_state}'",
+                                'best_db_match': f"'{best_match_for_person.get('first_name', '') if best_match_for_person else 'NONE'}' '{best_match_for_person.get('last_name', '') if best_match_for_person else 'NONE'}' '{best_match_for_person.get('city', '') if best_match_for_person else 'NONE'}' '{best_match_for_person.get('state', '') if best_match_for_person else 'NONE'}'",
+                                'score': best_score_for_person,
+                                'db_candidates': len(db_people_for_lastname)
+                            })
+                    
+                    # Sort matches by score descending and limit to top 10
+                    batch_matches[person_key].sort(key=lambda x: x[1], reverse=True)
+                    batch_matches[person_key] = batch_matches[person_key][:10]
+                    
+                    if person_matches > 0:
+                        total_matches_found += person_matches
+            
+            batch_time = time.time() - batch_start_time
+            
+            # Clean summary logging - 10 successful matches and 20 failed matches
+            logger.info(f"BATCH SUMMARY - Total comparisons: {comparison_count}, Found {total_matches_found} matches")
+            
+            if debug_successful_matches:
+                logger.info(f"SUCCESSFUL MATCHES ({len(debug_successful_matches)}/10 shown):")
+                for i, match in enumerate(debug_successful_matches):
+                    logger.info(f"  ✅ {match['target']} → Score: {match['score']}")
+            
+            if debug_failed_matches:
+                logger.info(f"FAILED MATCHES ({len(debug_failed_matches)}/20 shown):")
+                for i, match in enumerate(debug_failed_matches):
+                    logger.info(f"  ❌ {match['target']} → Best Score: {match['score']} (from {match['db_candidates']} candidates)")
+            
+            logger.info(f"OPTIMIZED SQL batch matching complete: 1 query, {len(all_db_people)} DB records, {total_matches_found} matches found in {batch_time:.2f}s")
+            print(f"PROGRESS: OPTIMIZED Complete - 1 query, {len(all_db_people)} DB records, {total_matches_found} matches in {batch_time:.2f}s")
+        
+        except Exception as e:
+            logger.error(f"Error in OPTIMIZED batch SQL query: {e}")
+            print(f"PROGRESS: OPTIMIZED SQL ERROR: {e}")
+        
+        return batch_matches
+    
+    def find_person_matches_csv(self, target_person: Dict[str, str], existing_people: List[Dict]) -> List[Tuple[Dict, int]]:
+        """CSV fallback: in-memory person matching using VBA-style scoring"""
         matches = []
         
         target_first = self._clean_string(target_person.get('first_name', '')).lower()
@@ -307,7 +482,7 @@ class HybridSQLMemoryIntegrator:
         matches_found = 0
         max_matches = 10
         
-        for existing_person in self.existing_people:
+        for existing_person in existing_people:
             if matches_found >= max_matches:
                 break
             
@@ -315,7 +490,7 @@ class HybridSQLMemoryIntegrator:
             if target_last != existing_person.get('last_name', ''):
                 continue
             
-            score = self._calculate_vba_match_score(
+            score = self._calculate_simple_match_score(
                 target_first, target_last, target_city, target_state,
                 existing_person.get('first_name', ''),
                 existing_person.get('last_name', ''),
@@ -329,80 +504,20 @@ class HybridSQLMemoryIntegrator:
         
         return sorted(matches, key=lambda x: x[1], reverse=True)
     
-    def _calculate_vba_match_score(self, 
-                                target_first: str, target_last: str, 
-                                target_city: str, target_state: str,
-                                existing_first: str, existing_last: str, 
-                                existing_city: str, existing_state: str) -> int:
-        """VBA-style match scoring - same as your original logic"""
-        
-        if not target_last or not existing_last or target_last != existing_last:
-            return 0
-        
-        # Boolean flags for readability
-        names_match = target_first == existing_first
-        cities_match = target_city and existing_city and target_city == existing_city
-        states_match = target_state and existing_state and target_state == existing_state
-        cities_different = target_city and existing_city and target_city != existing_city
-        first_initial_match = (target_first and existing_first and 
-                             target_first[0] == existing_first[0])
-        
-        # VBA-style scoring (from your original comparison code)
-        if names_match and cities_match and states_match:
-            return 50  # Perfect match
-        
-        if names_match and states_match and not cities_different:
-            return 45  # Same name/state, no city conflict
-        
-        if names_match and states_match and cities_different:
-            return 40  # Moved cities
-        
-        if names_match and (states_match or not target_state or not existing_state):
-            return 35  # Name match, limited location
-        
-        if names_match and states_match:
-            return 25  # Original VBA "moved" score
-        
-        if first_initial_match and states_match and cities_different:
-            return 15  # First initial match, different cities
-        
-        if names_match:
-            return 12  # Name match, no location
-        
-        if first_initial_match and cities_match and states_match:
-            return 6  # First initial, exact location
-        
-        if first_initial_match and states_match:
-            return 3  # First initial, state only
-        
-        return 0
-    
-    def filter_new_xml_data_fast(self, us_patents_only: List[Dict]) -> Dict[str, Any]:
+    def filter_new_xml_data_batch_sql(self, us_patents_only: List[Dict], load_result: Dict = None) -> Dict[str, Any]:
         """
-        FIXED: Fast filtering with in-memory matching - ONLY processes US patents
-        This function should only receive US patents, ensuring people count matches patent count
+        Process patents in batches, querying SQL database for each batch
+        This eliminates the 50,000 person memory limit issue
         """
-        logger.info(f"Fast filtering of {len(us_patents_only)} US patents using in-memory data")
-        print(f"PROGRESS: Starting fast patent processing - {len(us_patents_only):,} US patents only")
+        logger.info(f"Processing {len(us_patents_only)} US patents with batch SQL queries")
+        print(f"PROGRESS: Starting batch SQL processing - {len(us_patents_only):,} US patents")
         
-        # Verify we're only getting US patents (using the same tolerant logic)
-        non_us_count = 0
-        for patent in us_patents_only:
-            for inventor in patent.get('inventors', []):
-                c = (inventor.get('country') or '').strip().upper()
-                s = (inventor.get('state') or '').strip().upper()
-                if c not in {'US', 'USA', 'UNITED STATES', 'UNITED STATES OF AMERICA'} and s not in {
-                    'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA','ME','MD',
-                    'MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC',
-                    'SD','TN','TX','UT','VT','VA','WA','WV','WI','WY','DC','PR'
-                }:
-                    non_us_count += 1
+        # Check if we're using SQL or CSV mode
+        using_sql = self.use_sql and load_result and load_result.get('source') == 'sql_database'
+        existing_people_csv = load_result.get('existing_people_data', []) if load_result else []
         
-        if non_us_count > 0:
-            logger.warning(f"WARNING: Found {non_us_count} non-US inventors in supposedly US-only patents!")
-            print(f"WARNING: {non_us_count} non-US inventors found - filtering may have failed!")
-        
-        # Thresholds from VBA analysis
+        # Configuration
+        BATCH_SIZE = 200  # Smaller batches for SQL query efficiency
         AUTO_MATCH_THRESHOLD = 25
         REVIEW_THRESHOLD = 10
         
@@ -410,7 +525,6 @@ class HybridSQLMemoryIntegrator:
         new_patents = []
         new_people = []
         existing_people_found = []
-        same_name_diff_address = []  # Track candidates where name matches but address differs
         duplicate_patents = 0
         total_xml_people = 0
         processed_people = 0
@@ -419,20 +533,28 @@ class HybridSQLMemoryIntegrator:
         match_statistics = {
             'score_50_perfect': 0, 'score_25_moved': 0, 'score_15_initial': 0,
             'score_10_limited': 0, 'score_6_initial_exact': 0, 'score_3_initial_state': 0,
-            'no_match': 0, 'auto_matched': 0, 'needs_review': 0, 'definitely_new': 0
+            'no_match': 0, 'auto_matched': 0, 'needs_review': 0, 'definitely_new': 0,
+            'sql_queries_executed': 0, 'total_db_people_checked': 0
         }
         
         start_time = time.time()
-        
-        # Process in batches for better progress reporting
-        BATCH_SIZE = 100
         total_batches = (len(us_patents_only) + BATCH_SIZE - 1) // BATCH_SIZE
+        
+        logger.info(f"Using {'SQL batch queries' if using_sql else 'CSV in-memory matching'} for people comparison")
+        print(f"PROGRESS: Using {'SQL' if using_sql else 'CSV'} mode for people matching")
         
         for batch_num in range(total_batches):
             batch_start_time = time.time()
             start_idx = batch_num * BATCH_SIZE
             end_idx = min((batch_num + 1) * BATCH_SIZE, len(us_patents_only))
             batch_patents = us_patents_only[start_idx:end_idx]
+            
+            # Collect all people from this batch for single SQL query
+            batch_people = []
+            batch_people_metadata = []  # Track which patent/role each person belongs to
+            
+            logger.info(f"Processing batch {batch_num + 1}/{total_batches}: {len(batch_patents)} patents")
+            print(f"PROGRESS: Batch {batch_num + 1} - Collecting people from {len(batch_patents)} patents")
             
             for patent in batch_patents:
                 patent_number = self._clean_patent_number(patent.get('patent_number', ''))
@@ -441,199 +563,158 @@ class HybridSQLMemoryIntegrator:
                 if is_new_patent:
                     new_patents.append(patent)
                     
-                    # Process inventors (should all be US)
-                    for inventor in patent.get('inventors', []):
+                    # Collect inventors
+                    for i, inventor in enumerate(patent.get('inventors', [])):
                         total_xml_people += 1
-                        processed_people += 1
-                        
-                        matches = self.find_person_matches_fast(inventor)
-                        best_score = matches[0][1] if matches else 0
-
-                        # Detect same-name different-address scenario (use top match)
-                        moved_candidate = None
-                        if matches:
-                            top_existing, top_score = matches[0]
-                            try:
-                                tf = self._clean_string(inventor.get('first_name', '')).lower()
-                                tl = self._clean_string(inventor.get('last_name', '')).lower()
-                                tc = self._clean_string(inventor.get('city', '')).lower()
-                                ts = self._clean_string(inventor.get('state', '')).lower()
-                                ef = top_existing.get('first_name', '')
-                                el = top_existing.get('last_name', '')
-                                ec = top_existing.get('city', '')
-                                es = top_existing.get('state', '')
-                                names_equal = (tf and tl and tf == ef and tl == el)
-                                # Consider address different if both have any location component and differ
-                                addr_diff = (tc or ts or ec or es) and (tc != ec or ts != es)
-                                if names_equal and addr_diff:
-                                    moved_candidate = {
-                                        'new_person': {
-                                            **inventor,
-                                            'patent_number': patent_number,
-                                            'patent_title': patent.get('patent_title'),
-                                            'person_type': 'inventor',
-                                            'person_id': f"{patent_number}_inventor_{processed_people}",
-                                            'match_score': top_score,
-                                            'match_status': 'same_name_diff_address'
-                                        },
-                                        'existing_person': top_existing,
-                                        'matched_score': top_score,
-                                        'reason': 'same_name_different_address'
-                                    }
-                            except Exception:
-                                moved_candidate = None
-                        
-                        self._update_match_statistics(match_statistics, best_score)
-                        
-                        if best_score >= AUTO_MATCH_THRESHOLD:
-                            match_statistics['auto_matched'] += 1
-                            # Add reason and linked existing when available
-                            record = {
-                                **inventor,
-                                'match_score': best_score,
-                                'match_reason': 'auto_matched'
-                            }
-                            if moved_candidate is not None:
-                                record['match_reason'] = 'moved'
-                                record['matched_existing'] = moved_candidate.get('existing_person')
-                                same_name_diff_address.append(moved_candidate)
-                            existing_people_found.append(record)
-                        elif best_score >= REVIEW_THRESHOLD:
-                            match_statistics['needs_review'] += 1
-                            new_people.append({
-                                **inventor,
-                                'patent_number': patent_number,
-                                'patent_title': patent.get('patent_title'),
-                                'person_type': 'inventor',
-                                'person_id': f"{patent_number}_inventor_{processed_people}",
-                                'match_score': best_score,
-                                'match_status': 'needs_review',
-                                'verification_needed': True,
-                                # Include top candidate matches for frontend review
-                                'potential_matches': matches[:5]
-                            })
-                        else:
-                            match_statistics['definitely_new'] += 1
-                            new_people.append({
-                                **inventor,
-                                'patent_number': patent_number,
-                                'patent_title': patent.get('patent_title'),
-                                'person_type': 'inventor',
-                                'person_id': f"{patent_number}_inventor_{processed_people}",
-                                'match_score': best_score,
-                                'match_status': 'new'
-                            })
+                        batch_people.append(inventor)
+                        batch_people_metadata.append({
+                            'patent_number': patent_number,
+                            'patent_title': patent.get('patent_title'),
+                            'person_type': 'inventor',
+                            'person_index': i,
+                            'batch_index': len(batch_people) - 1
+                        })
                     
-                    # Process assignees with names (should also be US)
-                    for assignee in patent.get('assignees', []):
+                    # Collect assignees with names
+                    for i, assignee in enumerate(patent.get('assignees', [])):
                         if assignee.get('first_name') or assignee.get('last_name'):
                             total_xml_people += 1
-                            processed_people += 1
-                            
-                            matches = self.find_person_matches_fast(assignee)
-                            best_score = matches[0][1] if matches else 0
-
-                            # Detect same-name different-address scenario (use top match)
-                            moved_candidate = None
-                            if matches:
-                                top_existing, top_score = matches[0]
-                                try:
-                                    tf = self._clean_string(assignee.get('first_name', '')).lower()
-                                    tl = self._clean_string(assignee.get('last_name', '')).lower()
-                                    tc = self._clean_string(assignee.get('city', '')).lower()
-                                    ts = self._clean_string(assignee.get('state', '')).lower()
-                                    ef = top_existing.get('first_name', '')
-                                    el = top_existing.get('last_name', '')
-                                    ec = top_existing.get('city', '')
-                                    es = top_existing.get('state', '')
-                                    names_equal = (tf and tl and tf == ef and tl == el)
-                                    addr_diff = (tc or ts or ec or es) and (tc != ec or ts != es)
-                                    if names_equal and addr_diff:
-                                        moved_candidate = {
-                                            'new_person': {
-                                                **assignee,
-                                                'patent_number': patent_number,
-                                                'patent_title': patent.get('patent_title'),
-                                                'person_type': 'assignee',
-                                                'person_id': f"{patent_number}_assignee_{processed_people}",
-                                                'match_score': top_score,
-                                                'match_status': 'same_name_diff_address'
-                                            },
-                                            'existing_person': top_existing,
-                                            'matched_score': top_score,
-                                            'reason': 'same_name_different_address'
-                                        }
-                                except Exception:
-                                    moved_candidate = None
-                            
-                            if best_score >= AUTO_MATCH_THRESHOLD:
-                                match_statistics['auto_matched'] += 1
-                                record = {
-                                    **assignee,
-                                    'match_score': best_score,
-                                    'match_reason': 'auto_matched'
-                                }
-                                if moved_candidate is not None:
-                                    record['match_reason'] = 'moved'
-                                    record['matched_existing'] = moved_candidate.get('existing_person')
-                                    same_name_diff_address.append(moved_candidate)
-                                existing_people_found.append(record)
-                            elif best_score >= REVIEW_THRESHOLD:
-                                match_statistics['needs_review'] += 1
-                                new_people.append({
-                                    **assignee,
-                                    'patent_number': patent_number,
-                                    'patent_title': patent.get('patent_title'),
-                                    'person_type': 'assignee',
-                                    'person_id': f"{patent_number}_assignee_{processed_people}",
-                                    'match_score': best_score,
-                                    'match_status': 'needs_review',
-                                    'verification_needed': True,
-                                    # Include top candidate matches for frontend review
-                                    'potential_matches': matches[:5]
-                                })
-                            else:
-                                match_statistics['definitely_new'] += 1
-                                new_people.append({
-                                    **assignee,
-                                    'patent_number': patent_number,
-                                    'patent_title': patent.get('patent_title'),
-                                    'person_type': 'assignee',
-                                    'person_id': f"{patent_number}_assignee_{processed_people}",
-                                    'match_score': best_score,
-                                    'match_status': 'new'
-                                })
+                            batch_people.append(assignee)
+                            batch_people_metadata.append({
+                                'patent_number': patent_number,
+                                'patent_title': patent.get('patent_title'),
+                                'person_type': 'assignee',
+                                'person_index': i,
+                                'batch_index': len(batch_people) - 1
+                            })
                 else:
                     duplicate_patents += 1
-                    # Count people for statistics even from duplicate patents
+                    # Still count people for statistics
                     for inventor in patent.get('inventors', []):
                         total_xml_people += 1
                     for assignee in patent.get('assignees', []):
                         if assignee.get('first_name') or assignee.get('last_name'):
                             total_xml_people += 1
             
-            # Batch progress
+            # Execute batch matching (SQL or CSV)
+            if batch_people:
+                logger.info(f"Batch {batch_num + 1}: Starting matching for {len(batch_people)} people")
+                print(f"PROGRESS: Batch {batch_num + 1} - Starting matching for {len(batch_people)} people")
+                
+                batch_matching_start = time.time()
+                
+                if using_sql:
+                    batch_matches = self.find_people_matches_batch_sql(batch_people)
+                    match_statistics['sql_queries_executed'] += len(set(
+                        self._clean_string(p.get('last_name', '')).lower() 
+                        for p in batch_people if p.get('last_name')
+                    ))
+                else:
+                    # CSV fallback - match each person individually
+                    batch_matches = {}
+                    for i, person in enumerate(batch_people):
+                        person_key = f"batch_{i}"
+                        matches = self.find_person_matches_csv(person, existing_people_csv)
+                        batch_matches[person_key] = matches
+                
+                batch_matching_time = time.time() - batch_matching_start
+                logger.info(f"Batch {batch_num + 1}: Matching completed in {batch_matching_time:.2f}s")
+                print(f"PROGRESS: Batch {batch_num + 1} - Matching completed in {batch_matching_time:.2f}s")
+                
+                # Process matches for each person
+                logger.info(f"Batch {batch_num + 1}: Processing {len(batch_people_metadata)} match results")
+                print(f"PROGRESS: Batch {batch_num + 1} - Processing {len(batch_people_metadata)} match results")
+                
+                decisions_made = {'existing': 0, 'review': 0, 'new': 0}
+                for metadata in batch_people_metadata:
+                    batch_index = metadata['batch_index']
+                    person = batch_people[batch_index]
+                    person_key = f"batch_{batch_index}"
+                    
+                    matches = batch_matches.get(person_key, [])
+                    best_score = matches[0][1] if matches else 0
+                    processed_people += 1
+                    
+                    # Update statistics
+                    self._update_match_statistics(match_statistics, best_score)
+                    match_statistics['total_db_people_checked'] += len(matches)
+                    
+                    # Process based on score thresholds
+                    if best_score >= AUTO_MATCH_THRESHOLD:
+                        match_statistics['auto_matched'] += 1
+                        decisions_made['existing'] += 1
+                        existing_people_found.append({
+                            **person,
+                            'match_score': best_score,
+                            'match_reason': 'auto_matched',
+                            'patent_number': metadata['patent_number'],
+                            'person_type': metadata['person_type'],
+                            'patent_title': metadata['patent_title'],
+                            # Ensure these fields are always present, even if null
+                            'address': person.get('address'),
+                            'email': person.get('email'), 
+                            'issue_id': person.get('issue_id'),
+                            'inventor_id': person.get('inventor_id'),
+                            'mod_user': person.get('mod_user')
+                        })
+                        
+                    elif best_score >= REVIEW_THRESHOLD:
+                        match_statistics['needs_review'] += 1
+                        decisions_made['review'] += 1
+                        new_people.append({
+                            **person,
+                            'patent_number': metadata['patent_number'],
+                            'patent_title': metadata['patent_title'],
+                            'person_type': metadata['person_type'],
+                            'person_id': f"{metadata['patent_number']}_{metadata['person_type']}_{processed_people}",
+                            'match_score': best_score,
+                            'match_status': 'needs_review',
+                            'verification_needed': True,
+                            'potential_matches': matches[:5]
+                        })
+                    else:
+                        match_statistics['definitely_new'] += 1
+                        decisions_made['new'] += 1
+                        new_people.append({
+                            **person,
+                            'patent_number': metadata['patent_number'],
+                            'patent_title': metadata['patent_title'],
+                            'person_type': metadata['person_type'],
+                            'person_id': f"{metadata['patent_number']}_{metadata['person_type']}_{processed_people}",
+                            'match_score': best_score,
+                            'match_status': 'new'
+                        })
+                
+                logger.info(f"Batch {batch_num + 1}: Decisions - {decisions_made['existing']} existing, {decisions_made['review']} review, {decisions_made['new']} new")
+                print(f"PROGRESS: Batch {batch_num + 1} - Decisions: {decisions_made['existing']} existing, {decisions_made['review']} review, {decisions_made['new']} new")
+            
+            # Progress reporting
             batch_time = time.time() - batch_start_time
             elapsed = time.time() - start_time
             patents_processed = end_idx
             rate = patents_processed / elapsed if elapsed > 0 else 0
             eta_minutes = ((len(us_patents_only) - patents_processed) / rate / 60) if rate > 0 else 0
             
-            progress_msg = f"Batch {batch_num + 1}/{total_batches} - Patent {patents_processed:,}/{len(us_patents_only):,} ({patents_processed/len(us_patents_only)*100:.1f}%) - People: {processed_people:,} - Rate: {rate:.1f}/sec - ETA: {eta_minutes:.1f}min"
+            progress_msg = f"Batch {batch_num + 1}/{total_batches} - Patent {patents_processed:,}/{len(us_patents_only):,} ({patents_processed/len(us_patents_only)*100:.1f}%) - People: {processed_people:,}"
+            if using_sql:
+                progress_msg += f" - SQL Queries: {match_statistics['sql_queries_executed']}"
+            progress_msg += f" - Rate: {rate:.1f}/sec - ETA: {eta_minutes:.1f}min"
+            
             logger.info(progress_msg)
             print(f"PROGRESS: {progress_msg}")
         
-        # Optional deduplication of new people across patents
+        # Optional deduplication
         dedup_removed = 0
         if self.config.get('DEDUP_NEW_PEOPLE', True) and new_people:
             before = len(new_people)
             new_people = self._dedup_new_people(new_people)
             dedup_removed = before - len(new_people)
-            print(f"PROGRESS: Deduplicated new people - removed {dedup_removed:,}, remaining {len(new_people):,}")
-
+        
         total_elapsed = time.time() - start_time
-        logger.info(f"Fast processing complete in {total_elapsed/60:.1f} minutes")
+        logger.info(f"Batch processing complete in {total_elapsed/60:.1f} minutes")
         print(f"PROGRESS: COMPLETE - {len(new_patents):,} new patents, {len(new_people):,} people in {total_elapsed/60:.1f} minutes")
+        
+        data_source = 'sql_database_batch_queries' if using_sql else 'csv_files'
         
         return {
             'new_patents': new_patents,
@@ -641,16 +722,101 @@ class HybridSQLMemoryIntegrator:
             'existing_people_found': existing_people_found,
             'duplicate_patents_count': duplicate_patents,
             'duplicate_people_count': len(existing_people_found),
-            'total_original_patents': len(us_patents_only),  # FIXED: Only US patents
+            'total_original_patents': len(us_patents_only),
             'total_original_people': total_xml_people,
             'match_statistics': match_statistics,
             'processing_time_minutes': total_elapsed / 60,
-            'data_source': 'sql_database' if self.loaded_sql_data else 'csv_files',
-            'dedup_new_people_removed': dedup_removed,
-            'same_name_diff_address': same_name_diff_address,
-            'same_name_diff_address_count': len(same_name_diff_address)
+            'data_source': data_source,
+            'dedup_new_people_removed': dedup_removed
         }
-
+    
+    def _clean_name_for_matching(self, name: str) -> str:
+        """Clean name for matching - remove ALL middle initials/names, keep only first name"""
+        if not name:
+            return ''
+        
+        # Convert to lowercase and strip whitespace
+        cleaned = str(name).lower().strip()
+        
+        # DEBUG: Log name cleaning for troubleshooting
+        original = cleaned
+        
+        # Remove everything after the first name - be aggressive
+        # "Adam C." -> "adam"
+        # "Thomas Durkee" -> "thomas" 
+        # "Nicholas John" -> "nicholas"
+        # "Roy S." -> "roy"
+        parts = cleaned.split()
+        if parts:
+            cleaned = parts[0]  # Keep only the first word
+        
+        # # DEBUG: Log name cleaning result
+        # if original != cleaned:
+        #     logger.info(f"NAME CLEANING: '{original}' → '{cleaned}'")
+        
+        return cleaned
+    
+    def _calculate_simple_match_score(self, 
+                                target_first: str, target_last: str, 
+                                target_city: str, target_state: str,
+                                existing_first: str, existing_last: str, 
+                                existing_city: str, existing_state: str) -> int:
+        """Simplified match scoring - just compare 4 fields case-insensitive"""
+        
+        # Clean all fields for comparison
+        t_first = self._clean_name_for_matching(target_first)
+        t_last = self._clean_name_for_matching(target_last)
+        t_city = self._clean_string(target_city).lower()
+        t_state = self._clean_string(target_state).lower()
+        
+        e_first = self._clean_name_for_matching(existing_first)
+        e_last = self._clean_name_for_matching(existing_last)
+        e_city = self._clean_string(existing_city).lower()
+        e_state = self._clean_string(existing_state).lower()
+        
+        # Must have matching last name at minimum
+        if not t_last or not e_last or t_last != e_last:
+            return 0
+        
+        # Simple scoring based on how many fields match
+        score = 0
+        
+        # Last name matches (required to get here)
+        score += 10
+        
+        # First name comparison
+        if t_first and e_first:
+            if t_first == e_first:
+                score += 40  # Exact first name match
+            elif t_first and e_first and t_first[0] == e_first[0]:
+                score += 10  # First initial match
+        
+        # Location matching
+        if t_state and e_state and t_state == e_state:
+            score += 20  # Same state
+            
+            if t_city and e_city and t_city == e_city:
+                score += 20  # Same city too
+        
+        return score
+    
+    def _update_match_statistics(self, stats: Dict, score: int):
+        """Update match statistics"""
+        if score >= 50:
+            stats['score_50_perfect'] += 1
+        elif score >= 25:
+            stats['score_25_moved'] += 1
+        elif score >= 15:
+            stats['score_15_initial'] += 1
+        elif score >= 10:
+            stats['score_10_limited'] += 1
+        elif score >= 6:
+            stats['score_6_initial_exact'] += 1
+        elif score >= 3:
+            stats['score_3_initial_state'] += 1
+        else:
+            stats['no_match'] += 1
+    
     def _dedup_new_people(self, people: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Deduplicate new people by name+city+state+person_type; aggregate patent numbers."""
         seen: Dict[Tuple[str, str, str, str, str], Dict[str, Any]] = {}
@@ -697,25 +863,7 @@ class HybridSQLMemoryIntegrator:
         """Clean up memory after processing"""
         logger.info("Cleaning up memory...")
         self.existing_patents.clear()
-        self.existing_people.clear()
         print("PROGRESS: Memory cleaned up")
-    
-    def _update_match_statistics(self, stats: Dict, score: int):
-        """Update match statistics"""
-        if score >= 50:
-            stats['score_50_perfect'] += 1
-        elif score >= 25:
-            stats['score_25_moved'] += 1
-        elif score >= 15:
-            stats['score_15_initial'] += 1
-        elif score >= 10:
-            stats['score_10_limited'] += 1
-        elif score >= 6:
-            stats['score_6_initial_exact'] += 1
-        elif score >= 3:
-            stats['score_3_initial_state'] += 1
-        else:
-            stats['no_match'] += 1
     
     def _clean_string(self, value) -> str:
         """Clean string values"""
@@ -741,13 +889,12 @@ class HybridSQLMemoryIntegrator:
 
 
 # =============================================================================
-# MAIN RUNNER FUNCTION - FIXED SEQUENCE TO ENSURE PROPER US FILTERING
+# MAIN RUNNER FUNCTION - UPDATED TO USE BATCH SQL APPROACH
 # =============================================================================
 
 def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
     """
-    FIXED: Main runner function with proper US patent filtering sequence
-    The bug was that people counting was happening before/alongside filtering
+    Main runner function with batch SQL query approach instead of memory subset
     """
     try:
         # Step 1: Load patents from Step 0 output if present; otherwise process XML files
@@ -769,6 +916,7 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
                 logger.warning(f"Failed to read {step0_patents_path}: {e}. Falling back to XML files.")
 
         if not xml_patents:
+            from classes.simple_xml_processor import process_xml_files
             logger.info("Processing XML patent files (fallback)...")
             xml_patents = process_xml_files(xml_folder, output_folder)
             input_source = 'xml_files'
@@ -782,11 +930,11 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
                 'duplicate_patents_count': 0
             }
         
-        # Step 2: Filter to US patents FIRST, before any people processing
-        integrator = HybridSQLMemoryIntegrator(config)
+        # Step 2: Filter to US patents FIRST
+        integrator = BatchSQLQueryIntegrator(config)
         
         us_filter_result = integrator.filter_us_patents_only(xml_patents)
-        us_patents_only = us_filter_result['us_patents']  # CRITICAL: Only pass US patents forward
+        us_patents_only = us_filter_result['us_patents']
         
         logger.info(f"US patent filtering: {len(us_patents_only):,} US patents from {len(xml_patents):,} total (source={input_source})")
         print(f"PROGRESS: US filtering complete - {len(us_patents_only):,} US patents will be processed")
@@ -804,21 +952,21 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
                 'us_filter_result': us_filter_result
             }
         
-        # Step 3: Load existing data (SQL first, CSV fallback)
-        load_result = integrator.load_existing_data_from_sql()
+        # Step 3: Load existing data (patents only for SQL, or CSV fallback)
+        load_result = integrator.load_existing_patents_only()
         if not load_result['success']:
             logger.info("SQL loading failed, trying CSV fallback...")
             print("PROGRESS: SQL failed, trying CSV fallback...")
             load_result = integrator.load_existing_data_from_csv()
             
             if not load_result['success']:
-                # No existing data available - treat everything as new
+                # Handle no existing data case...
                 logger.warning("No existing data available, treating all US patents as new")
                 
                 new_people_data = []
                 total_xml_people = 0
                 
-                for patent in us_patents_only:  # FIXED: Use us_patents_only, not xml_patents
+                for patent in us_patents_only:
                     for inventor in patent.get('inventors', []):
                         new_people_data.append({
                             **inventor,
@@ -853,20 +1001,19 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
                     'new_people_count': len(new_people_data),
                     'duplicate_patents_count': 0,
                     'duplicate_people_count': 0,
-                    'total_xml_patents': len(us_patents_only),  # FIXED: Count US patents only
+                    'total_xml_patents': len(us_patents_only),
                     'total_xml_people': total_xml_people,
                     'us_filter_result': us_filter_result,
                     'warning': 'No existing data found - all US patents treated as new'
                 }
         
-        # Step 4: Filter US patents using fast in-memory matching
-        # CRITICAL: Pass us_patents_only, not xml_patents
-        filter_result = integrator.filter_new_xml_data_fast(us_patents_only)
+        # Step 4: Filter US patents using batch SQL queries (or CSV fallback)
+        filter_result = integrator.filter_new_xml_data_batch_sql(us_patents_only, load_result)
         
         # Step 5: Clean up memory
         integrator.cleanup_memory()
         
-        # Step 6: Save results to JSON files
+        # Step 6: Save results
         os.makedirs(output_folder, exist_ok=True)
         
         if filter_result['new_patents']:
@@ -876,19 +1023,18 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
             with open(Path(output_folder) / 'new_people_for_enrichment.json', 'w') as f:
                 json.dump(filter_result['new_people'], f, indent=2, default=str)
             
+            # Save existing people found
+            existing_people_raw = filter_result['existing_people_found']
+            
             with open(Path(output_folder) / 'existing_people_found.json', 'w') as f:
-                json.dump(filter_result['existing_people_found'], f, indent=2, default=str)
+                json.dump(existing_people_raw, f, indent=2, default=str)
 
-            # Save same-name different-address candidates for UI review
-            try:
-                with open(Path(output_folder) / 'same_name_diff_address.json', 'w') as f:
-                    json.dump(filter_result.get('same_name_diff_address', []), f, indent=2, default=str)
-            except Exception as e:
-                logger.warning(f"Could not save same_name_diff_address.json: {e}")
+            with open(Path(output_folder) / 'existing_people_in_db.json', 'w') as f:
+                json.dump(existing_people_raw, f, indent=2, default=str)
             
             logger.info(f"Saved results to {output_folder}")
         
-        # Create comprehensive result with filtering summary
+        # Create result
         result = {
             'success': True,
             'original_patents_count': len(xml_patents),
@@ -896,20 +1042,19 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
             'us_patents_count': len(us_patents_only),
             'us_retention_rate': us_filter_result['us_retention_rate'],
             'existing_patents_count': load_result['existing_patents_count'],
-            'existing_people_count': load_result['existing_people_count'],
+            'existing_people_count': load_result.get('existing_people_count', 'FULL_DATABASE'),  # Indicate full DB access
             'new_patents_count': len(filter_result['new_patents']),
             'new_people_count': len(filter_result['new_people']),
             'duplicate_patents_count': filter_result['duplicate_patents_count'],
-            'duplicate_people_count': filter_result['duplicate_people_count'],
-            'total_xml_patents': filter_result['total_original_patents'],  # Should now be US patents only
-            'total_xml_people': filter_result['total_original_people'],    # Should now be US people only
+            'duplicate_people_count': len(filter_result['existing_people_found']),
+            'total_xml_patents': filter_result['total_original_patents'],
+            'total_xml_people': filter_result['total_original_people'],
             'match_statistics': filter_result['match_statistics'],
             'processing_time_minutes': filter_result['processing_time_minutes'],
             'data_source': filter_result['data_source'],
             'us_filter_result': us_filter_result,
-            'new_people_data': filter_result['new_people'],  # For enrichment step
+            'new_people_data': filter_result['new_people'],
             'dedup_new_people_removed': filter_result.get('dedup_new_people_removed', 0),
-            'same_name_diff_address_count': filter_result.get('same_name_diff_address_count', 0),
             'input_source': input_source
         }
         
@@ -919,7 +1064,9 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
         return result
         
     except Exception as e:
-        logger.error(f"Error in hybrid integration: {e}")
+        logger.error(f"Error in batch SQL integration: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return {
             'success': False,
             'error': str(e),
@@ -928,10 +1075,9 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
             'duplicate_patents_count': 0
         }
 
-
 def _log_comprehensive_summary(result: Dict[str, Any]):
     """Log comprehensive summary including filtering statistics"""
-    logger.info("\nCOMPREHENSIVE INTEGRATION SUMMARY:")
+    logger.info("\nCOMPREHENSIVE BATCH SQL INTEGRATION SUMMARY:")
     logger.info("=" * 70)
     
     # US Filtering Summary
@@ -945,9 +1091,13 @@ def _log_comprehensive_summary(result: Dict[str, Any]):
         logger.info("")
     
     # Integration Summary
-    logger.info(f"INTEGRATION SUMMARY:")
+    logger.info(f"BATCH SQL INTEGRATION SUMMARY:")
     logger.info(f"   Existing patents in DB: {result['existing_patents_count']:,}")
-    logger.info(f"   Existing people in DB: {result['existing_people_count']:,}")
+    logger.info(f"   People comparison method: {result.get('data_source', 'unknown')}")
+    if result.get('data_source') == 'sql_database_batch_queries':
+        logger.info(f"   ✅ Using FULL DATABASE (not 50K subset)")
+    else:
+        logger.info(f"   ⚠️  Using CSV fallback")
     logger.info(f"   New patents found: {result['new_patents_count']:,}")
     logger.info(f"   New people found: {result['new_people_count']:,}")
     logger.info(f"   Duplicate patents avoided: {result['duplicate_patents_count']:,}")
@@ -958,21 +1108,10 @@ def _log_comprehensive_summary(result: Dict[str, Any]):
     match_stats = result.get('match_statistics', {})
     if match_stats:
         logger.info(f"\nMATCH SCORE BREAKDOWN:")
-        logger.info(f"   No Score/Score 0: {match_stats.get('no_match', 0):,}")
-        logger.info(f"   Score 1-9 (Very Low): {match_stats.get('score_3_initial_state', 0) + match_stats.get('score_6_initial_exact', 0):,}")
-        logger.info(f"   Score 10-19 (Needs Review): {match_stats.get('score_10_limited', 0) + match_stats.get('score_15_initial', 0):,}")
-        logger.info(f"   Score 25-49 (High Conf): {match_stats.get('score_25_moved', 0):,}")
-        logger.info(f"   Score 50-74 (Very High): {match_stats.get('score_50_perfect', 0):,}")
-    
-    # Cost Savings
-    if result.get('duplicate_people_count', 0) > 0:
-        api_calls_saved = result['duplicate_people_count']
-        cost_saved = api_calls_saved * 0.03
-        cost_for_new = result['new_people_count'] * 0.03
-        
-        logger.info(f"\nCOST SAVINGS:")
-        logger.info(f"   API calls avoided: {api_calls_saved:,}")
-        logger.info(f"   Estimated cost saved: ${cost_saved:.2f}")
-        logger.info(f"   Cost for new people: ${cost_for_new:.2f}")
+        logger.info(f"   SQL queries executed: {match_stats.get('sql_queries_executed', 0):,}")
+        logger.info(f"   Total DB people checked: {match_stats.get('total_db_people_checked', 0):,}")
+        logger.info(f"   Auto-matched (≥25): {match_stats.get('auto_matched', 0):,}")
+        logger.info(f"   Needs review (10-24): {match_stats.get('needs_review', 0):,}")
+        logger.info(f"   Definitely new (<10): {match_stats.get('definitely_new', 0):,}")
     
     logger.info("=" * 70)
