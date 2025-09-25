@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 /*
 ==============================================================
 🚀 Patent Processing Environment Setup Script
@@ -25,6 +23,20 @@ choco install nodejs git -y
 choco install python --version=3.9.19 -y  
 choco install python --version=3.13.3 -y
 
+
+URLS:
+# Download node from https://nodejs.org/ (choose LTS version)
+# Download Git from https://git-scm.com/download/win
+
+
+--------------- Git Setup -------------------
+# Clone repository
+git clone https://github.com/RyanBuss01/patent_person_enrichment.git
+cd patent_person_enrichment
+
+--------------- server management -------------------
+
+
 # run setup.js with Node.js
 node setup.js
 
@@ -40,6 +52,9 @@ pm2 restart patent-pipeline
 pm2 stop patent-pipeline
 pm2 logs patent-pipeline
 
+
+--------------- Update Instructions -------------------
+
 # run update push:
 git fetch
 git reset --hard origin/main 
@@ -48,18 +63,9 @@ cd front-end
 npm install
 pm2 restart patent-pipeline
 
-
-
-URLS:
-# Download node from https://nodejs.org/ (choose LTS version)
-# Download Git from https://git-scm.com/download/win
-
----------------------------------------------
-
-
-
-
+----------------------------------------------  
 */
+
 
 const fs = require('fs');
 const path = require('path');
@@ -506,18 +512,38 @@ class EnvironmentSetup {
   // Removed - no unnecessary startup scripts needed
 
   createEnvironmentFile() {
-    this.log('🔧 Checking .env file...', 'blue');
+    this.log('🔧 Creating .env file in front-end folder...', 'blue');
 
-    const envPath = path.join(this.projectPath, '.env');
+    const frontendEnvPath = path.join(this.projectPath, 'front-end', '.env');
     
-    if (fs.existsSync(envPath)) {
-      this.success('.env file already exists - skipping');
+    if (fs.existsSync(frontendEnvPath)) {
+      this.success('.env file already exists in front-end/ - skipping');
       return;
     }
 
-    // Create .env in setup folder as template, don't clutter root
-    this.info('No .env found - you may need to create one with your database credentials');
-    this.success('Environment check complete');
+    const envContent = `# Frontend Environment Variables
+# front-end/.env
+PORT=8011
+
+# PeopleDataLabs API Key for enrichment
+PEOPLEDATALABS_API_KEY="c0ff56fa9cba5791d3e8de09721c690c2a4badab2998f582a6b53bf8d2e4e14a"
+
+
+# Other optional settings
+MAX_ENRICHMENT_COST=1000
+DAYS_BACK=7
+MAX_RESULTS=1000
+
+
+
+SQL_HOST="mysql-patent-nationalengravers.mysql.database.azure.com"
+SQL_USER="rootuser"
+SQL_PASSWORD="S3cur3Adm1n1124!"
+SQL_DATABASE="patent_data"
+`;
+
+    fs.writeFileSync(frontendEnvPath, envContent);
+    this.success('.env file created in front-end/');
   }
 
   // Removed createReadme() - no extra documentation files needed

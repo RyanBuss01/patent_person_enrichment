@@ -32,6 +32,24 @@
             color: white;
             padding: 30px;
             text-align: center;
+            position: relative;
+        }
+
+        .header-actions {
+            display: flex;
+            justify-content: flex-end;
+            width: 100%;
+            margin-bottom: 12px;
+        }
+
+        .btn-info {
+            background: #17a2b8;
+            color: white;
+        }
+
+        .btn-info:hover {
+            background: #138496;
+            transform: translateY(-2px);
         }
 
         .dev-banner {
@@ -250,7 +268,17 @@
             background: #218838;
             transform: translateY(-2px);
         }
-        
+
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #b02a37;
+            transform: translateY(-2px);
+        }
+
         .btn-secondary {
             background: #95a5a6;
             color: white;
@@ -507,6 +535,66 @@
             background: #f8f9fa;
             text-align: left;
             font-weight: 500;
+        }
+
+        .docs-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(17, 24, 39, 0.75);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 40px 20px;
+            z-index: 10000;
+        }
+
+        .docs-overlay.hidden {
+            display: none;
+        }
+
+        .docs-overlay-content {
+            background: #ffffff;
+            width: min(1000px, 92vw);
+            height: min(90vh, 900px);
+            border-radius: 14px;
+            box-shadow: 0 25px 60px rgba(0, 0, 0, 0.35);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .docs-overlay-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 20px;
+            background: #f5f7fa;
+            border-bottom: 1px solid #e1e5eb;
+        }
+
+        .docs-overlay-header h3 {
+            margin: 0;
+            color: #1f2933;
+            font-size: 1.1em;
+            font-weight: 600;
+        }
+
+        .docs-overlay-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .docs-overlay-body {
+            flex: 1;
+            background: #1f2933;
+        }
+
+        .docs-overlay-body iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+            background: white;
         }
         .bulk-overlay-table tbody tr:hover {
             background: #fdf0d5;
@@ -799,6 +887,9 @@
 <body>
     <div class="container">
         <div class="header">
+            <div class="header-actions">
+                <button class="btn btn-info" onclick="openDocsOverlay()">📄 View Documentation</button>
+            </div>
             <h1>🔬 Patent Processing Pipeline</h1>
             <p>Download, process, and enrich patent data through automated pipeline steps</p>
             <!-- Moved CSV export buttons to bottom widget
@@ -843,9 +934,6 @@
                         <button class="btn btn-success" onclick="triggerCsvUpload()" id="step0UploadBtn">
                             ⬆️ Upload CSV/XLSX
                         </button>
-                        <button class="btn btn-success" onclick="triggerXmlUpload()" id="step0XmlUploadBtn">
-                            ⬆️ Upload XML
-                        </button>
                         <button class="btn btn-secondary" onclick="showSample('step0')" id="step0Sample">
                             📋 View Sample
                         </button>
@@ -855,6 +943,9 @@
                         <button class="btn btn-test" onclick="runStep0Quick()" id="step0QuickBtn">
                             ⚡ Quick Download (7 days)
                         </button>
+                        <button class="btn btn-success" onclick="triggerXmlUpload()" id="step0XmlUploadBtn">
+                            ⬆️ Upload XML
+                        </button>
                     </div>
                     <input type="file" id="step0CsvInput" accept=".csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx" style="display:none" />
                     <input type="file" id="step0XmlInput" accept=".xml,text/xml,application/xml" style="display:none" />
@@ -862,14 +953,16 @@
                     <!-- Download Configuration Interface -->
                     <div class="download-config hidden" id="downloadConfig">
                         <div class="config-header">🔧 Download Configuration</div>
-                        <div class="config-modes" style="grid-template-columns: 1fr 1fr; margin-bottom: 12px;">
-                            <div class="mode-option active" onclick="selectRunner('download')" id="runnerDownload">
-                                <h4>🌐 PatentsView API</h4>
-                                <p>Primary API downloader</p>
-                            </div>
-                            <div class="mode-option" onclick="selectRunner('extract')" id="runnerExtract">
-                                <h4>🧰 Alternate Extract</h4>
-                                <p>Legacy extractor (same outputs)</p>
+                        <div class="dev-mode-panel dev-only hidden" id="step0RunnerPanel" style="margin-bottom: 12px;">
+                            <div class="config-modes" style="grid-template-columns: 1fr 1fr; margin-bottom: 0;">
+                                <div class="mode-option active" onclick="selectRunner('download')" id="runnerDownload">
+                                    <h4>🌐 PatentsView API</h4>
+                                    <p>Primary API downloader</p>
+                                </div>
+                                <div class="mode-option" onclick="selectRunner('extract')" id="runnerExtract">
+                                    <h4>🧰 Alternate Extract</h4>
+                                    <p>Legacy extractor (same outputs)</p>
+                                </div>
                             </div>
                         </div>
                         
@@ -907,12 +1000,13 @@
                                 <select id="maxResults">
                                     <option value="100">100 patents</option>
                                     <option value="500">500 patents</option>
-                                    <option value="1000" selected>1,000 patents</option>
+                                    <option value="1000">1,000 patents</option>
                                     <option value="2000">2,000 patents</option>
                                     <option value="5000">5,000 patents</option>
                                     <option value="10000">10,000 patents</option>
-                                    <option value="20000">20,000 patents</option>
+                                    <option value="20000" selected>20,000 patents</option>
                                     <option value="50000">50,000 patents</option>
+                                    <option value="100000">100,000 patents</option>
                                 </select>
                             </div>
                         </div>
@@ -1169,11 +1263,14 @@
             <div class="export-actions" style="margin-bottom: 8px;">
                 <button class="btn btn-primary" onclick="exportContactCurrent()">Current Contacts</button>
                 <button class="btn btn-primary" onclick="exportContactNew()">New Contacts</button>
+                <button class="btn btn-danger" onclick="exportContactCurrentAddresses()">Current Addresses</button>
+                <button class="btn btn-danger" onclick="exportContactNewAddresses()">New Addresses</button>
             </div>
             <h3>⬇️ Full CSV Exports</h3>
             <div class="export-actions">
-                <button class="btn btn-secondary" onclick="exportCurrentEnrichments()">Current Enrichments</button>
                 <button class="btn btn-secondary" onclick="exportNewEnrichments()">New Enrichments</button>
+                <button class="btn btn-secondary" onclick="exportNewAndExistingEnrichments()">New &amp; Existing Enrichments</button>
+                <button class="btn btn-secondary" onclick="exportCurrentEnrichments()">Current Enrichments</button>
                 <button class="btn btn-secondary" onclick="exportAllEnrichments()">All Enrichments</button>
             </div>
         </div>
@@ -1211,6 +1308,23 @@
         </div>
     </div>
 
+    <div class="docs-overlay hidden" id="docsOverlay">
+        <div class="docs-overlay-content" role="dialog" aria-modal="true" aria-labelledby="docsOverlayTitle">
+            <div class="docs-overlay-header">
+                <h3 id="docsOverlayTitle">Documentation</h3>
+                <div class="docs-overlay-actions">
+                    <a class="btn btn-success" href="docs.pdf" download>
+                        ⬇️ Download
+                    </a>
+                    <button class="btn btn-secondary" type="button" onclick="closeDocsOverlay()">❌ Close</button>
+                </div>
+            </div>
+            <div class="docs-overlay-body">
+                <iframe src="docs.pdf" title="Patent Processing Documentation"></iframe>
+            </div>
+        </div>
+    </div>
+
     <script>
         // Global state
         let currentStatus = {};
@@ -1226,6 +1340,20 @@
         const isDevMode = pathLower === '/dev' || pathLower.startsWith('/dev/');
         let step1LastBatchLabel = '';
         let bulkMovedSelections = new Set();
+
+        function openDocsOverlay() {
+            const overlay = document.getElementById('docsOverlay');
+            if (overlay) {
+                overlay.classList.remove('hidden');
+            }
+        }
+
+        function closeDocsOverlay() {
+            const overlay = document.getElementById('docsOverlay');
+            if (overlay) {
+                overlay.classList.add('hidden');
+            }
+        }
 
         function formatDateTimeForInput(date) {
             const pad = (value) => String(value).padStart(2, '0');
@@ -1293,6 +1421,24 @@
             document.getElementById('endDate').value =  today.toISOString().split('T')[0];
 
             initializeDevModeIfNeeded();
+
+            const docsOverlay = document.getElementById('docsOverlay');
+            if (docsOverlay) {
+                docsOverlay.addEventListener('click', (event) => {
+                    if (event.target === docsOverlay) {
+                        closeDocsOverlay();
+                    }
+                });
+            }
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                const overlay = document.getElementById('docsOverlay');
+                if (overlay && !overlay.classList.contains('hidden')) {
+                    closeDocsOverlay();
+                }
+            }
         });
         
         // Update status from server
@@ -2775,6 +2921,9 @@
         function exportNewEnrichments() {
             window.open('/api/export/new-enrichments', '_blank');
         }
+        function exportNewAndExistingEnrichments() {
+            window.open('/api/export/new-and-existing-enrichments', '_blank');
+        }
         function exportAllEnrichments() {
             window.open('/api/export/all-enrichments', '_blank');
         }
@@ -2795,6 +2944,12 @@
         }
         function exportContactNew() {
             window.open('/api/export/contact-new', '_blank');
+        }
+        function exportContactCurrentAddresses() {
+            window.open('/api/export/contact-current-addresses', '_blank');
+        }
+        function exportContactNewAddresses() {
+            window.open('/api/export/contact-new-addresses', '_blank');
         }
 
         async function rebuildCsvs() {

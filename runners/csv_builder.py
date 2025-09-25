@@ -8,9 +8,10 @@ import os
 import json
 import csv
 import shutil
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple, Set
 from pathlib import Path
 from datetime import datetime
+from decimal import Decimal
 import sys
 
 # Add the parent directory to sys.path so we can import our modules
@@ -54,6 +55,57 @@ def _zaba_signature(first_name: str, last_name: str, city: str, state: str, pate
     return '|'.join(parts)
 
 
+def _person_signature_values(first_name: Any, last_name: Any, city: Any, state: Any, patent_number: Any) -> str:
+    """Signature helper that mirrors enrichment duplicate checks."""
+    parts = [
+        (first_name or '').strip().lower() if isinstance(first_name, str) else str(first_name or '').strip().lower(),
+        (last_name or '').strip().lower() if isinstance(last_name, str) else str(last_name or '').strip().lower(),
+        (city or '').strip().lower() if isinstance(city, str) else str(city or '').strip().lower(),
+        (state or '').strip().lower() if isinstance(state, str) else str(state or '').strip().lower(),
+        (patent_number or '').strip() if isinstance(patent_number, str) else str(patent_number or '').strip()
+    ]
+    return '|'.join(parts)
+
+
+def _person_signature_from_dict(data: Dict[str, Any]) -> str:
+    if not isinstance(data, dict):
+        return ''
+    return _person_signature_values(
+        data.get('first_name'),
+        data.get('last_name'),
+        data.get('city'),
+        data.get('state'),
+        data.get('patent_number') or data.get('patent_no')
+    )
+
+
+def _stringify_value(value: Any) -> str:
+    if value is None:
+        return ''
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
+    if isinstance(value, (datetime,)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return format(value, 'f')
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    return str(value)
+
+
+def _normalize_sql_row(row: Dict[str, Any], extra: Dict[str, Any] = None) -> Dict[str, Any]:
+    normalized = {}
+    for key, value in (row or {}).items():
+        normalized[key] = _stringify_value(value)
+    if extra:
+        for key, value in extra.items():
+            normalized[key] = _stringify_value(value)
+    return normalized
+
+
 def _extract_zaba_contact_info(zaba_data: dict) -> dict:
     emails = []
     phones = []
@@ -85,8 +137,6 @@ FORMATTED_HEADERS = [
     'inventor_first', 'inventor_last', 'mod_user', 'bar_code', 'inventor_contact'
 ]
 
-CONTACT_HEADERS = ['first_name', 'last_name', 'email', 'address', 'zip', 'state']
-
 def _sanitize_for_csv(val):
     """Sanitize values for CSV output"""
     if val is None:
@@ -103,6 +153,282 @@ def _first_non_empty(*vals):
         if s != '':
             return s
     return ''
+
+
+def _unique_preserve_order(values: List[str]) -> List[str]:
+    """Remove duplicates while preserving order (case-insensitive comparison)."""
+    seen = set()
+    unique = []
+    for raw in values:
+        value = _sanitize_for_csv(raw)
+        if not value:
+            continue
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(value)
+    return unique
+
+
+def _write_rows_to_csv(path: str, rows: List[Dict[str, Any]], preferred_order: List[str] = None) -> None:
+    """Write rows to CSV ensuring consistent header ordering."""
+    preferred_order = preferred_order or []
+    header_set: Set[str] = set()
+    for row in rows:
+        header_set.update(row.keys())
+
+    headers: List[str] = []
+    for key in preferred_order:
+        if key not in headers:
+            headers.append(key)
+            header_set.discard(key)
+    headers.extend(sorted(h for h in header_set if h not in headers))
+    if not headers:
+        headers = list(preferred_order)
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({h: row.get(h, '') for h in headers})
+
+
+def _normalize_pdl_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure PDL records expose consistent top-level fields."""
+    if not item:
+        return {}
+
+    normalized = dict(item)
+
+    enriched_blob = normalized.get('enriched_data') or normalized.get('enrichment_data') or {}
+    if isinstance(enriched_blob, str):
+        try:
+            enriched_blob = json.loads(enriched_blob)
+        except Exception:
+            enriched_blob = {}
+    normalized['enriched_data'] = enriched_blob if isinstance(enriched_blob, dict) else {}
+
+    original_person = normalized.get('original_person')
+    if not isinstance(original_person, dict):
+        original_person = normalized['enriched_data'].get('original_person', {})
+    normalized['original_person'] = original_person if isinstance(original_person, dict) else {}
+
+    enrichment_result = normalized.get('enrichment_result')
+    if not isinstance(enrichment_result, dict):
+        enrichment_result = normalized['enriched_data'].get('enrichment_result', {})
+    normalized['enrichment_result'] = enrichment_result if isinstance(enrichment_result, dict) else {}
+
+    normalized['first_name'] = _first_non_empty(
+        normalized.get('first_name'),
+        normalized['original_person'].get('first_name')
+    )
+    normalized['last_name'] = _first_non_empty(
+        normalized.get('last_name'),
+        normalized['original_person'].get('last_name')
+    )
+    normalized['city'] = _first_non_empty(
+        normalized.get('city'),
+        normalized['original_person'].get('city')
+    )
+    normalized['state'] = _first_non_empty(
+        normalized.get('state'),
+        normalized['original_person'].get('state')
+    )
+    normalized['patent_number'] = _first_non_empty(
+        normalized.get('patent_number'),
+        normalized['original_person'].get('patent_number')
+    )
+
+    return normalized
+
+
+def _extract_pdl_payload(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the PDL payload dict regardless of nesting differences."""
+    if not item:
+        return {}
+
+    enriched_blob = item.get('enriched_data')
+    if isinstance(enriched_blob, dict):
+        pdl_data = enriched_blob.get('pdl_data')
+        if isinstance(pdl_data, dict) and pdl_data:
+            return pdl_data
+
+    enrichment_result = item.get('enrichment_result')
+    if isinstance(enrichment_result, dict):
+        inner = enrichment_result.get('enriched_data')
+        if isinstance(inner, dict):
+            pdl_data = inner.get('pdl_data')
+            if isinstance(pdl_data, dict) and pdl_data:
+                return pdl_data
+        api_raw = enrichment_result.get('api_raw')
+        if isinstance(api_raw, dict):
+            enrichment = api_raw.get('enrichment')
+            if isinstance(enrichment, dict):
+                data = enrichment.get('data')
+                if isinstance(data, dict):
+                    return data
+
+    pdl_data = item.get('pdl_data')
+    if isinstance(pdl_data, dict):
+        return pdl_data
+
+    return {}
+
+
+def _collect_pdl_emails(pdl_data: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """Collect unique email addresses with their labels."""
+    collected: List[Tuple[str, str]] = []
+
+    def _append_email(address: Any, label: str):
+        email = _sanitize_for_csv(address)
+        if not email:
+            return
+        collected.append((email, label))
+
+    for entry in pdl_data.get('emails', []) or []:
+        if isinstance(entry, str):
+            _append_email(entry, 'other')
+        elif isinstance(entry, dict):
+            _append_email(entry.get('address'), entry.get('type') or 'other')
+
+    _append_email(pdl_data.get('work_email'), 'work')
+
+    for entry in pdl_data.get('personal_emails', []) or []:
+        _append_email(entry, 'personal')
+
+    _append_email(pdl_data.get('recommended_personal_email'), 'personal')
+
+    unique: List[Tuple[str, str]] = []
+    seen = set()
+    for email, label in collected:
+        key = email.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((email, label))
+    return unique
+
+
+def _format_address(street: str = '', locality: str = '', region: str = '', postal: str = '', country: str = '') -> str:
+    parts = []
+    street_clean = _sanitize_for_csv(street)
+    if street_clean:
+        parts.append(street_clean)
+
+    locality_clean = _sanitize_for_csv(locality)
+    region_clean = _sanitize_for_csv(region)
+    locality_parts = [p for p in [locality_clean, region_clean] if p]
+    if locality_parts:
+        parts.append(', '.join(locality_parts))
+
+    postal_clean = _sanitize_for_csv(postal)
+    if postal_clean:
+        parts.append(postal_clean)
+
+    country_clean = _sanitize_for_csv(country)
+    if country_clean and country_clean.lower() not in {'us', 'usa', 'united states'}:
+        parts.append(country_clean)
+
+    return ', '.join(parts)
+
+
+def _collect_pdl_addresses(item: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """Collect personal and work addresses from a normalized PDL record."""
+    personal: List[str] = []
+    work: List[str] = []
+
+    pdl_data = _extract_pdl_payload(item)
+    if not isinstance(pdl_data, dict):
+        pdl_data = {}
+
+    def _add_personal(street='', locality='', region='', postal='', country=''):
+        addr = _format_address(street, locality, region, postal, country)
+        if addr:
+            personal.append(addr)
+
+    def _add_work(street='', locality='', region='', postal='', country=''):
+        addr = _format_address(street, locality, region, postal, country)
+        if addr:
+            work.append(addr)
+
+    # Primary personal location
+    _add_personal(
+        street=pdl_data.get('location_street_address') or pdl_data.get('location_name'),
+        locality=pdl_data.get('location_locality'),
+        region=pdl_data.get('location_region'),
+        postal=pdl_data.get('location_postal_code'),
+        country=pdl_data.get('location_country')
+    )
+
+    # Job/company location (work)
+    _add_work(
+        street=pdl_data.get('job_company_location_street_address') or pdl_data.get('job_company_location_name'),
+        locality=pdl_data.get('job_company_location_locality'),
+        region=pdl_data.get('job_company_location_region'),
+        postal=pdl_data.get('job_company_location_postal_code'),
+        country=pdl_data.get('job_company_location_country')
+    )
+
+    # Additional street addresses list
+    for entry in pdl_data.get('street_addresses', []) or []:
+        if not isinstance(entry, dict):
+            continue
+        target = work if (entry.get('type') or '').lower() in {'work', 'work_address', 'business'} else personal
+        addr = _format_address(
+            street=entry.get('street_address'),
+            locality=entry.get('locality'),
+            region=entry.get('region'),
+            postal=entry.get('postal_code'),
+            country=entry.get('country')
+        )
+        if addr:
+            target.append(addr)
+
+    # Existing record (mailing) as personal fallback
+    existing_record = item.get('enriched_data', {}).get('existing_record', {})
+    if isinstance(existing_record, dict):
+        addr = _format_address(
+            street=existing_record.get('mail_to_add1'),
+            locality='',
+            region='',
+            postal=existing_record.get('mail_to_zip'),
+            country=''
+        )
+        if addr:
+            personal.append(addr)
+
+    return _unique_preserve_order(personal), _unique_preserve_order(work)
+
+
+def _extract_signatures_from_enriched_items(items: List[Dict[str, Any]]) -> Set[str]:
+    signatures: Set[str] = set()
+    if not items:
+        return signatures
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        def _lookup(container: Dict[str, Any], key: str) -> Any:
+            return container.get(key) if isinstance(container, dict) else None
+
+        original = _lookup(item, 'original_person') or _lookup(item, 'original_data')
+        enriched = _lookup(item, 'enriched_data') or _lookup(item, 'enrichment_data')
+        enriched_original = _lookup(enriched, 'original_person') or _lookup(enriched, 'original_data')
+
+        first = item.get('first_name') or _lookup(original, 'first_name') or _lookup(enriched_original, 'first_name')
+        last = item.get('last_name') or _lookup(original, 'last_name') or _lookup(enriched_original, 'last_name')
+        city = item.get('city') or _lookup(original, 'city') or _lookup(enriched_original, 'city')
+        state = item.get('state') or _lookup(original, 'state') or _lookup(enriched_original, 'state')
+        patent = item.get('patent_number') or _lookup(original, 'patent_number') or _lookup(enriched_original, 'patent_number')
+
+        sig = _person_signature_values(first, last, city, state, patent)
+        if sig.strip('|'):
+            signatures.add(sig)
+
+    return signatures
 
 def get_pdl_enriched_data():
     """Get PDL enriched data from database (enrichment_data IS NOT NULL)"""
@@ -328,59 +654,97 @@ def build_zaba_formatted_row(item: dict) -> dict:
     return formatted
 
 def build_contact_row(item: dict, data_type: str) -> dict:
-    """Build contact row from either PDL or ZabaSearch data"""
-    first = item.get('first_name', '')
-    last = item.get('last_name', '')
-    state = item.get('state', '')
-    
-    email = ''
-    address = ''
-    zip_code = ''
-    
+    """Build contact row from either PDL or ZabaSearch data."""
     if data_type == 'pdl':
-        # Extract from PDL data
-        enrichment_result = item.get('enrichment_result', {})
-        enriched_data = enrichment_result.get('enriched_data', {})
-        pdl_data = enriched_data.get('pdl_data', {})
-        
+        normalized = _normalize_pdl_item(item)
+        pdl_data = _extract_pdl_payload(normalized)
+        emails_with_labels = _collect_pdl_emails(pdl_data)
+        return {
+            'first_name': normalized.get('first_name', ''),
+            'last_name': normalized.get('last_name', ''),
+            'city': normalized.get('city', ''),
+            'state': normalized.get('state', ''),
+            'emails': emails_with_labels
+        }
+
+    if data_type == 'zaba':
+        zaba_data = item.get('zaba_data', {}) or {}
+        params = zaba_data.get('search_parameters', {}) or {}
+        emails = []
         try:
-            emails = pdl_data.get('emails', [])
-            if emails:
-                e0 = emails[0]
-                if isinstance(e0, str):
-                    email = e0
-                elif isinstance(e0, dict):
-                    email = e0.get('address', '')
+            for entry in zaba_data.get('data', {}).get('email_addresses', []) or []:
+                emails.append((_sanitize_for_csv(entry), 'personal'))
         except Exception:
             pass
-        
-        address = _first_non_empty(pdl_data.get('job_company_location_street_address'))
-        zip_code = _first_non_empty(pdl_data.get('job_company_location_postal_code'))
-        
-    elif data_type == 'zaba':
-        # Extract from ZabaSearch data
-        zaba_data = item.get('zaba_data', {})
-        
-        try:
-            emails = zaba_data.get('data', {}).get('email_addresses', [])
-            if emails:
-                email = emails[0]
-        except Exception:
-            pass
-        
-        address = zaba_data.get('mail_to_add1', '')
-        zip_code = zaba_data.get('zip', '')
-    
-    contact_row = {
-        'first_name': first,
-        'last_name': last,
-        'email': email,
-        'address': address,
-        'zip': zip_code,
-        'state': state
+        return {
+            'first_name': _first_non_empty(item.get('first_name'), params.get('first_name')),
+            'last_name': _first_non_empty(item.get('last_name'), params.get('last_name')),
+            'city': _first_non_empty(item.get('city'), params.get('city')),
+            'state': _first_non_empty(item.get('state'), params.get('state')),
+            'emails': [(email, label) for email, label in emails if email]
+        }
+
+    logger.error(f"Unknown data type for build_contact_row: {data_type}")
+    return {
+        'first_name': _sanitize_for_csv(item.get('first_name')),
+        'last_name': _sanitize_for_csv(item.get('last_name')),
+        'city': _sanitize_for_csv(item.get('city')),
+        'state': _sanitize_for_csv(item.get('state')),
+        'emails': []
     }
-    
-    return contact_row
+
+
+def build_address_row(item: dict, data_type: str) -> dict:
+    """Build address row separating personal and work addresses."""
+    if data_type == 'pdl':
+        normalized = _normalize_pdl_item(item)
+        personal, work = _collect_pdl_addresses(normalized)
+        return {
+            'first_name': normalized.get('first_name', ''),
+            'last_name': normalized.get('last_name', ''),
+            'city': normalized.get('city', ''),
+            'state': normalized.get('state', ''),
+            'personal_addresses': personal,
+            'work_addresses': work
+        }
+
+    if data_type == 'zaba':
+        zaba_data = item.get('zaba_data', {}) or {}
+        params = zaba_data.get('search_parameters', {}) or {}
+        personal_addresses = []
+
+        current_addr = _sanitize_for_csv((zaba_data.get('data', {}) or {}).get('addresses', {}).get('current'))
+        if current_addr:
+            personal_addresses.append(current_addr)
+
+        try:
+            for addr in (zaba_data.get('data', {}) or {}).get('addresses', {}).get('past', []) or []:
+                clean = _sanitize_for_csv(addr)
+                if clean:
+                    personal_addresses.append(clean)
+        except Exception:
+            pass
+
+        personal_addresses = _unique_preserve_order(personal_addresses)
+
+        return {
+            'first_name': _first_non_empty(item.get('first_name'), params.get('first_name')),
+            'last_name': _first_non_empty(item.get('last_name'), params.get('last_name')),
+            'city': _first_non_empty(item.get('city'), params.get('city')),
+            'state': _first_non_empty(item.get('state'), params.get('state')),
+            'personal_addresses': personal_addresses,
+            'work_addresses': []
+        }
+
+    logger.error(f"Unknown data type for build_address_row: {data_type}")
+    return {
+        'first_name': _sanitize_for_csv(item.get('first_name')),
+        'last_name': _sanitize_for_csv(item.get('last_name')),
+        'city': _sanitize_for_csv(item.get('city')),
+        'state': _sanitize_for_csv(item.get('state')),
+        'personal_addresses': [],
+        'work_addresses': []
+    }
 
 
 def write_simple_zaba_csv(path: str, records: List[dict]) -> None:
@@ -408,6 +772,143 @@ def write_simple_zaba_csv(path: str, records: List[dict]) -> None:
             }
             writer.writerow(row)
     logger.info(f"Wrote {len(records)} ZabaSearch simplified rows to {path}")
+
+
+def generate_full_csv_exports(config: Dict[str, Any], db_manager: DatabaseManager, output_dir: str, files_generated: Dict[str, Dict[str, Any]]) -> None:
+    """Generate the full CSV exports (current/new/new+existing/all) directly from SQL tables."""
+    try:
+        enriched_rows = db_manager.execute_query(
+            "SELECT * FROM enriched_people ORDER BY enriched_at DESC"
+        ) or []
+    except Exception as exc:
+        logger.warning(f"Unable to read enriched_people table for full exports: {exc}")
+        return
+
+    try:
+        existing_people_rows = db_manager.execute_query("SELECT * FROM existing_people") or []
+    except Exception:
+        existing_people_rows = []
+
+    run_started_at = _parse_timestamp(config.get('RUN_STARTED_AT'))
+    enrichment_result = config.get('enrichment_result') or {}
+
+    new_signatures = _extract_signatures_from_enriched_items(enrichment_result.get('newly_enriched_data'))
+    scope_signatures = set()
+    for collection in (
+        config.get('new_people_data') or [],
+        config.get('already_enriched_people') or [],
+    ):
+        for person in collection:
+            sig = _person_signature_from_dict(person)
+            if sig:
+                scope_signatures.add(sig)
+    scope_signatures.update(_extract_signatures_from_enriched_items(enrichment_result.get('matched_existing')))
+
+    enriched_items: List[Tuple[Dict[str, Any], str, datetime]] = []
+    enriched_scope_signatures: Set[str] = set()
+    all_enriched_signatures: Set[str] = set()
+
+    for row in enriched_rows:
+        sig = _person_signature_values(
+            row.get('first_name'),
+            row.get('last_name'),
+            row.get('city'),
+            row.get('state'),
+            row.get('patent_number') or row.get('patent_no')
+        )
+        ts = _parse_timestamp(row.get('enriched_at')) or _parse_timestamp(row.get('created_at')) or _parse_timestamp(row.get('updated_at'))
+        enriched_items.append((row, sig, ts))
+        all_enriched_signatures.add(sig)
+
+    if not new_signatures and run_started_at:
+        for _, sig, ts in enriched_items:
+            if ts and ts >= run_started_at:
+                new_signatures.add(sig)
+
+    existing_items: List[Tuple[Dict[str, Any], str]] = []
+    for row in existing_people_rows:
+        sig = _person_signature_values(
+            row.get('first_name'),
+            row.get('last_name'),
+            row.get('city'),
+            row.get('state'),
+            row.get('patent_no') or row.get('patent_number')
+        )
+        existing_items.append((row, sig))
+
+    if not scope_signatures:
+        scope_signatures = set(all_enriched_signatures)
+
+    preferred_columns = ['record_scope', 'source_table', 'id', 'first_name', 'last_name', 'city', 'state', 'patent_number']
+
+    # NEW rows
+    new_rows_prepared: List[Dict[str, Any]] = []
+    for row, sig, _ in enriched_items:
+        if sig and sig in new_signatures:
+            new_rows_prepared.append(_normalize_sql_row(row, {'source_table': 'enriched_people', 'record_scope': 'new'}))
+
+    new_path = os.path.join(output_dir, 'new_enrichments.csv')
+    _write_rows_to_csv(new_path, new_rows_prepared, preferred_columns)
+    files_generated[new_path] = {
+        'records_written': len(new_rows_prepared),
+        'records_filtered': 0,
+        'data_type': 'full_new'
+    }
+    print(f"  📄 {new_path} ({len(new_rows_prepared):,} records)")
+
+    # NEW & EXISTING scope rows (limited to scope signatures when provided)
+    new_and_existing_rows: List[Dict[str, Any]] = []
+    for row, sig, _ in enriched_items:
+        if not sig:
+            continue
+        if scope_signatures and sig not in scope_signatures:
+            continue
+        record_scope = 'new' if sig in new_signatures else 'existing'
+        prepared = _normalize_sql_row(row, {'source_table': 'enriched_people', 'record_scope': record_scope})
+        new_and_existing_rows.append(prepared)
+        enriched_scope_signatures.add(sig)
+
+    new_existing_path = os.path.join(output_dir, 'new_and_existing_enrichments.csv')
+    _write_rows_to_csv(new_existing_path, new_and_existing_rows, preferred_columns)
+    files_generated[new_existing_path] = {
+        'records_written': len(new_and_existing_rows),
+        'records_filtered': 0,
+        'data_type': 'full_new_and_existing'
+    }
+    print(f"  📄 {new_existing_path} ({len(new_and_existing_rows):,} records)")
+
+    # CURRENT rows = new & existing scope rows + existing_people rows that were filtered out
+    current_rows: List[Dict[str, Any]] = list(new_and_existing_rows)
+    if scope_signatures:
+        for row, sig in existing_items:
+            if not sig or sig not in scope_signatures:
+                continue
+            prepared = _normalize_sql_row(row, {'source_table': 'existing_people', 'record_scope': 'existing_table'})
+            current_rows.append(prepared)
+
+    current_path = os.path.join(output_dir, 'current_enrichments.csv')
+    _write_rows_to_csv(current_path, current_rows, preferred_columns)
+    files_generated[current_path] = {
+        'records_written': len(current_rows),
+        'records_filtered': 0,
+        'data_type': 'full_current'
+    }
+    print(f"  📄 {current_path} ({len(current_rows):,} records)")
+
+    # ALL rows = full enriched_people table
+    all_rows_prepared: List[Dict[str, Any]] = []
+    for row, sig, _ in enriched_items:
+        record_scope = 'new' if sig in new_signatures else 'existing'
+        all_rows_prepared.append(_normalize_sql_row(row, {'source_table': 'enriched_people', 'record_scope': record_scope}))
+
+    all_path = os.path.join(output_dir, 'all_enrichments.csv')
+    _write_rows_to_csv(all_path, all_rows_prepared, preferred_columns)
+    files_generated[all_path] = {
+        'records_written': len(all_rows_prepared),
+        'records_filtered': 0,
+        'data_type': 'full_all'
+    }
+    print(f"  📄 {all_path} ({len(all_rows_prepared):,} records)")
 
 def write_formatted_csv(path: str, records: List[dict], data_type: str) -> int:
     """Write formatted CSV file"""
@@ -451,48 +952,139 @@ def write_formatted_csv(path: str, records: List[dict], data_type: str) -> int:
 
 def write_contact_csv(path: str, records: List[dict], data_type: str) -> int:
     """Write contact CSV file"""
-    contact_rows_all = [build_contact_row(r, data_type) for r in records]
-    
-    # Filter out rows with boolean address/zip issues or missing essential data
-    contact_rows = []
+    contact_structs = [build_contact_row(r, data_type) for r in records]
+
+    filtered_rows = []
     removed = 0
-    
-    for row in contact_rows_all:
-        addr = (row.get('address') or '').strip().lower()
-        zip_code = (row.get('zip') or '').strip().lower()
-        email = (row.get('email') or '').strip()
-        first_name = (row.get('first_name') or '').strip()
-        last_name = (row.get('last_name') or '').strip()
-        
-        # Skip if boolean values in address/zip
-        if addr in {'true', 'false'} or zip_code in {'true', 'false'}:
+    max_emails = 0
+
+    for row in contact_structs:
+        first_name = _sanitize_for_csv(row.get('first_name'))
+        last_name = _sanitize_for_csv(row.get('last_name'))
+        if not first_name and not last_name:
             removed += 1
             continue
-        
-        # Skip if missing essential contact info (name + at least one contact method)
-        if not (first_name or last_name):
+
+        email_entries = []
+        for entry in row.get('emails') or []:
+            if isinstance(entry, (list, tuple)) and entry:
+                candidate = _sanitize_for_csv(entry[0])
+            else:
+                candidate = _sanitize_for_csv(entry)
+            if candidate and '@' in candidate:
+                email_entries.append(candidate)
+
+        email_entries = _unique_preserve_order(email_entries)
+        if not email_entries:
             removed += 1
             continue
-        
-        # Keep if we have at least email OR (address + zip)
-        has_email = bool(email and '@' in email)
-        has_address = bool(addr and zip_code)
-        
-        if not (has_email or has_address):
-            removed += 1
-            continue
-        
-        contact_rows.append(row)
-    
-    # Write CSV
+
+        max_emails = max(max_emails, len(email_entries))
+        filtered_rows.append({
+            'first_name': first_name,
+            'last_name': last_name,
+            'city': _sanitize_for_csv(row.get('city')),
+            'state': _sanitize_for_csv(row.get('state')),
+            'emails': email_entries
+        })
+
+    if max_emails == 0:
+        max_emails = 1
+
+    email_headers = [f'email_{i + 1}' for i in range(max_emails)]
+    headers = ['first_name', 'last_name', 'city', 'state'] + email_headers
+
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=CONTACT_HEADERS)
+        writer = csv.DictWriter(f, fieldnames=headers)
         writer.writeheader()
-        for row in contact_rows:
-            writer.writerow(row)
-    
-    logger.info(f"Wrote {len(contact_rows)} {data_type.upper()} contact records to {path} (filtered {removed})")
+        for row in filtered_rows:
+            output_row = {
+                'first_name': row['first_name'],
+                'last_name': row['last_name'],
+                'city': row['city'],
+                'state': row['state']
+            }
+            for idx, email in enumerate(row['emails'], start=1):
+                output_row[f'email_{idx}'] = email
+            writer.writerow(output_row)
+
+    logger.info(
+        f"Wrote {len(filtered_rows)} {data_type.upper()} contact records to {path} "
+        f"(filtered {removed}, max_emails={max_emails})"
+    )
+    return removed
+
+
+def write_address_csv(path: str, records: List[dict], data_type: str) -> int:
+    """Write address CSV file with personal/work columns."""
+    address_structs = [build_address_row(r, data_type) for r in records]
+
+    filtered_rows = []
+    removed = 0
+    max_personal = 0
+    max_work = 0
+
+    for row in address_structs:
+        first_name = _sanitize_for_csv(row.get('first_name'))
+        last_name = _sanitize_for_csv(row.get('last_name'))
+        if not first_name and not last_name:
+            removed += 1
+            continue
+
+        personal = _unique_preserve_order(row.get('personal_addresses') or [])
+        work = _unique_preserve_order(row.get('work_addresses') or [])
+
+        if not personal and not work:
+            removed += 1
+            continue
+
+        max_personal = max(max_personal, len(personal))
+        max_work = max(max_work, len(work))
+
+        filtered_rows.append({
+            'first_name': first_name,
+            'last_name': last_name,
+            'city': _sanitize_for_csv(row.get('city')),
+            'state': _sanitize_for_csv(row.get('state')),
+            'personal_addresses': personal,
+            'work_addresses': work
+        })
+
+    personal_headers = [f'personal_address_{i + 1}' for i in range(max_personal)]
+    work_headers = [f'work_address_{i + 1}' for i in range(max_work)]
+
+    headers = ['first_name', 'last_name', 'city', 'state']
+    headers.extend(personal_headers)
+    headers.extend(work_headers)
+
+    if len(headers) == 4:  # No address columns derived, add at least one personal column
+        headers.append('personal_address_1')
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        for row in filtered_rows:
+            output_row = {
+                'first_name': row['first_name'],
+                'last_name': row['last_name'],
+                'city': row['city'],
+                'state': row['state']
+            }
+
+            for idx, address in enumerate(row['personal_addresses'], start=1):
+                output_row[f'personal_address_{idx}'] = address
+
+            for idx, address in enumerate(row['work_addresses'], start=1):
+                output_row[f'work_address_{idx}'] = address
+
+            writer.writerow(output_row)
+
+    logger.info(
+        f"Wrote {len(filtered_rows)} {data_type.upper()} address records to {path} "
+        f"(filtered {removed}, max_personal={max_personal}, max_work={max_work})"
+    )
     return removed
 
 def write_combined_json(path: str, records: List[dict]) -> None:
@@ -510,6 +1102,9 @@ def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
         use_zaba = config.get('USE_ZABA', False)
         
         files_generated = {}
+
+        db_config = DatabaseConfig.from_env()
+        db_manager = DatabaseManager(db_config)
         
         if use_zaba:
             logger.info("Generating ZabaSearch CSVs...")
@@ -596,6 +1191,18 @@ def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
                 }
                 print(f"  📄 {contact_current_path} ({len(zaba_items) - removed_contact_current:,} records)")
 
+                contact_current_addresses_path = os.path.join(output_dir, 'contact_current_addresses.csv')
+                removed_contact_current_addresses = write_address_csv(contact_current_addresses_path, zaba_items, 'zaba')
+                files_generated[contact_current_addresses_path] = {
+                    'records_written': len(zaba_items) - removed_contact_current_addresses,
+                    'records_filtered': removed_contact_current_addresses,
+                    'data_type': 'contact_current_addresses'
+                }
+                print(
+                    f"  📄 {contact_current_addresses_path} "
+                    f"({len(zaba_items) - removed_contact_current_addresses:,} records)"
+                )
+
                 enriched_json_path = config.get('OUTPUT_JSON', os.path.join(output_dir, 'enriched_patents.json'))
                 write_combined_json(enriched_json_path, zaba_items)
                 files_generated[enriched_json_path] = {
@@ -613,14 +1220,6 @@ def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
                     'data_type': 'enriched_csv_simple'
                 }
                 print(f"  📄 {enriched_csv_path} ({len(zaba_items):,} records)")
-
-                combined_csv_path = os.path.join(output_dir, 'new_and_existing_enrichments.csv')
-                write_simple_zaba_csv(combined_csv_path, zaba_items)
-                files_generated[combined_csv_path] = {
-                    'records_written': len(zaba_items),
-                    'records_filtered': 0,
-                    'data_type': 'combined_simple'
-                }
 
                 legacy_formatted = os.path.join(output_dir, 'enrichments_formatted_zaba.csv')
                 try:
@@ -667,13 +1266,17 @@ def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
             }
             print(f"  📄 {contact_new_path} ({len(new_items) - removed_contact_new:,} records)")
 
-            new_enriched_csv_path = os.path.join(output_dir, 'new_enrichments.csv')
-            write_simple_zaba_csv(new_enriched_csv_path, new_items)
-            files_generated[new_enriched_csv_path] = {
-                'records_written': len(new_items),
-                'records_filtered': 0,
-                'data_type': 'new_enriched_csv_simple'
+            contact_new_addresses_path = os.path.join(output_dir, 'contact_new_addresses.csv')
+            removed_contact_new_addresses = write_address_csv(contact_new_addresses_path, new_items, 'zaba')
+            files_generated[contact_new_addresses_path] = {
+                'records_written': len(new_items) - removed_contact_new_addresses,
+                'records_filtered': removed_contact_new_addresses,
+                'data_type': 'contact_new_addresses'
             }
+            print(
+                f"  📄 {contact_new_addresses_path} "
+                f"({len(new_items) - removed_contact_new_addresses:,} records)"
+            )
 
             legacy_new_formatted = os.path.join(output_dir, 'new_enrichments_formatted_zaba.csv')
             try:
@@ -688,9 +1291,68 @@ def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
                 logger.debug("Could not create legacy Zaba new formatted CSV alias")
 
         else:
-            # Your existing PDL CSV generation code...
-            pass
-        
+            logger.info("Generating PeopleDataLabs CSVs...")
+            print("📊 Generating PeopleDataLabs CSVs from database...")
+
+            enrichment_result = config.get('enrichment_result') or {}
+            pdl_items = get_pdl_enriched_data()
+            if not pdl_items:
+                # Fallback to in-memory result when database read returns nothing (e.g., rebuild-only)
+                pdl_items = enrichment_result.get('enriched_data') or []
+
+            new_items = enrichment_result.get('newly_enriched_data') or []
+
+            if pdl_items:
+                contact_current_path = os.path.join(output_dir, 'contact_current.csv')
+                removed_contact_current = write_contact_csv(contact_current_path, pdl_items, 'pdl')
+                files_generated[contact_current_path] = {
+                    'records_written': len(pdl_items) - removed_contact_current,
+                    'records_filtered': removed_contact_current,
+                    'data_type': 'contact_current'
+                }
+                print(f"  📄 {contact_current_path} ({len(pdl_items) - removed_contact_current:,} records)")
+
+                contact_current_addresses_path = os.path.join(output_dir, 'contact_current_addresses.csv')
+                removed_contact_current_addresses = write_address_csv(contact_current_addresses_path, pdl_items, 'pdl')
+                files_generated[contact_current_addresses_path] = {
+                    'records_written': len(pdl_items) - removed_contact_current_addresses,
+                    'records_filtered': removed_contact_current_addresses,
+                    'data_type': 'contact_current_addresses'
+                }
+                print(
+                    f"  📄 {contact_current_addresses_path} "
+                    f"({len(pdl_items) - removed_contact_current_addresses:,} records)"
+                )
+            else:
+                print("  ⚠️ No PeopleDataLabs data found in database")
+
+            if new_items:
+                contact_new_path = os.path.join(output_dir, 'contact_new.csv')
+                removed_contact_new = write_contact_csv(contact_new_path, new_items, 'pdl')
+                files_generated[contact_new_path] = {
+                    'records_written': len(new_items) - removed_contact_new,
+                    'records_filtered': removed_contact_new,
+                    'data_type': 'contact_new'
+                }
+                print(f"  📄 {contact_new_path} ({len(new_items) - removed_contact_new:,} records)")
+
+                contact_new_addresses_path = os.path.join(output_dir, 'contact_new_addresses.csv')
+                removed_contact_new_addresses = write_address_csv(contact_new_addresses_path, new_items, 'pdl')
+                files_generated[contact_new_addresses_path] = {
+                    'records_written': len(new_items) - removed_contact_new_addresses,
+                    'records_filtered': removed_contact_new_addresses,
+                    'data_type': 'contact_new_addresses'
+                }
+                print(
+                    f"  📄 {contact_new_addresses_path} "
+                    f"({len(new_items) - removed_contact_new_addresses:,} records)"
+                )
+            else:
+                if pdl_items:
+                    print("  ℹ️ No newly enriched PeopleDataLabs records for this run")
+
+        generate_full_csv_exports(config, db_manager, output_dir, files_generated)
+
         print(f"\n✅ CSV generation completed using {('ZabaSearch' if use_zaba else 'PeopleDataLabs')} data!")
         
         return {

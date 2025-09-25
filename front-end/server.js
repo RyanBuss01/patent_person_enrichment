@@ -1222,8 +1222,10 @@ app.get('/api/step2/zaba/files/:filename', (req, res) => {
         'new_enrichments_formatted.csv',
         'new_enrichments_formatted_zaba.csv',
         'contact_current.csv',
+        'contact_current_addresses.csv',
         'contacts_zaba.csv',
         'contact_new.csv',
+        'contact_new_addresses.csv',
         'new_enrichments.csv',
         'new_and_existing_enrichments.csv',
         'enriched_patents.csv',
@@ -2563,6 +2565,22 @@ app.get('/api/export/new-enrichments', (req, res) => {
     }
 });
 
+// Export new + existing enriched records relevant to this run
+app.get('/api/export/new-and-existing-enrichments', (req, res) => {
+    try {
+        const outPath = path.join(__dirname, '..', 'output', 'new_and_existing_enrichments.csv');
+        if (!fs.existsSync(outPath)) {
+            return res.status(404).json({ error: 'new_and_existing_enrichments.csv not found. Run Step 2 first.' });
+        }
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename="new_and_existing_enrichments.csv"');
+        fs.createReadStream(outPath).pipe(res);
+    } catch (e) {
+        console.error('Export new & existing enrichments failed:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // Helper: build formatted row per requested Access-style schema
 function sanitizeForCsv(val) {
     if (val === null || val === undefined) return '';
@@ -2904,6 +2922,21 @@ app.get('/api/export/contact-current', (req, res) => {
   }
 });
 
+app.get('/api/export/contact-current-addresses', (req, res) => {
+  try {
+    const outPath = path.join(__dirname, '..', 'output', 'contact_current_addresses.csv');
+    if (!fs.existsSync(outPath)) {
+      return res.status(404).json({ error: 'contact_current_addresses.csv not found. Run Step 2 first.' });
+    }
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="contact_current_addresses.csv"');
+    fs.createReadStream(outPath).pipe(res);
+  } catch (e) {
+    console.error('Export contact current addresses failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/export/contact-new', (req, res) => {
   try {
     const outPath = path.join(__dirname, '..', 'output', 'contact_new.csv');
@@ -2915,6 +2948,21 @@ app.get('/api/export/contact-new', (req, res) => {
     fs.createReadStream(outPath).pipe(res);
   } catch (e) {
     console.error('Export contact new failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/export/contact-new-addresses', (req, res) => {
+  try {
+    const outPath = path.join(__dirname, '..', 'output', 'contact_new_addresses.csv');
+    if (!fs.existsSync(outPath)) {
+      return res.status(404).json({ error: 'contact_new_addresses.csv not found. Run Step 2 first.' });
+    }
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="contact_new_addresses.csv"');
+    fs.createReadStream(outPath).pipe(res);
+  } catch (e) {
+    console.error('Export contact new addresses failed:', e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2952,19 +3000,13 @@ app.get('/api/step2/latest-output', (req, res) => {
 // Export all enrichments from SQL via Python helper
 app.get('/api/export/all-enrichments', (req, res) => {
     try {
-        const pythonExec = resolvePython();
-        const scriptPath = path.join(__dirname, '..', 'scripts', 'export_all_enrichments.py');
-        // Set headers before piping
+        const outPath = path.join(__dirname, '..', 'output', 'all_enrichments.csv');
+        if (!fs.existsSync(outPath)) {
+            return res.status(404).json({ error: 'all_enrichments.csv not found. Run Step 2 first.' });
+        }
         res.setHeader('Content-Type', 'text/csv');
         res.setHeader('Content-Disposition', 'attachment; filename="all_enrichments.csv"');
-        const env = { ...process.env, PYTHONPATH: path.join(__dirname, '..') };
-        const proc = spawn(pythonExec, [scriptPath], { env, cwd: path.join(__dirname, '..') });
-        proc.stdout.pipe(res);
-        proc.stderr.on('data', d => console.error(d.toString()));
-        proc.on('error', (err) => {
-            console.error('Export all enrichments error:', err);
-            if (!res.headersSent) res.status(500).end('Failed to start export process');
-        });
+        fs.createReadStream(outPath).pipe(res);
     } catch (e) {
         console.error('Export all enrichments failed:', e);
         res.status(500).json({ error: e.message });

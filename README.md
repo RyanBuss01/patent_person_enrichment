@@ -113,16 +113,15 @@ EMAIL_DELAY_SECONDS=2
 
 ```
 ==============================================================
-🚀 Patent Processing Environment Setup
+🚀 Patent Processing Environment Setup Script
 ==============================================================
 
 ----------------- MacOS --------------------
 
-// Install Node.js (if not installed)
+# Install Node.js (if not installed)
 brew install node
 
-
-// Install Git (usually pre-installed)
+# Install Git (usually pre-installed)
 git --version 
 
 
@@ -135,6 +134,20 @@ Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManage
 choco install nodejs git -y
 choco install python --version=3.9.19 -y  
 choco install python --version=3.13.3 -y
+
+
+URLS:
+# Download node from https://nodejs.org/ (choose LTS version)
+# Download Git from https://git-scm.com/download/win
+
+
+--------------- Git Setup -------------------
+# Clone repository
+git clone https://github.com/RyanBuss01/patent_person_enrichment.git
+cd patent_person_enrichment
+
+--------------- server management -------------------
+
 
 # run setup.js with Node.js
 node setup.js
@@ -151,6 +164,8 @@ pm2 restart patent-pipeline
 pm2 stop patent-pipeline
 pm2 logs patent-pipeline
 
+--------------- Update Instructions -------------------
+
 # run update push:
 git fetch
 git reset --hard origin/main 
@@ -159,11 +174,5 @@ cd front-end
 npm install
 pm2 restart patent-pipeline
 
-
-
-URLS:
-# Download node from https://nodejs.org/ (choose LTS version)
-# Download Git from https://git-scm.com/download/win
-
----------------------------------------------
+----------------------------------------------  
 ```
