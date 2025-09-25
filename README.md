@@ -104,3 +104,66 @@ DAYS_BACK=7
 MAX_RESULTS=1000
 EMAIL_DELAY_SECONDS=2
 ```
+
+
+
+
+
+## Commands
+
+```
+==============================================================
+🚀 Patent Processing Environment Setup
+==============================================================
+
+----------------- MacOS --------------------
+
+// Install Node.js (if not installed)
+brew install node
+
+
+// Install Git (usually pre-installed)
+git --version 
+
+
+----------------- Windows -----------------
+
+# Install Chocolatey first
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+
+# Install packages
+choco install nodejs git -y
+choco install python --version=3.9.19 -y  
+choco install python --version=3.13.3 -y
+
+# run setup.js with Node.js
+node setup.js
+
+# install pm2
+npm install -g pm2
+
+# start Server
+pm2 start front-end/server.js --name "patent-pipeline"
+
+# pm2 commands:
+pm2 status
+pm2 restart patent-pipeline
+pm2 stop patent-pipeline
+pm2 logs patent-pipeline
+
+# run update push:
+git fetch
+git reset --hard origin/main 
+git pull
+cd front-end
+npm install
+pm2 restart patent-pipeline
+
+
+
+URLS:
+# Download node from https://nodejs.org/ (choose LTS version)
+# Download Git from https://git-scm.com/download/win
+
+---------------------------------------------
+```

@@ -452,6 +452,7 @@ def load_existing_enriched_people() -> List[Dict[str, Any]]:
         results = db_manager.execute_query(query)
         
         enriched_data = []
+        parse_errors: List[Tuple[Any, str]] = []
         for row in results:
             try:
                 # Parse JSON data
@@ -481,8 +482,21 @@ def load_existing_enriched_people() -> List[Dict[str, Any]]:
                 enriched_data.append(enriched_record)
                 
             except Exception as e:
-                logger.warning(f"Error parsing enriched row {row.get('id')}: {e}")
+                parse_errors.append((row.get('id'), str(e)))
                 continue
+
+        if parse_errors:
+            total_errors = len(parse_errors)
+            unique_rows = len({row_id for row_id, _ in parse_errors})
+            sample_row, sample_error = parse_errors[0]
+            logger.warning(
+                "Encountered %d parse errors across %d rows while loading enrichment data; "
+                "first example row %s: %s",
+                total_errors,
+                unique_rows,
+                sample_row,
+                sample_error,
+            )
         
         # Fallback: if DB has no enriched rows, try local snapshot to preserve duplicate protection
         if not enriched_data:

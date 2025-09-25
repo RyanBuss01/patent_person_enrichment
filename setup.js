@@ -1,9 +1,70 @@
 #!/usr/bin/env node
 
+/*
+==============================================================
+🚀 Patent Processing Environment Setup Script
+==============================================================
+
+----------------- MacOS --------------------
+
+// Install Node.js (if not installed)
+brew install node
+
+
+// Install Git (usually pre-installed)
+git --version 
+
+
+----------------- Windows -----------------
+
+# Install Chocolatey first
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+
+# Install packages
+choco install nodejs git -y
+choco install python --version=3.9.19 -y  
+choco install python --version=3.13.3 -y
+
+# run setup.js with Node.js
+node setup.js
+
+# install pm2
+npm install -g pm2
+
+# start Server
+pm2 start front-end/server.js --name "patent-pipeline"
+
+# pm2 commands:
+pm2 status
+pm2 restart patent-pipeline
+pm2 stop patent-pipeline
+pm2 logs patent-pipeline
+
+# run update push:
+git fetch
+git reset --hard origin/main 
+git pull
+cd front-end
+npm install
+pm2 restart patent-pipeline
+
+
+
+URLS:
+# Download node from https://nodejs.org/ (choose LTS version)
+# Download Git from https://git-scm.com/download/win
+
+---------------------------------------------
+
+
+
+
+*/
+
 const fs = require('fs');
 const path = require('path');
 const { execSync, spawn } = require('child_process');
-const readline = require('readline');
+const readline = require('readline'); // Removed - no user input needed
 
 // Configuration
 const CONFIG = {
@@ -75,19 +136,7 @@ class EnvironmentSetup {
     }
   }
 
-  async getUserInput(question) {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout
-    });
-
-    return new Promise((resolve) => {
-      rl.question(question, (answer) => {
-        rl.close();
-        resolve(answer.trim());
-      });
-    });
-  }
+  // Removed getUserInput - no user interaction needed
 
   checkPrerequisites() {
     this.log('🔍 Checking prerequisites...', 'blue');
@@ -119,52 +168,209 @@ class EnvironmentSetup {
       return false;
     }
 
+    // Check if Python 3.9 is available, install if not
+    this.checkAndInstallPython39();
+
     return true;
   }
 
-  async setupProjectStructure() {
-    this.log('📁 Setting up project structure...', 'blue');
-
-    const projectName = await this.getUserInput(`Enter project folder name [${CONFIG.projectName}]: `) || CONFIG.projectName;
-    this.projectPath = path.resolve(projectName);
-
-    if (fs.existsSync(this.projectPath)) {
-      const overwrite = await this.getUserInput(`Directory ${projectName} exists. Overwrite? [y/N]: `);
-      if (overwrite.toLowerCase() !== 'y') {
-        this.error('Setup cancelled.');
-        process.exit(1);
-      }
-      fs.rmSync(this.projectPath, { recursive: true, force: true });
+  checkAndInstallPython39() {
+    this.log('🔍 Checking for Python 3.9...', 'blue');
+    
+    try {
+      const python39Version = execSync('python3.9 --version', { encoding: 'utf8' }).trim();
+      this.success(`Python 3.9 found: ${python39Version}`);
+      return true;
+    } catch (error) {
+      this.warn('Python 3.9 not found. Attempting to install...');
+      return this.installPython39();
     }
+  }
 
-    // Create project structure
-    const folders = [
-      '',
-      'classes',
-      'runners', 
-      'front-end',
-      'front-end/public',
-      'front-end/views',
-      'setup',
+  installPython39() {
+    const isWindows = process.platform === 'win32';
+    const isMac = process.platform === 'darwin';
+    const isLinux = process.platform === 'linux';
+
+    try {
+      if (isMac) {
+        // macOS - use Homebrew
+        this.info('Installing Python 3.9 via Homebrew...');
+        let result = this.execCommand('brew --version', { silent: true });
+        
+        if (!result.success) {
+          this.error('Homebrew not found. Please install Homebrew first or install Python 3.9 manually.');
+          this.info('Install Homebrew: /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"');
+          return false;
+        }
+
+        result = this.execCommand('brew install python@3.9');
+        if (result.success) {
+          // Create symlink if needed
+          this.execCommand('brew link python@3.9 --force', { silent: true });
+          this.success('Python 3.9 installed via Homebrew');
+          return true;
+        } else {
+          this.warn('Homebrew installation failed, trying with pyenv...');
+          return this.installPython39WithPyenv();
+        }
+
+      } else if (isWindows) {
+        // Windows - use chocolatey or direct download
+        this.info('Installing Python 3.9 on Windows...');
+        
+        // Try chocolatey first
+        let result = this.execCommand('choco --version', { silent: true });
+        if (result.success) {
+          result = this.execCommand('choco install python --version=3.9.19 -y');
+          if (result.success) {
+            this.success('Python 3.9 installed via Chocolatey');
+            return true;
+          }
+        }
+
+        // If chocolatey fails, provide manual instructions
+        this.warn('Automated installation failed on Windows.');
+        this.info('Please install Python 3.9 manually from: https://www.python.org/downloads/release/python-3919/');
+        this.info('Make sure to add Python to PATH and install for all users.');
+        return false;
+
+      } else if (isLinux) {
+        // Linux - use apt/yum/dnf
+        this.info('Installing Python 3.9 on Linux...');
+        
+        // Try apt (Ubuntu/Debian)
+        let result = this.execCommand('apt --version', { silent: true });
+        if (result.success) {
+          result = this.execCommand('sudo apt update && sudo apt install -y python3.9 python3.9-venv python3.9-pip');
+          if (result.success) {
+            this.success('Python 3.9 installed via apt');
+            return true;
+          }
+        }
+
+        // Try yum (RHEL/CentOS)
+        result = this.execCommand('yum --version', { silent: true });
+        if (result.success) {
+          result = this.execCommand('sudo yum install -y python39 python39-pip');
+          if (result.success) {
+            this.success('Python 3.9 installed via yum');
+            return true;
+          }
+        }
+
+        // Try dnf (Fedora)
+        result = this.execCommand('dnf --version', { silent: true });
+        if (result.success) {
+          result = this.execCommand('sudo dnf install -y python3.9 python3.9-pip');
+          if (result.success) {
+            this.success('Python 3.9 installed via dnf');
+            return true;
+          }
+        }
+
+        this.warn('Automated installation failed on Linux. Trying pyenv...');
+        return this.installPython39WithPyenv();
+
+      } else {
+        this.error(`Unsupported platform: ${process.platform}`);
+        return false;
+      }
+
+    } catch (error) {
+      this.error(`Failed to install Python 3.9: ${error.message}`);
+      return false;
+    }
+  }
+
+  installPython39WithPyenv() {
+    this.info('Trying to install Python 3.9 with pyenv...');
+    
+    try {
+      // Check if pyenv is installed
+      let result = this.execCommand('pyenv --version', { silent: true });
+      
+      if (!result.success) {
+        this.info('Installing pyenv first...');
+        if (process.platform === 'darwin') {
+          result = this.execCommand('brew install pyenv');
+        } else {
+          result = this.execCommand('curl https://pyenv.run | bash');
+        }
+        
+        if (!result.success) {
+          this.error('Failed to install pyenv. Please install Python 3.9 manually.');
+          return false;
+        }
+      }
+
+      // Install Python 3.9 with pyenv
+      result = this.execCommand('pyenv install 3.9.19');
+      if (!result.success) {
+        this.error('Failed to install Python 3.9 with pyenv');
+        return false;
+      }
+
+      // Set global or local version
+      this.execCommand('pyenv global 3.9.19', { silent: true });
+      
+      this.success('Python 3.9 installed via pyenv');
+      this.info('You may need to restart your terminal or run: source ~/.bashrc');
+      return true;
+
+    } catch (error) {
+      this.error(`Pyenv installation failed: ${error.message}`);
+      return false;
+    }
+  }
+
+  setupProjectStructure() {
+    this.log('📁 Setting up environment in current directory...', 'blue');
+
+    // Use current directory instead of creating new folder
+    this.projectPath = process.cwd();
+    
+    // Create missing folders only (don't overwrite existing)
+    const foldersToCheck = [
       'logs',
       'converted_databases',
-      'converted_databases/csv',
+      'converted_databases/csv', 
       'matching_results',
       'output'
     ];
 
-    folders.forEach(folder => {
+    foldersToCheck.forEach(folder => {
       const folderPath = path.join(this.projectPath, folder);
-      fs.mkdirSync(folderPath, { recursive: true });
-      this.log(`Created: ${folder || 'root'}`);
+      if (!fs.existsSync(folderPath)) {
+        fs.mkdirSync(folderPath, { recursive: true });
+        this.log(`Created: ${folder}`);
+      } else {
+        this.log(`Exists: ${folder}`);
+      }
     });
 
-    this.success(`Project structure created at: ${this.projectPath}`);
+    // Check for existing structure
+    const existingFolders = ['classes', 'runners', 'front-end'];
+    existingFolders.forEach(folder => {
+      if (fs.existsSync(path.join(this.projectPath, folder))) {
+        this.log(`Found existing: ${folder}`);
+      }
+    });
+
+    this.success(`Environment setup in: ${this.projectPath}`);
     return true;
   }
 
   createPackageJson() {
-    this.log('📦 Creating package.json in front-end folder...', 'blue');
+    this.log('📦 Checking package.json in front-end folder...', 'blue');
+
+    const frontEndPath = path.join(this.projectPath, 'front-end');
+    const packagePath = path.join(frontEndPath, 'package.json');
+    
+    if (fs.existsSync(packagePath)) {
+      this.success('package.json already exists in front-end/');
+      return;
+    }
 
     const packageJson = {
       "name": "patent-processing-frontend",
@@ -193,74 +399,29 @@ class EnvironmentSetup {
       "license": "MIT"
     };
 
-    const packagePath = path.join(this.projectPath, 'front-end', 'package.json');
     fs.writeFileSync(packagePath, JSON.stringify(packageJson, null, 2));
     this.success('package.json created in front-end/');
   }
 
   createPythonRequirements() {
-    this.log('🐍 Creating Python requirements files...', 'blue');
+    this.log('🐍 Using existing requirements files from setup/...', 'blue');
 
-    // Patent environment requirements (main processing)
-    const patentRequirements = `annotated-types==0.7.0
-beautifulsoup4==4.13.5
-bs4==0.0.2
-certifi==2025.8.3
-charset-normalizer==3.4.3
-DateTime==5.5
-dnspython==2.7.0
-email-validator==2.3.0
-et_xmlfile==2.0.0
-Flask==3.0.2
-fuzzywuzzy==0.18.0
-idna==3.10
-Jinja2==3.1.4
-Levenshtein==0.27.1
-lxml==6.0.1
-matplotlib==3.8.4
-mysql-connector-python==9.4.0
-mysqlclient==2.2.7
-numpy==2.0.2
-openpyxl==3.1.5
-pandas==2.3.2
-pandas-access==0.0.1
-pathlib==1.0.1
-peopledatalabs==6.4.3
-pillow==11.3.0
-pydantic==2.11.7
-pydantic_core==2.33.2
-python-dateutil==2.9.0.post0
-python-dotenv==1.1.1
-python-Levenshtein==0.27.1
-pytz==2025.2
-RapidFuzz==3.13.0
-requests==2.32.5
-seaborn==0.13.2
-six==1.17.0
-typing==3.7.4.3
-typing-inspection==0.4.1
-typing_extensions==4.15.0
-tzdata==2025.2
-urllib3==1.26.18
-Werkzeug==3.1.3
-zope.interface==7.2`;
+    // Use setup folder requirements files directly - no copying needed
+    const setupPatentReq = path.join(this.projectPath, 'setup', 'patent_env_requirements.txt');
+    const setupScrapingReq = path.join(this.projectPath, 'setup', 'zaba_venv_requirements.txt');
 
-    // Scraping environment requirements (lighter)
-    const scrapingRequirements = `beautifulsoup4==4.13.5
-bs4==0.0.2
-certifi==2025.8.3
-charset-normalizer==3.4.3
-idna==3.10
-requests==2.32.5
-soupsieve==2.8
-typing_extensions==4.15.0
-urllib3==2.5.0`;
+    if (!fs.existsSync(setupPatentReq)) {
+      this.error('setup/patent_env_requirements.txt not found');
+      return false;
+    }
 
-    // Write requirements files
-    fs.writeFileSync(path.join(this.projectPath, 'requirements_patent.txt'), patentRequirements);
-    fs.writeFileSync(path.join(this.projectPath, 'requirements_scraping.txt'), scrapingRequirements);
+    if (!fs.existsSync(setupScrapingReq)) {
+      this.error('setup/zaba_venv_requirements.txt not found');
+      return false;
+    }
     
-    this.success('Python requirements files created');
+    this.success('Found requirements files in setup/ folder');
+    return true;
   }
 
   async createPythonEnvironments() {
@@ -270,16 +431,15 @@ urllib3==2.5.0`;
     process.chdir(this.projectPath);
 
     try {
-      // Create patent_env (Python 3.9.6 compatible)
-      this.info(`Creating ${CONFIG.venvs.patent} environment...`);
-      let result = this.execCommand(`${CONFIG.pythonCommand} -m venv ${CONFIG.venvs.patent}`);
-      if (!result.success) return false;
+      // Create patent_env with Python 3.9 (to match your working environment)
+      this.info(`Creating ${CONFIG.venvs.patent} environment with Python 3.9...`);
+      let result = this.execCommand('python3.9 -m venv patent_env');
+      if (!result.success) {
+        this.warn('Python 3.9 not found, trying with default python3');
+        result = this.execCommand(`${CONFIG.pythonCommand} -m venv ${CONFIG.venvs.patent}`);
+        if (!result.success) return false;
+      }
 
-      // Activate and install patent requirements
-      const patentActivate = process.platform === 'win32' 
-        ? `${CONFIG.venvs.patent}\\Scripts\\activate` 
-        : `source ${CONFIG.venvs.patent}/bin/activate`;
-      
       const patentPip = process.platform === 'win32'
         ? `${CONFIG.venvs.patent}\\Scripts\\pip3`
         : `${CONFIG.venvs.patent}/bin/pip3`;
@@ -288,13 +448,14 @@ urllib3==2.5.0`;
       result = this.execCommand(`${patentPip} install --upgrade pip`);
       if (!result.success) return false;
 
-      result = this.execCommand(`${patentPip} install -r requirements_patent.txt`);
+      // Use requirements file from setup folder directly
+      result = this.execCommand(`${patentPip} install -r setup/patent_env_requirements.txt`);
       if (!result.success) {
         this.warn('Some patent packages failed to install. Continuing...');
       }
 
-      // Create zaba_venv (lighter scraping environment)
-      this.info(`Creating ${CONFIG.venvs.scraping} environment...`);
+      // Create zaba_venv with Python 3.13 (to match your working scraping environment)  
+      this.info(`Creating ${CONFIG.venvs.scraping} environment with Python 3.13...`);
       result = this.execCommand(`${CONFIG.pythonCommand} -m venv ${CONFIG.venvs.scraping}`);
       if (!result.success) return false;
 
@@ -306,7 +467,8 @@ urllib3==2.5.0`;
       result = this.execCommand(`${scrapingPip} install --upgrade pip`);
       if (!result.success) return false;
 
-      result = this.execCommand(`${scrapingPip} install -r requirements_scraping.txt`);
+      // Use requirements file from setup folder directly
+      result = this.execCommand(`${scrapingPip} install -r setup/zaba_venv_requirements.txt`);
       if (!result.success) {
         this.warn('Some scraping packages failed to install. Continuing...');
       }
@@ -341,388 +503,53 @@ urllib3==2.5.0`;
     }
   }
 
-  createStartupScripts() {
-    this.log('🚀 Creating startup scripts...', 'blue');
-
-    // Cross-platform startup script for development
-    const startDevScript = `#!/usr/bin/env node
-
-const { spawn, execSync } = require('child_process');
-const path = require('path');
-
-console.log('🚀 Starting Patent Processing Development Environment...');
-
-// Function to activate virtual environment and run command
-function runWithVenv(venvName, command, args = []) {
-  const isWindows = process.platform === 'win32';
-  const venvPath = path.join(__dirname, venvName);
-  const pythonPath = isWindows 
-    ? path.join(venvPath, 'Scripts', 'python') 
-    : path.join(venvPath, 'bin', 'python3');
-
-  console.log(\`📍 Using \${venvName}: \${pythonPath}\`);
-  
-  const proc = spawn(pythonPath, [command, ...args], {
-    stdio: 'inherit',
-    env: { 
-      ...process.env,
-      VIRTUAL_ENV: venvPath,
-      PATH: isWindows 
-        ? \`\${path.join(venvPath, 'Scripts')};\${process.env.PATH}\`
-        : \`\${path.join(venvPath, 'bin')}:\${process.env.PATH}\`
-    }
-  });
-
-  return proc;
-}
-
-// Command line arguments
-const command = process.argv[2];
-
-switch(command) {
-  case 'frontend':
-  case 'web':
-    console.log('🌐 Starting frontend server...');
-    process.chdir('front-end');
-    spawn('npm', ['run', 'dev'], { stdio: 'inherit' });
-    break;
-
-  case 'python':
-  case 'main':
-    console.log('🐍 Starting Python main pipeline...');
-    runWithVenv('patent_env', 'main.py');
-    break;
-
-  case 'scraping':
-    console.log('🕷️  Starting scraping environment...');
-    runWithVenv('zaba_venv', process.argv[3] || 'python3');
-    break;
-
-  case 'both':
-    console.log('🔄 Starting both frontend and Python...');
-    process.chdir('front-end');
-    spawn('npm', ['run', 'dev'], { stdio: 'inherit' });
-    process.chdir('..');
-    setTimeout(() => {
-      runWithVenv('patent_env', 'main.py');
-    }, 2000);
-    break;
-
-  default:
-    console.log(\`
-🎯 Usage: node start.js [command]
-
-Commands:
-  frontend, web    - Start the Express frontend server
-  python, main     - Run the Python main pipeline
-  scraping         - Start scraping environment
-  both             - Start both frontend and Python
-  
-Examples:
-  node start.js frontend
-  node start.js python  
-  node start.js both
-\`);
-}`;
-
-    fs.writeFileSync(path.join(this.projectPath, 'start.js'), startDevScript);
-
-    // Create environment activation helpers
-    const activatePatent = process.platform === 'win32' 
-      ? `@echo off\ncall patent_env\\Scripts\\activate.bat\ncmd /k`
-      : `#!/bin/bash\nsource patent_env/bin/activate\nexec "$SHELL"`;
-
-    const activateScraping = process.platform === 'win32'
-      ? `@echo off\ncall zaba_venv\\Scripts\\activate.bat\ncmd /k`
-      : `#!/bin/bash\nsource zaba_venv/bin/activate\nexec "$SHELL"`;
-
-    const patentFile = process.platform === 'win32' ? 'activate_patent.bat' : 'activate_patent.sh';
-    const scrapingFile = process.platform === 'win32' ? 'activate_scraping.bat' : 'activate_scraping.sh';
-
-    fs.writeFileSync(path.join(this.projectPath, patentFile), activatePatent);
-    fs.writeFileSync(path.join(this.projectPath, scrapingFile), activateScraping);
-
-    // Make shell scripts executable on Unix systems
-    if (process.platform !== 'win32') {
-      try {
-        execSync(`chmod +x "${path.join(this.projectPath, 'start.js')}"`);
-        execSync(`chmod +x "${path.join(this.projectPath, 'activate_patent.sh')}"`);
-        execSync(`chmod +x "${path.join(this.projectPath, 'activate_scraping.sh')}"`);
-      } catch (error) {
-        this.warn('Could not make scripts executable');
-      }
-    }
-
-    this.success('Startup scripts created');
-  }
+  // Removed - no unnecessary startup scripts needed
 
   createEnvironmentFile() {
-    this.log('🔧 Creating environment configuration...', 'blue');
+    this.log('🔧 Checking .env file...', 'blue');
 
-    const envTemplate = `# Database Configuration
-DB_ENGINE=mysql
-DB_HOST=localhost
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=password
-DB_NAME=patent_data
+    const envPath = path.join(this.projectPath, '.env');
+    
+    if (fs.existsSync(envPath)) {
+      this.success('.env file already exists - skipping');
+      return;
+    }
 
-# Cloud Database (Optional)
-CLOUD_DB_HOST=mysql-patent-nationalengravers.mysql.database.azure.com
-CLOUD_DB_USER=rootuser
-CLOUD_DB_PASSWORD=S3cur3Adm1n1124!
-CLOUD_DB_NAME=patent_data
-
-# API Keys
-PEOPLEDATALABS_API_KEY=your_pdl_api_key_here
-
-# File Paths
-CSV_DATABASE_FOLDER=converted_databases/csv
-OUTPUT_FOLDER=output
-LOGS_FOLDER=logs
-
-# Processing Options
-BATCH_SIZE=1000
-ENABLE_LOGGING=true
-LOG_LEVEL=INFO
-
-# Frontend Configuration  
-PORT=3000
-NODE_ENV=development`;
-
-    fs.writeFileSync(path.join(this.projectPath, '.env.example'), envTemplate);
-    fs.writeFileSync(path.join(this.projectPath, '.env'), envTemplate);
-
-    this.success('Environment files created');
+    // Create .env in setup folder as template, don't clutter root
+    this.info('No .env found - you may need to create one with your database credentials');
+    this.success('Environment check complete');
   }
 
-  createReadme() {
-    this.log('📚 Creating documentation...', 'blue');
-
-    const readme = `# Patent Processing Pipeline
-
-Complete patent processing environment with dual Python virtual environments and Express frontend.
-
-## Quick Start
-
-1. **Configure environment:**
-   \`\`\`bash
-   cp .env.example .env
-   # Edit .env with your database credentials and API keys
-   \`\`\`
-
-2. **Install frontend dependencies:**
-   \`\`\`bash
-   cd front-end
-   npm install
-   cd ..
-   \`\`\`
-
-3. **Start the application:**
-   \`\`\`bash
-   # Start frontend server
-   node start.js frontend
-
-   # Start Python pipeline  
-   node start.js python
-
-   # Start both together
-   node start.js both
-   \`\`\`
-
-## Project Structure
-
-\`\`\`
-Patent_Processing_Environment/
-├── start.js                        # Unified startup script
-├── main.py                         # Python main orchestrator
-├── requirements_patent.txt         # Patent processing dependencies
-├── requirements_scraping.txt       # Web scraping dependencies
-├── .env                            # Environment variables
-│
-├── patent_env/                     # Main Python environment
-├── zaba_venv/                      # Scraping Python environment
-│
-├── front-end/                      # Express.js web interface
-│   ├── package.json                # Node.js dependencies (frontend only)
-│   ├── server.js                   # Main web server
-│   ├── public/                     # Static assets
-│   └── views/                      # HTML templates
-│
-├── classes/                        # Python data processing classes
-├── runners/                        # Python pipeline steps
-├── converted_databases/            # Access database conversions
-├── matching_results/               # Processing outputs
-└── logs/                          # Application logs
-\`\`\`
-
-## Python Virtual Environments
-
-### Patent Environment (\`patent_env\`)
-Main processing environment with full dependencies:
-- Patent XML parsing
-- Data enrichment (PeopleDataLabs)
-- Database operations (MySQL)
-- Data analysis (pandas, numpy)
-- Excel processing (openpyxl)
-
-### Scraping Environment (\`zaba_venv\`)
-Lightweight environment for web scraping:
-- Web scraping (BeautifulSoup, requests)
-- Data extraction
-- Minimal dependencies
-
-## Manual Activation
-
-### Activate Patent Environment:
-\`\`\`bash
-# Linux/Mac
-source patent_env/bin/activate
-
-# Windows  
-patent_env\\Scripts\\activate
-\`\`\`
-
-### Activate Scraping Environment:
-\`\`\`bash
-# Linux/Mac
-source zaba_venv/bin/activate
-
-# Windows
-zaba_venv\\Scripts\\activate
-\`\`\`
-
-## Available Scripts
-
-### From project root:
-- \`node start.js frontend\` - Start web interface
-- \`node start.js python\` - Run Python processing
-- \`node start.js both\` - Start both services
-
-### From front-end/ folder:
-- \`npm start\` - Start frontend server
-- \`npm run dev\` - Start frontend with nodemon
-
-### Python environments:
-- \`python3 main.py\` - Run main pipeline (with patent_env activated)
-
-## Database Setup
-
-1. Install MySQL locally or use cloud instance
-2. Update \`.env\` with your database credentials
-3. The application will create necessary tables automatically
-
-## Development
-
-- Frontend runs on http://localhost:3000
-- Node.js environment is isolated in \`front-end/\` folder
-- Python logs are written to \`logs/\` folder
-- Processing outputs go to \`matching_results/\` and \`output/\`
-
-## Environment Variables
-
-Key variables in \`.env\`:
-- \`DB_*\` - Database connection settings
-- \`PEOPLEDATALABS_API_KEY\` - API key for data enrichment
-- \`PORT\` - Frontend server port
-- \`LOG_LEVEL\` - Logging verbosity
-
-## Troubleshooting
-
-1. **Python package issues:** Try upgrading pip in each venv
-2. **MySQL connection errors:** Check database credentials in \`.env\`  
-3. **Permission errors:** Ensure scripts are executable with \`chmod +x\`
-4. **Node modules missing:** \`cd front-end && npm install\`
-5. **Frontend startup issues:** Make sure you're in the right directory
-
-For more help, check the logs in the \`logs/\` folder.`;
-
-    fs.writeFileSync(path.join(this.projectPath, 'README.md'), readme);
-    this.success('README.md created');
-  }
+  // Removed createReadme() - no extra documentation files needed
 
   createInitFiles() {
-    this.log('📝 Creating Python package files...', 'blue');
+    this.log('📝 Checking Python package files...', 'blue');
 
-    // Create __init__.py files to make folders Python packages
+    // Only create __init__.py files if they don't exist - minimal intervention
     const initContent = '# This file makes the directory a Python package\n';
     
-    fs.writeFileSync(path.join(this.projectPath, 'classes', '__init__.py'), initContent);
-    fs.writeFileSync(path.join(this.projectPath, 'runners', '__init__.py'), initContent);
+    const classesInit = path.join(this.projectPath, 'classes', '__init__.py');
+    if (!fs.existsSync(classesInit)) {
+      fs.writeFileSync(classesInit, initContent);
+      this.log('Created classes/__init__.py');
+    }
 
-    // Create basic main.py template
-    const mainPyTemplate = `#!/usr/bin/env python3
-"""
-Patent Processing Pipeline - Main Orchestrator
-Created by environment setup script
-"""
+    const runnersInit = path.join(this.projectPath, 'runners', '__init__.py');
+    if (!fs.existsSync(runnersInit)) {
+      fs.writeFileSync(runnersInit, initContent);
+      this.log('Created runners/__init__.py');
+    }
 
-import os
-import sys
-from pathlib import Path
+    // Check existing files but don't create templates
+    if (fs.existsSync(path.join(this.projectPath, 'main.py'))) {
+      this.success('main.py exists');
+    }
 
-# Add project root to Python path
-project_root = Path(__file__).parent
-sys.path.append(str(project_root))
+    if (fs.existsSync(path.join(this.projectPath, 'front-end', 'server.js'))) {
+      this.success('front-end/server.js exists');
+    }
 
-def main():
-    print("🚀 Patent Processing Pipeline Starting...")
-    print(f"📁 Project root: {project_root}")
-    print(f"🐍 Python version: {sys.version}")
-    
-    # TODO: Import and run your pipeline steps
-    # from runners.integrate_existing_data import run_existing_data_integration
-    # from runners.extract_patents import run_patent_extraction
-    # from runners.enrich import run_enrichment
-    
-    print("✅ Setup complete! Add your pipeline logic here.")
-
-if __name__ == "__main__":
-    main()
-`;
-
-    fs.writeFileSync(path.join(this.projectPath, 'main.py'), mainPyTemplate);
-
-    // Create basic Express server template
-    const serverTemplate = `const express = require('express');
-const path = require('path');
-require('dotenv').config();
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Middleware
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Routes
-app.get('/', (req, res) => {
-    res.send(\`
-    <h1>🚀 Patent Processing Pipeline</h1>
-    <p>Frontend server is running!</p>
-    <p>Environment: \${process.env.NODE_ENV || 'development'}</p>
-    <p>Database: \${process.env.DB_ENGINE || 'mysql'}</p>
-    \`);
-});
-
-app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'healthy', 
-        timestamp: new Date().toISOString(),
-        environment: process.env.NODE_ENV || 'development'
-    });
-});
-
-// Start server
-app.listen(PORT, () => {
-    console.log(\`🌐 Frontend server running on http://localhost:\${PORT}\`);
-    console.log(\`📊 Health check: http://localhost:\${PORT}/health\`);
-});
-`;
-
-    fs.writeFileSync(path.join(this.projectPath, 'front-end', 'server.js'), serverTemplate);
-
-    this.success('Template files created');
+    this.success('Python package files checked');
   }
 
   generateSummary() {
@@ -787,13 +614,15 @@ ${colors.reset}`);
       }
 
       // Step 2: Setup project structure  
-      if (!await this.setupProjectStructure()) {
+      if (!this.setupProjectStructure()) {
         process.exit(1);
       }
 
-      // Step 3: Create configuration files
+      // Step 3: Check requirements and create package.json if needed
+      if (!this.createPythonRequirements()) {
+        process.exit(1);
+      }
       this.createPackageJson();
-      this.createPythonRequirements();
       this.createEnvironmentFile();
 
       // Step 4: Create Python virtual environments
@@ -808,12 +637,10 @@ ${colors.reset}`);
         process.exit(1);
       }
 
-      // Step 6: Create startup scripts and documentation
-      this.createStartupScripts();
+      // Step 6: Create minimal Python package files
       this.createInitFiles();
-      this.createReadme();
 
-      // Step 7: Generate summary
+      // Step 7: Generate summary (removed README creation)
       this.generateSummary();
 
       // Save setup log
