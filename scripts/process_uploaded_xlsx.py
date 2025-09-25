@@ -31,7 +31,7 @@ def clean_patent(num):
     if num is None:
         return ''
     import re
-    s = re.sub(r'[^0-9]', '', str(num).strip().upper())
+    s = re.sub(r'[^A-Z0-9]', '', str(num).strip().upper())
     return s
 
 def main():
@@ -44,29 +44,44 @@ def main():
     cols = { c: norm(c) for c in df.columns }
     df.rename(columns=cols, inplace=True)
 
-    def pick(row, *names):
-        for n in names:
-            if n in row and str(row[n]).strip():
-                return str(row[n]).strip()
+    def first_nonempty(row, *names):
+        for name in names:
+            if name in row:
+                value = row[name]
+                if value and str(value).strip():
+                    return str(value).strip()
         return ''
 
     patents = {}
     for _, r in df.iterrows():
         row = r.to_dict()
-        pn = clean_patent(pick(row, 'patent number', 'patent_number', 'number'))
+        pn = clean_patent(first_nonempty(row,
+                                         'patent number',
+                                         'patent_number',
+                                         'number',
+                                         'patentno',
+                                         'patent_no'))
         if not pn:
             continue
-        issue_date = pick(row, 'issue_date', 'date')
-        inventor_name = pick(row, 'inventor, name', 'inventor name', 'inventor')
-        a1 = pick(row, 'address 1', 'address1')
-        a2 = pick(row, 'address 2', 'address2')
-        a3 = pick(row, 'address 3', 'address3')
-        city = pick(row, 'city')
-        state = pick(row, 'state')
-        zipc = pick(row, 'zip', 'zipcode')
-        country = pick(row, 'country') or 'US'
+        issue_date = first_nonempty(row, 'issue_date', 'date')
+        inventor_name = first_nonempty(row, 'inventor, name', 'inventor name', 'inventor')
+        inventor_first = first_nonempty(row, 'inventor_first', 'first_name')
+        inventor_last = first_nonempty(row, 'inventor_last', 'last_name')
 
-        first, last = parse_name(inventor_name)
+        if inventor_first or inventor_last:
+            first = inventor_first
+            last = inventor_last
+        else:
+            first, last = parse_name(inventor_name)
+
+        a1 = first_nonempty(row, 'address 1', 'address1', 'mail_to_add1')
+        a2 = first_nonempty(row, 'address 2', 'address2', 'mail_to_add2')
+        a3 = first_nonempty(row, 'address 3', 'address3', 'mail_to_add3')
+        city = first_nonempty(row, 'city', 'mail_to_city')
+        state = first_nonempty(row, 'state', 'mail_to_state')
+        zipc = first_nonempty(row, 'zip', 'zipcode', 'mail_to_zip')
+        country = first_nonempty(row, 'country', 'mail_to_country') or 'US'
+
         inv = {
             'first_name': first,
             'last_name': last,
@@ -82,7 +97,7 @@ def main():
         if pn not in patents:
             patents[pn] = {
                 'patent_number': pn,
-                'patent_title': '',
+                'patent_title': first_nonempty(row, 'patent title', 'title'),
                 'patent_date': issue_date,
                 'inventors': [inv],
                 'assignees': []
@@ -109,4 +124,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

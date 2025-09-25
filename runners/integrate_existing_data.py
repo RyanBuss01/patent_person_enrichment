@@ -13,7 +13,7 @@ import json
 import time
 from typing import Dict, Any, List, Tuple, Optional
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
 import uuid
 import re
 from collections import Counter
@@ -28,6 +28,29 @@ class BatchSQLQueryIntegrator:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.existing_patents = set()
+        self.dev_mode = bool(config.get('DEV_MODE'))
+        self.dev_issue_cutoff = None
+        self.dev_issue_cutoff_raw = config.get('DEV_ISSUE_CUTOFF')
+        if self.dev_mode:
+            if self.dev_issue_cutoff_raw:
+                self.dev_issue_cutoff = self._parse_issue_date_value(self.dev_issue_cutoff_raw)
+                if not self.dev_issue_cutoff:
+                    logger.warning(f"Dev mode cutoff '{self.dev_issue_cutoff_raw}' is invalid; disabling dev filter")
+                    self.dev_mode = False
+                else:
+                    logger.info(
+                        "Dev mode enabled. Ignoring SQL people with issue_date after %s",
+                        self.dev_issue_cutoff.isoformat()
+                    )
+                    try:
+                        print(
+                            f"PROGRESS: Dev mode filter - ignoring SQL people newer than {self.dev_issue_cutoff.date().isoformat()}"
+                        )
+                    except Exception:
+                        pass
+            else:
+                logger.warning("Dev mode requested without issue date cutoff; disabling dev filter")
+                self.dev_mode = False
         
         # Database connection setup
         try:
@@ -132,6 +155,95 @@ class BatchSQLQueryIntegrator:
                 return False
 
         return True
+
+    def _parse_issue_date_value(self, value: Any) -> Optional[datetime]:
+        """Parse issue_date values from config or SQL rows into datetime objects"""
+        if value is None or value == '' or str(value).lower() == 'none':
+            return None
+
+        if isinstance(value, datetime):
+            return value
+
+        if isinstance(value, date):
+            return datetime.combine(value, datetime.min.time())
+
+        text = str(value).strip()
+        if not text:
+            return None
+
+        # Try ISO parsing first (handles YYYY-MM-DD, YYYY-MM-DDTHH:MM, etc.)
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            pass
+
+        # Fallback to common formats
+        known_formats = (
+            '%Y-%m-%d %H:%M:%S',
+            '%Y-%m-%d %H:%M',
+            '%m/%d/%Y',
+            '%m/%d/%Y %H:%M',
+            '%Y%m%d'
+        )
+        for fmt in known_formats:
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+
+        return None
+
+    def _apply_dev_issue_date_filter(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Filter SQL rows when dev mode is active to ignore recent issue_date entries"""
+        if not rows or not self.dev_mode or not self.dev_issue_cutoff:
+            return rows
+
+        grouped: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+        for row in rows:
+            key = (
+                row.get('first_name'),
+                row.get('last_name'),
+                row.get('city'),
+                row.get('state'),
+                row.get('address'),
+                row.get('zip')
+            )
+            data = grouped.setdefault(key, {'rows': [], 'issue_dates': []})
+            data['rows'].append(row)
+            issue_dt = self._parse_issue_date_value(row.get('issue_date'))
+            if issue_dt:
+                data['issue_dates'].append(issue_dt)
+
+        filtered_rows: List[Dict[str, Any]] = []
+        removed_rows = 0
+        removed_groups = 0
+
+        for group in grouped.values():
+            if group['issue_dates']:
+                earliest = min(group['issue_dates'])
+                if earliest and earliest <= self.dev_issue_cutoff:
+                    filtered_rows.extend(group['rows'])
+                else:
+                    removed_rows += len(group['rows'])
+                    removed_groups += 1
+            else:
+                filtered_rows.extend(group['rows'])
+
+        if removed_rows:
+            logger.info(
+                "Dev mode filtered out %s SQL row(s) across %s group(s) newer than cutoff %s",
+                removed_rows,
+                removed_groups,
+                self.dev_issue_cutoff.isoformat()
+            )
+            try:
+                print(
+                    f"PROGRESS: Dev mode filter removed {removed_groups} group(s) newer than cutoff"
+                )
+            except Exception:
+                pass
+
+        return filtered_rows
     
     def load_existing_patents_only(self) -> Dict[str, Any]:
         """Load only patents (not people) into memory - patents are smaller dataset"""
@@ -168,7 +280,14 @@ class BatchSQLQueryIntegrator:
         
         if not csv_path.exists():
             return {'success': False, 'error': f'CSV folder not found: {csv_folder}'}
-        
+
+        if self.dev_mode and self.dev_issue_cutoff:
+            logger.warning("Dev mode issue_date filtering is not applied when using CSV fallback; all records will be considered")
+            try:
+                print("PROGRESS: Dev mode filter unavailable for CSV fallback — including all existing records")
+            except Exception:
+                pass
+
         start_time = time.time()
         logger.info(f"Loading existing data from CSV files: {csv_folder}")
         print(f"PROGRESS: Loading CSV files from {csv_folder} (SQL fallback)")
@@ -266,206 +385,190 @@ class BatchSQLQueryIntegrator:
                 return col
         return None
     
-    def find_people_matches_batch_sql(self, people_batch: List[Dict]) -> Dict[str, List[Tuple[Dict, int]]]:
-        """Query SQL database for matches for entire batch of people - OPTIMIZED with single query"""
+   
+
+    def find_people_matches_batch_sql(self, people_batch: List[Dict], batch_index: int, total_batches: int) -> Dict[str, List[Tuple[Dict, int]]]:
+        """Query SQL database for matches for entire batch of people - FIXED to be more selective"""
         if not self.use_sql or not people_batch:
             return {}
         
         batch_matches = {}
         batch_start_time = time.time()
+        batch_label = f"Batch {batch_index}/{total_batches}" if total_batches else f"Batch {batch_index}"
         
-        logger.info(f"Starting OPTIMIZED SQL batch matching for {len(people_batch)} people")
-        print(f"PROGRESS: OPTIMIZED SQL Batch - Processing {len(people_batch)} people in this batch")
+        logger.info(f"{batch_label}: Starting SELECTIVE SQL batch matching for {len(people_batch)} people")
+        print(f"PROGRESS: {batch_label} — SELECTIVE SQL - Processing {len(people_batch)} people")
         
         try:
-            # Build efficient batch query
-            # Group people by last name for more efficient querying
-            people_by_lastname = {}
-            for i, person in enumerate(people_batch):
-                last_name = self._clean_string(person.get('last_name', '')).lower()
-                if last_name:
-                    if last_name not in people_by_lastname:
-                        people_by_lastname[last_name] = []
-                    people_by_lastname[last_name].append((i, person))
-            
-            unique_last_names = list(people_by_lastname.keys())
-            logger.info(f"Grouped {len(people_batch)} people into {len(unique_last_names)} unique last names")
-            print(f"PROGRESS: OPTIMIZED SQL - Single query for {len(unique_last_names)} last names")
-            
-            # OPTIMIZED: Single query for ALL last names in the batch
+            # FIXED: Use selective query instead of broad lastname search
             query_start = time.time()
+
+            dev_cutoff = self.dev_issue_cutoff if self.dev_mode else None
+
+            print(f"DEBUG: Dev mode is {'ON' if self.dev_mode else 'OFF'}, cutoff: {dev_cutoff}")
             
-            # Track specific failed people for debugging
-            debug_people_to_track = ['kranz', 'cecil', 'keith']  # Track these last names specifically
-            debug_tracking = {}
+            # Call the NEW more selective method
+            all_db_people = self.existing_dao.find_people_by_batch_selective(people_batch, dev_cutoff_datetime=dev_cutoff)
+
+
+            # Enhanced debug code for multiple people:
+            debug_people = ['kenneth mott', 'christopher bell', 'david benedetti']
+            for debug_name in debug_people:
+                name_parts = debug_name.split()
+                if len(name_parts) == 2:
+                    debug_first, debug_last = name_parts
+                    debug_results = [p for p in all_db_people if 
+                                p.get('first_name', '').lower().strip() == debug_first and 
+                                p.get('last_name', '').lower().strip() == debug_last]
+                    if debug_results:
+                        logger.info(f"DEBUG: SQL returned {len(debug_results)} {debug_name.title()} records:")
+                        for sp in debug_results:
+                            logger.info(f"  SQL: '{sp.get('first_name')}' '{sp.get('last_name')}' '{sp.get('city')}' '{sp.get('state')}'")
+                    else:
+                        logger.info(f"DEBUG: SQL returned NO {debug_name.title()} records")
             
-            # Step 1: Check which tracked people are in our search list
-            for track_name in debug_people_to_track:
-                if track_name in unique_last_names:
-                    debug_tracking[track_name] = {'in_search_list': True, 'sql_found': 0, 'grouped': 0, 'lookup_result': 0}
-                    logger.info(f"TRACK DEBUG: '{track_name}' is in our search list")
+            # Apply dev mode filtering in Python (as requested) 
+            original_db_count = len(all_db_people)
+            if self.dev_mode and self.dev_issue_cutoff:
+                all_db_people = self._apply_dev_issue_date_filter(all_db_people)
+                filtered_count = original_db_count - len(all_db_people)
+                if filtered_count > 0:
+                    logger.info(f"Dev mode filtered out {filtered_count} records in Python")
+                    print(f"PROGRESS: {batch_label} — Dev mode filtered {filtered_count} records")
+            
+            query_time = time.time() - query_start
+            
+            logger.info(f"{batch_label}: Selective query returned {len(all_db_people)} records in {query_time:.3f}s")
+            print(f"PROGRESS: {batch_label} — SQL Complete - {len(all_db_people)} records in {query_time:.3f}s")
+            
+            # Group DB results by lastname for efficient matching
+            db_people_by_lastname = {}
+            for db_person in all_db_people:
+                db_last_name = self._clean_lastname_for_matching(db_person.get('last_name', '')).lower()
+                if db_last_name not in db_people_by_lastname:
+                    db_people_by_lastname[db_last_name] = []
+                db_people_by_lastname[db_last_name].append(db_person)
+            
+            # Debug: Check if our problem people are in the grouped data
+            for debug_name in debug_people:
+                debug_last = debug_name.split()[1]
+                if debug_last in db_people_by_lastname:
+                    count = len(db_people_by_lastname[debug_last])
+                    logger.info(f"DEBUG: {debug_last.title()} found in grouped data - {count} records available for matching")
                 else:
-                    debug_tracking[track_name] = {'in_search_list': False}
-                    logger.info(f"TRACK DEBUG: '{track_name}' is NOT in our search list")
+                    logger.info(f"DEBUG: {debug_last.title()} NOT found in grouped data")
             
-            try:
-                logger.info(f"SQL QUERY DEBUG: Searching for {len(unique_last_names)} last names...")
-                all_db_people = self.existing_dao.find_people_by_lastnames_batch(unique_last_names)
-                query_time = time.time() - query_start
-                
-                logger.info(f"OPTIMIZED query returned {len(all_db_people)} total DB matches in {query_time:.3f}s")
-                print(f"PROGRESS: OPTIMIZED SQL - {len(all_db_people)} total DB matches in {query_time:.3f}s")
-                
-                # Step 2: Check which tracked people were found in SQL results
-                for track_name in debug_people_to_track:
-                    if debug_tracking[track_name].get('in_search_list'):
-                        sql_matches = [p for p in all_db_people if 
-                                     self._clean_string(p.get('last_name', '')).lower() == track_name]
-                        debug_tracking[track_name]['sql_found'] = len(sql_matches)
-                        logger.info(f"TRACK DEBUG: '{track_name}' SQL results = {len(sql_matches)} people")
-                        for match in sql_matches[:2]:  # Show first 2
-                            logger.info(f"  SQL: '{match.get('first_name')}' '{match.get('last_name')}' '{match.get('city')}' '{match.get('state')}'")
-                
-                # Step 3: Group DB results and check tracked people
-                db_people_by_lastname = {}
-                for db_person in all_db_people:
-                    db_last_name = self._clean_string(db_person.get('last_name', '')).lower()
-                    if db_last_name not in db_people_by_lastname:
-                        db_people_by_lastname[db_last_name] = []
-                    db_people_by_lastname[db_last_name].append(db_person)
-                
-                logger.info(f"Grouped DB results into {len(db_people_by_lastname)} last name groups")
-                print(f"PROGRESS: OPTIMIZED SQL - Grouped DB results for fast matching")
-                
-                # Step 4: Check which tracked people made it into groups
-                for track_name in debug_people_to_track:
-                    if debug_tracking[track_name].get('in_search_list'):
-                        if track_name in db_people_by_lastname:
-                            count = len(db_people_by_lastname[track_name])
-                            debug_tracking[track_name]['grouped'] = count
-                            logger.info(f"TRACK DEBUG: '{track_name}' grouped = {count} people")
-                            for person in db_people_by_lastname[track_name][:2]:
-                                logger.info(f"  Group: '{person.get('first_name')}' '{person.get('last_name')}' '{person.get('city')}' '{person.get('state')}'")
-                        else:
-                            debug_tracking[track_name]['grouped'] = 0
-                            logger.info(f"TRACK DEBUG: '{track_name}' grouped = 0 people (NOT FOUND IN GROUPS)")
-                            # Show actual group keys to debug
-                            actual_keys = sorted(list(db_people_by_lastname.keys()))
-                            similar_keys = [k for k in actual_keys if track_name in k or k in track_name]
-                            logger.info(f"  Similar group keys: {similar_keys}")
-                
-                
-                
-                
-            except Exception as e:
-                logger.error(f"OPTIMIZED SQL query failed: {e}")
-                print(f"PROGRESS: OPTIMIZED SQL FAILED: {e}")
-                all_db_people = []
-                db_people_by_lastname = {}
-            
-            # Now match each person against the relevant DB group
+            # Match each person in batch against relevant DB results
+            total_comparisons = 0
             total_matches_found = 0
             debug_successful_matches = []
             debug_failed_matches = []
-            comparison_count = 0
             
-            for last_name, people_with_lastname in people_by_lastname.items():
-                db_people_for_lastname = db_people_by_lastname.get(last_name, [])
+            for i, person in enumerate(people_batch):
+                person_key = f"batch_{i}"
+                batch_matches[person_key] = []
                 
-                # For each person in our batch with this last name, compare against DB results
-                for batch_index, batch_person in people_with_lastname:
-                    person_key = f"batch_{batch_index}"
-                    batch_matches[person_key] = []
+                # Clean target person data
+                target_first = self._clean_name_for_matching(person.get('first_name', ''))
+                target_last = self._clean_lastname_for_matching(person.get('last_name', '')).lower()
+                target_city = self._clean_string(person.get('city', '')).lower()
+                target_state = self._clean_string(person.get('state', '')).lower()
+                
+                if not target_last:
+                    continue
+                
+                # Get DB people with matching last name
+                relevant_db_people = db_people_by_lastname.get(target_last, [])
+                
+                # Debug specific people in the matching phase
+                debug_person_full = f"{target_first} {target_last}".strip()
+                if debug_person_full in debug_people:
+                    logger.info(f"DEBUG MATCHING: Processing '{target_first}' '{target_last}' '{target_city}' '{target_state}' - Found {len(relevant_db_people)} DB candidates")
+                    for j, db_person in enumerate(relevant_db_people):
+                        logger.info(f"  Candidate {j+1}: '{db_person.get('first_name')}' '{db_person.get('last_name')}' '{db_person.get('city')}' '{db_person.get('state')}'")
+                
+                person_matches = 0
+                best_score_for_person = 0
+                best_match_for_person = None
+                
+                # Score each match
+                for db_person in relevant_db_people:
+                    total_comparisons += 1
                     
-                    # Clean the target person's data for matching
-                    target_first_raw = batch_person.get('first_name', '')
-                    target_first = self._clean_name_for_matching(target_first_raw)  # Remove middle initials
-                    target_city = self._clean_string(batch_person.get('city', '')).lower()
-                    target_state = self._clean_string(batch_person.get('state', '')).lower()
+                    score = self._calculate_simple_match_score(
+                        target_first, target_last, target_city, target_state,
+                        db_person.get('first_name', ''),
+                        db_person.get('last_name', ''),
+                        db_person.get('city', ''),
+                        db_person.get('state', '')
+                    )
                     
-                    person_matches = 0
-                    best_score_for_person = 0
-                    best_match_for_person = None
+                    # Debug scoring for specific people
+                    if debug_person_full in debug_people:
+                        logger.info(f"DEBUG SCORING: '{target_first}' '{target_last}' vs '{db_person.get('first_name')}' '{db_person.get('last_name')}' = Score: {score}")
                     
-                    for db_person in db_people_for_lastname:
-                        comparison_count += 1
-                        score = self._calculate_simple_match_score(
-                            target_first, last_name, target_city, target_state,
-                            db_person.get('first_name', ''),
-                            db_person.get('last_name', ''),
-                            db_person.get('city', ''),
-                            db_person.get('state', '')
-                        )
-                        
-                        if score > best_score_for_person:
-                            best_score_for_person = score
-                            best_match_for_person = db_person
-                        
-                        if score > 0:
-                            batch_matches[person_key].append((db_person, score))
-                            person_matches += 1
+                    if score > best_score_for_person:
+                        best_score_for_person = score
+                        best_match_for_person = db_person
                     
-                    # Debug logging for tracked failed people
-                    if last_name in debug_people_to_track and best_score_for_person < 25:
-                        lookup_count = len(db_people_for_lastname)
-                        debug_tracking[last_name]['lookup_result'] = lookup_count
-                        logger.info(f"TRACK DEBUG: '{last_name}' lookup = {lookup_count} candidates for person '{target_first} {last_name} ({target_city}, {target_state})'")
-                        if lookup_count == 0:
-                            logger.info(f"  LOOKUP FAIL: No candidates found for '{last_name}' even though grouping had {debug_tracking[last_name].get('grouped', 'unknown')}")
-                        else:
-                            logger.info(f"  LOOKUP OK: Found {lookup_count} candidates but best score was only {best_score_for_person}")
-                            # Show the best match attempt
-                            if best_match_for_person:
-                                logger.info(f"  Best DB match was: '{best_match_for_person.get('first_name')}' '{best_match_for_person.get('last_name')}' '{best_match_for_person.get('city')}' '{best_match_for_person.get('state')}'")
-                    
-                    # Debug logging for successful and failed matches
-                    if best_score_for_person >= 25:  # Successful match
-                        if len(debug_successful_matches) < 10:
-                            debug_successful_matches.append({
-                                'target': f"'{target_first}' '{last_name}' '{target_city}' '{target_state}'",
-                                'matched': f"'{best_match_for_person.get('first_name', '')}' '{best_match_for_person.get('last_name', '')}' '{best_match_for_person.get('city', '')}' '{best_match_for_person.get('state', '')}'",
-                                'score': best_score_for_person
-                            })
-                    else:  # Failed match
-                        if len(debug_failed_matches) < 20:
-                            debug_failed_matches.append({
-                                'target': f"'{target_first}' '{last_name}' '{target_city}' '{target_state}'",
-                                'best_db_match': f"'{best_match_for_person.get('first_name', '') if best_match_for_person else 'NONE'}' '{best_match_for_person.get('last_name', '') if best_match_for_person else 'NONE'}' '{best_match_for_person.get('city', '') if best_match_for_person else 'NONE'}' '{best_match_for_person.get('state', '') if best_match_for_person else 'NONE'}'",
-                                'score': best_score_for_person,
-                                'db_candidates': len(db_people_for_lastname)
-                            })
-                    
-                    # Sort matches by score descending and limit to top 10
-                    batch_matches[person_key].sort(key=lambda x: x[1], reverse=True)
-                    batch_matches[person_key] = batch_matches[person_key][:10]
-                    
-                    if person_matches > 0:
-                        total_matches_found += person_matches
+                    if score > 0:
+                        batch_matches[person_key].append((db_person, score))
+                        person_matches += 1
+                        total_matches_found += 1
+                
+                # Debug final results for specific people
+                if debug_person_full in debug_people:
+                    logger.info(f"DEBUG FINAL: '{target_first}' '{target_last}' - Best score: {best_score_for_person}, Total matches: {person_matches}")
+                
+                # Debug logging for successful and failed matches
+                if best_score_for_person >= 25:  # Successful match
+                    if len(debug_successful_matches) < 10:
+                        debug_successful_matches.append({
+                            'target': f"'{target_first}' '{target_last}' '{target_city}' '{target_state}'",
+                            'score': best_score_for_person
+                        })
+                else:  # Failed match
+                    if len(debug_failed_matches) < 20:
+                        debug_failed_matches.append({
+                            'target': f"'{target_first}' '{target_last}' '{target_city}' '{target_state}'",
+                            'score': best_score_for_person,
+                            'candidates': len(relevant_db_people)
+                        })
+                
+                # Sort and limit results
+                batch_matches[person_key].sort(key=lambda x: x[1], reverse=True)
+                batch_matches[person_key] = batch_matches[person_key][:10]
             
             batch_time = time.time() - batch_start_time
             
-            # Clean summary logging - 10 successful matches and 20 failed matches
-            logger.info(f"BATCH SUMMARY - Total comparisons: {comparison_count}, Found {total_matches_found} matches")
+            # Summary logging with sample matches and failures  
+            logger.info(f"BATCH SUMMARY - Total comparisons: {total_comparisons}, Found {total_matches_found} matches")
             
             if debug_successful_matches:
                 logger.info(f"SUCCESSFUL MATCHES ({len(debug_successful_matches)}/10 shown):")
-                for i, match in enumerate(debug_successful_matches):
+                for match in debug_successful_matches:
                     logger.info(f"  ✅ {match['target']} → Score: {match['score']}")
             
             if debug_failed_matches:
                 logger.info(f"FAILED MATCHES ({len(debug_failed_matches)}/20 shown):")
-                for i, match in enumerate(debug_failed_matches):
-                    logger.info(f"  ❌ {match['target']} → Best Score: {match['score']} (from {match['db_candidates']} candidates)")
+                for match in debug_failed_matches:
+                    logger.info(f"  ❌ {match['target']} → Best Score: {match['score']} (from {match['candidates']} candidates)")
             
-            logger.info(f"OPTIMIZED SQL batch matching complete: 1 query, {len(all_db_people)} DB records, {total_matches_found} matches found in {batch_time:.2f}s")
-            print(f"PROGRESS: OPTIMIZED Complete - 1 query, {len(all_db_people)} DB records, {total_matches_found} matches in {batch_time:.2f}s")
-        
+            logger.info(f"{batch_label}: Complete - {total_comparisons} comparisons, {total_matches_found} matches in {batch_time:.2f}s")
+            print(f"PROGRESS: {batch_label} — Complete - {total_matches_found} matches in {batch_time:.2f}s")
+            
         except Exception as e:
-            logger.error(f"Error in OPTIMIZED batch SQL query: {e}")
-            print(f"PROGRESS: OPTIMIZED SQL ERROR: {e}")
+            logger.error(f"Error in selective batch SQL query: {e}")
+            print(f"PROGRESS: {batch_label} — ERROR: {e}")
         
         return batch_matches
-    
+
+    def _clean_string(self, value) -> str:
+        """Helper method to clean string values"""
+        if not value or str(value).lower() in ['nan', 'none', 'null', '']:
+            return ''
+        return str(value).strip()
+
     def find_person_matches_csv(self, target_person: Dict[str, str], existing_people: List[Dict]) -> List[Tuple[Dict, int]]:
         """CSV fallback: in-memory person matching using VBA-style scoring"""
         matches = []
@@ -517,7 +620,7 @@ class BatchSQLQueryIntegrator:
         existing_people_csv = load_result.get('existing_people_data', []) if load_result else []
         
         # Configuration
-        BATCH_SIZE = 200  # Smaller batches for SQL query efficiency
+        BATCH_SIZE = 1000  # Smaller batches for SQL query efficiency
         AUTO_MATCH_THRESHOLD = 25
         REVIEW_THRESHOLD = 10
         
@@ -604,7 +707,7 @@ class BatchSQLQueryIntegrator:
                 batch_matching_start = time.time()
                 
                 if using_sql:
-                    batch_matches = self.find_people_matches_batch_sql(batch_people)
+                    batch_matches = self.find_people_matches_batch_sql(batch_people, batch_num + 1, total_batches)
                     match_statistics['sql_queries_executed'] += len(set(
                         self._clean_string(p.get('last_name', '')).lower() 
                         for p in batch_people if p.get('last_name')
@@ -755,6 +858,28 @@ class BatchSQLQueryIntegrator:
         #     logger.info(f"NAME CLEANING: '{original}' → '{cleaned}'")
         
         return cleaned
+
+    def _clean_lastname_for_matching(self, lastname: str) -> str:
+        """Clean lastname by removing common suffixes for better matching"""
+        if not lastname:
+            return ''
+        
+        cleaned = self._clean_string(lastname).lower().strip()
+        
+        # Remove common suffixes (order matters - longer suffixes first)
+        suffixes_to_remove = [
+            ', jr.', ', jr', ' jr.', ' jr',
+            ', sr.', ', sr', ' sr.', ' sr', 
+            ', ii', ', iii', ', iv', ', v',
+            ' ii', ' iii', ' iv', ' v'
+        ]
+        
+        for suffix in suffixes_to_remove:
+            if cleaned.endswith(suffix):
+                cleaned = cleaned[:-len(suffix)].strip()
+                break
+        
+        return cleaned
     
     def _calculate_simple_match_score(self, 
                                 target_first: str, target_last: str, 
@@ -765,12 +890,12 @@ class BatchSQLQueryIntegrator:
         
         # Clean all fields for comparison
         t_first = self._clean_name_for_matching(target_first)
-        t_last = self._clean_name_for_matching(target_last)
+        t_last = self._clean_lastname_for_matching(target_last)
         t_city = self._clean_string(target_city).lower()
         t_state = self._clean_string(target_state).lower()
         
         e_first = self._clean_name_for_matching(existing_first)
-        e_last = self._clean_name_for_matching(existing_last)
+        e_last = self._clean_lastname_for_matching(existing_last)
         e_city = self._clean_string(existing_city).lower()
         e_state = self._clean_string(existing_state).lower()
         

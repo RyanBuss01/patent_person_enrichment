@@ -191,12 +191,61 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
         
         print("STEP 3: Checking for duplicates...")
         
+        # Get the 19 already-enriched people from config (set by load_people_for_enrichment)
+        already_enriched_from_step1 = config.get('already_enriched_people', [])
+        
+        # Convert already-enriched Step 1 people to enriched records by pulling from SQL
+        matched_existing_for_this_run = []
+        if already_enriched_from_step1:
+            print(f"Processing {len(already_enriched_from_step1)} already-enriched people from Step 1...")
+            db_config = DatabaseConfig.from_env()
+            db_manager = DatabaseManager(db_config)
+            
+            for person in already_enriched_from_step1:
+                first_name = (person.get('first_name') or '').strip()
+                last_name = (person.get('last_name') or '').strip()
+                city = (person.get('city') or '').strip()
+                state = (person.get('state') or '').strip()
+                
+                if not first_name or not last_name:
+                    continue
+                    
+                # Query SQL to get their enriched data
+                query = """
+                SELECT * FROM enriched_people 
+                WHERE LOWER(TRIM(first_name)) = LOWER(%s) 
+                AND LOWER(TRIM(last_name)) = LOWER(%s)
+                AND LOWER(TRIM(IFNULL(city,''))) = LOWER(%s)
+                AND LOWER(TRIM(IFNULL(state,''))) = LOWER(%s)
+                LIMIT 1
+                """
+                
+                rows = db_manager.execute_query(query, (first_name, last_name, city, state))
+                if rows:
+                    # Build enriched record from SQL data
+                    row = rows[0]
+                    try:
+                        ed_raw = row.get('enrichment_data')
+                        ed = json.loads(ed_raw) if ed_raw else {}
+                    except Exception:
+                        ed = {}
+                    
+                    enriched_record = {
+                        'original_name': f"{first_name} {last_name}",
+                        'patent_number': row.get('patent_number', ''),
+                        'patent_title': ed.get('original_person', {}).get('patent_title', ''),
+                        'match_score': ed.get('enrichment_result', {}).get('match_score', 0),
+                        'enriched_data': ed,
+                        'enriched_at': row.get('enriched_at')
+                    }
+                    matched_existing_for_this_run.append(enriched_record)
+        
         # Filter out already enriched people (FAST in-memory check)
         new_people_to_enrich = []
         skipped_count = 0
         skipped_failed_count = 0
         skipped_duplicate_count = 0
-        matched_existing_for_this_run: List[Dict[str, Any]] = []
+        
         # Express mode: skip previously failed enrichments
         express_mode = bool(config.get('EXPRESS_MODE'))
         failed_set = set()
@@ -210,11 +259,13 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
                 skipped_failed_count += 1
                 skipped_count += 1
                 continue
+            
+            # Check if this person is already enriched
             match = find_existing_enriched_match(person, existing_enriched)
             if match is not None:
                 skipped_duplicate_count += 1
                 skipped_count += 1
-                matched_existing_for_this_run.append(match)
+                # Note: We don't add to matched_existing here because these weren't from Step 1
             else:
                 new_people_to_enrich.append(person)
 
@@ -227,16 +278,27 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
             f"{skipped_count} total skipped"
         )
         
+        # Combine all enriched data for return - existing + newly enriched + matched from step 1
+        if existing_enriched and matched_existing_for_this_run:
+            all_enriched_data = existing_enriched + matched_existing_for_this_run
+        elif existing_enriched:
+            all_enriched_data = existing_enriched
+        elif matched_existing_for_this_run:
+            all_enriched_data = matched_existing_for_this_run
+        else:
+            all_enriched_data = []
+        
         if not new_people_to_enrich:
             return {
                 'success': True,
-                'message': 'All people already enriched',
-                'total_people': len(people_to_enrich),
+                'message': 'All people already enriched or failed',
+                'total_people': len(people_to_enrich) + len(already_enriched_from_step1),
                 'enriched_count': 0,
-                'enriched_data': existing_enriched,
-                'matched_existing': matched_existing_for_this_run,
+                'enriched_data': all_enriched_data,
+                'newly_enriched_data': [],
+                'matched_existing': matched_existing_for_this_run,  # The 19 people from Step 1
                 'actual_api_cost': '$0.00',
-                'api_calls_saved': len(people_to_enrich),
+                'api_calls_saved': len(people_to_enrich) + len(already_enriched_from_step1),
                 'already_enriched_count': skipped_duplicate_count,
                 'skipped_failed_count': skipped_failed_count
             }
@@ -254,10 +316,10 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
             with open(progress_path, 'w') as pf:
                 json.dump({
                     'step': 2,
-                    'total': int(len(new_people_to_enrich) + skipped_count),
+                    'total': int(len(new_people_to_enrich) + skipped_count + len(already_enriched_from_step1)),
                     'processed': 0,
                     'newly_enriched': 0,
-                    'already_enriched': int(skipped_count),
+                    'already_enriched': int(skipped_count + len(already_enriched_from_step1)),
                     'stage': 'starting_enrichment',
                     'started_at': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                     'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -268,36 +330,44 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
         # Enrich the new people in a single pass (original faster flow)
         newly_enriched = enrich_people_batch(new_people_to_enrich, config, progress={
             'path': str(progress_path),
-            'total': int(len(new_people_to_enrich) + skipped_count),
-            'skipped': int(skipped_count)
+            'total': int(len(new_people_to_enrich) + skipped_count + len(already_enriched_from_step1)),
+            'skipped': int(skipped_count + len(already_enriched_from_step1))
         })
         
         # Note: Each enrichment is now saved to SQL inside the loop
         print(f"STEP 5: Saved {len(newly_enriched)} enrichments during processing")
         
-        # Combine all enriched data for return - fix the join error here
-        if existing_enriched and newly_enriched:
+        # Combine all enriched data for return - existing + newly enriched + matched from step 1
+        if existing_enriched and newly_enriched and matched_existing_for_this_run:
+            all_enriched_data = existing_enriched + newly_enriched + matched_existing_for_this_run
+        elif existing_enriched and newly_enriched:
             all_enriched_data = existing_enriched + newly_enriched
+        elif existing_enriched and matched_existing_for_this_run:
+            all_enriched_data = existing_enriched + matched_existing_for_this_run
+        elif newly_enriched and matched_existing_for_this_run:
+            all_enriched_data = newly_enriched + matched_existing_for_this_run
         elif existing_enriched:
             all_enriched_data = existing_enriched
         elif newly_enriched:
             all_enriched_data = newly_enriched
+        elif matched_existing_for_this_run:
+            all_enriched_data = matched_existing_for_this_run
         else:
             all_enriched_data = []
         
         result = {
             'success': True,
-            'total_people': len(people_to_enrich),
+            'total_people': len(people_to_enrich) + len(already_enriched_from_step1),
             'enriched_count': len(newly_enriched),
             'enrichment_rate': len(newly_enriched) / len(new_people_to_enrich) * 100 if new_people_to_enrich else 0,
             # Full snapshot from SQL + this run (for reporting)
             'enriched_data': all_enriched_data,
             # Only records created in this run (for local file append semantics)
             'newly_enriched_data': newly_enriched,
-            # Existing matches from this run (came from SQL)
+            # Existing matches from this run (the 19 people from Step 1)
             'matched_existing': matched_existing_for_this_run,
             'actual_api_cost': f"${len(newly_enriched) * 0.03:.2f}",
-            'api_calls_saved': skipped_count,
+            'api_calls_saved': skipped_count + len(already_enriched_from_step1),
             'already_enriched_count': skipped_duplicate_count,
             'skipped_failed_count': skipped_failed_count,
             'failed_count': len(new_people_to_enrich) - len(newly_enriched)
@@ -305,6 +375,8 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
         
         print(f"STEP 6: Function completed successfully!")
         print(f"  Returning {len(all_enriched_data)} total enriched records")
+        print(f"  Newly enriched: {len(newly_enriched)}")
+        print(f"  Matched existing from Step 1: {len(matched_existing_for_this_run)}")
         print(f"  Result keys: {list(result.keys())}")
         
         return result
@@ -319,8 +391,7 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
             'enriched_data': [],
             'actual_api_cost': '$0.00'
         }
-
-
+    
 def load_existing_enriched_people() -> List[Dict[str, Any]]:
     """Load all existing enriched people from database in one query.
     Be tolerant of schema differences (e.g., missing mail_to_add1) by probing columns and building a safe SELECT.

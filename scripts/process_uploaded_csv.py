@@ -10,6 +10,7 @@ import sys
 import os
 import json
 import csv
+from io import StringIO
 from pathlib import Path
 
 def norm_header(h):
@@ -31,10 +32,18 @@ def clean_patent(num):
     if not num:
         return ''
     s = str(num).strip().upper()
-    # remove non-digits
     import re
-    s = re.sub(r'[^0-9]', '', s)
+    # keep alphanumerics so design or plant prefixes (e.g., D, PP) survive
+    s = re.sub(r'[^A-Z0-9]', '', s)
     return s
+
+
+def first_nonempty(row, *keys):
+    for key in keys:
+        val = row.get(key)
+        if val:
+            return val
+    return ''
 
 def main():
     data = sys.stdin.read()
@@ -42,9 +51,8 @@ def main():
         print('No CSV data provided', file=sys.stderr)
         sys.exit(2)
 
-    # Try to sniff dialect safely
-from io import StringIO
-    # Use newline='' to avoid universal newline translation issues
+    # Try to sniff dialect safely. Use newline='' to avoid universal newline
+    # translation issues when DictReader iterates.
     sio = StringIO(data, newline='')
     try:
         sample = sio.read(2048)
@@ -62,21 +70,34 @@ from io import StringIO
         rows_total += 1
         # Normalize keys for safety
         row_l = { norm_header(k): (v or '').strip() for k, v in row.items() }
-        pn = clean_patent(row_l.get('patent number') or row_l.get('patent_number') or row_l.get('number'))
+        pn = clean_patent(first_nonempty(row_l,
+                                         'patent number',
+                                         'patent_number',
+                                         'number',
+                                         'patentno',
+                                         'patent_no'))
         if not pn:
             # skip rows without patent number
             continue
-        issue_date = row_l.get('issue_date') or row_l.get('date') or ''
-        inventor_name = row_l.get('inventor, name') or row_l.get('inventor name') or row_l.get('inventor') or ''
-        a1 = row_l.get('address 1') or row_l.get('address1') or ''
-        a2 = row_l.get('address 2') or row_l.get('address2') or ''
-        a3 = row_l.get('address 3') or row_l.get('address3') or ''
-        city = row_l.get('city') or ''
-        state = row_l.get('state') or ''
-        zipc = row_l.get('zip') or row_l.get('zipcode') or ''
-        country = row_l.get('country') or ''
+        issue_date = first_nonempty(row_l, 'issue_date', 'date')
+        inventor_name = first_nonempty(row_l, 'inventor, name', 'inventor name', 'inventor')
+        inventor_first = first_nonempty(row_l, 'inventor_first', 'first_name')
+        inventor_last = first_nonempty(row_l, 'inventor_last', 'last_name')
 
-        first, last = parse_name(inventor_name)
+        if inventor_first or inventor_last:
+            first = inventor_first
+            last = inventor_last
+        else:
+            first, last = parse_name(inventor_name)
+
+        a1 = first_nonempty(row_l, 'address 1', 'address1', 'mail_to_add1')
+        a2 = first_nonempty(row_l, 'address 2', 'address2', 'mail_to_add2')
+        a3 = first_nonempty(row_l, 'address 3', 'address3', 'mail_to_add3')
+        city = first_nonempty(row_l, 'city', 'mail_to_city')
+        state = first_nonempty(row_l, 'state', 'mail_to_state')
+        zipc = first_nonempty(row_l, 'zip', 'zipcode', 'mail_to_zip')
+        country = first_nonempty(row_l, 'country', 'mail_to_country')
+
         inv = {
             'first_name': first,
             'last_name': last,
@@ -93,7 +114,7 @@ from io import StringIO
         if pn not in patents:
             patents[pn] = {
                 'patent_number': pn,
-                'patent_title': '',
+                'patent_title': first_nonempty(row_l, 'patent title', 'title'),
                 'patent_date': issue_date,
                 'inventors': [inv],
                 'assignees': []

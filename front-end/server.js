@@ -31,6 +31,10 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
+app.get('/dev', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
 // Resolve a Python interpreter, preferring an active venv if provided
 function resolvePython() {
     const isWindows = process.platform === 'win32';
@@ -292,6 +296,30 @@ function getFileStats(filePath) {
     } catch (error) {
         return { exists: false, error: error.message };
     }
+}
+
+function formatZabaProgress(progress) {
+    if (!progress || typeof progress !== 'object') return null;
+
+    if (progress.message && typeof progress.message === 'string' && progress.message.trim().length > 0) {
+        return progress.message.trim();
+    }
+
+    const saved = Number(progress.newly_enriched || progress.saved || 0);
+    const total = Number(progress.total_to_enrich || progress.total || 0);
+    const processed = Number(progress.processed || 0);
+    const failed = Number(progress.failed || 0);
+
+    let base = `${saved}/${total} - people enriched`;
+    if (!Number.isFinite(total) || total <= 0) {
+        base = `${saved}/0 - people enriched`;
+    }
+
+    if (processed > 0 || failed > 0) {
+        return `${base} (processed:${processed}, failed:${failed})`;
+    }
+
+    return base;
 }
 
 // Helper: get SQL counts via a small Python script
@@ -695,6 +723,553 @@ app.get('/api/step0/latest-output', (req, res) => {
 });
 
 // Step 1: Integrate Existing Data (was Step 0)
+app.post('/api/step1/dev', async (req, res) => {
+    const stepId = 'step1';
+    const rawCutoff = req.body && req.body.issueDateCutoff;
+    const cutoff = (typeof rawCutoff === 'string' ? rawCutoff : (rawCutoff !== undefined ? String(rawCutoff) : '')).trim();
+
+    if (!cutoff) {
+        return res.status(400).json({
+            success: false,
+            error: 'issueDateCutoff is required for dev integration.'
+        });
+    }
+
+    if (runningProcesses.has(stepId)) {
+        return res.json({
+            success: false,
+            error: 'Step 1 is already running'
+        });
+    }
+
+    try {
+        console.log(`Starting Step 1 (Dev Mode) with issue date cutoff ${cutoff}`);
+
+        runPythonScriptAsync('front-end/run_step1_wrapper.py', ['--dev-mode', '--issue-date', cutoff], stepId)
+            .then((result) => {
+                console.log('Step 1 (Dev Mode) completed successfully');
+                try {
+                    fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step1_output.txt'), (result && result.output) ? String(result.output) : '');
+                } catch (e) { console.warn('Could not persist last_step1_output.txt:', e.message); }
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: true,
+                    output: result.output,
+                    completedAt: new Date(),
+                    files: getStep1Files(),
+                    potentialMatches: getStep1PotentialMatches(),
+                    devMode: true,
+                    issueDateCutoff: cutoff
+                });
+            })
+            .catch((error) => {
+                console.error('Step 1 (Dev Mode) failed:', error);
+                try {
+                    const msg = [error.error || error.message || 'Step 1 failed', error.stderr || '', error.stdout || ''].filter(Boolean).join('\n\n');
+                    fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step1_output.txt'), msg);
+                } catch (e) { /* ignore */ }
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: false,
+                    error: error.error || error.message,
+                    stderr: error.stderr,
+                    stdout: error.stdout,
+                    completedAt: new Date(),
+                    devMode: true,
+                    issueDateCutoff: cutoff
+                });
+            });
+
+        res.json({
+            success: true,
+            status: 'started',
+            processing: true,
+            message: 'Step 1 (dev mode) started successfully. Use /api/step1/status to check progress.'
+        });
+    } catch (error) {
+        console.error('Step 1 (Dev Mode) startup error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+app.post('/api/step1/dev/enrich-all', (req, res) => {
+    const stepId = 'step1';
+
+    if (runningProcesses.has(stepId)) {
+        return res.json({
+            success: false,
+            error: 'Step 1 is already running'
+        });
+    }
+
+    try {
+        const downloadedPatents = readJsonFile('output/downloaded_patents.json');
+        if (!Array.isArray(downloadedPatents) || downloadedPatents.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'No downloaded patents found. Run Step 0 first.'
+            });
+        }
+
+        const outputDir = path.join(__dirname, '..', 'output');
+        try {
+            fs.mkdirSync(outputDir, { recursive: true });
+        } catch (e) { /* ignore directory errors */ }
+
+        const toArray = (value) => Array.isArray(value) ? value : [];
+        let personCounter = 0;
+        const newPatents = [];
+        const newPeople = [];
+
+        downloadedPatents.forEach((rawPatent, patentIndex) => {
+            if (!rawPatent) {
+                return;
+            }
+
+            const patentNumberRaw = rawPatent.patent_number || rawPatent.patentNumber || rawPatent.patent_id || rawPatent.number;
+            const patentNumber = (patentNumberRaw ? String(patentNumberRaw) : `unknown_${patentIndex}`).trim();
+            const patentTitle = (rawPatent.patent_title || rawPatent.title || rawPatent.patentTitle || '').toString();
+            const patentDate = (rawPatent.patent_date || rawPatent.issue_date || rawPatent.date || '').toString();
+
+            const inventors = toArray(rawPatent.inventors || rawPatent.inventor_list || rawPatent.inventor || []);
+            const assignees = toArray(rawPatent.assignees || rawPatent.assignee_list || rawPatent.assignee || []);
+
+            newPatents.push({
+                patent_number: patentNumber,
+                patent_title: patentTitle,
+                patent_date: patentDate,
+                inventors,
+                assignees
+            });
+
+            const normalizeAndPush = (source, type) => {
+                if (!source) {
+                    return;
+                }
+
+                const first = (source.first_name || source.firstName || source.inventor_name_first || source.name_first || source.given_name || '').toString().trim();
+                let last = (source.last_name || source.lastName || source.inventor_name_last || source.name_last || source.surname || '').toString().trim();
+                const organization = (source.organization || source.org_name || source.assignee_organization || source.company || source.name || '').toString().trim();
+
+                if (!first && !last && organization && type === 'assignee') {
+                    last = organization;
+                }
+
+                if (!first && !last && !organization) {
+                    return;
+                }
+
+                const city = (source.city || source.city_name || source.city_or_town || '').toString().trim();
+                const state = (source.state || source.state_code || source.state_abbr || '').toString().trim();
+                const country = (source.country || source.country_code || '').toString().trim();
+                const address = (source.address || source.mail_to_add1 || source.address1 || source.street || '').toString().trim();
+                const postalCode = (source.zip || source.postal_code || source.mail_to_zip || '').toString().trim();
+
+                const record = {
+                    first_name: first,
+                    last_name: last,
+                    city,
+                    state,
+                    country,
+                    address: address || undefined,
+                    postal_code: postalCode || undefined,
+                    patent_number: patentNumber,
+                    patent_title: patentTitle,
+                    patent_date: patentDate,
+                    person_type: type,
+                    person_id: `${patentNumber || 'unknown'}_${type}_${personCounter}`,
+                    match_status: 'dev_enrich_all',
+                    match_score: 0,
+                    associated_patents: patentNumber ? [patentNumber] : [],
+                    associated_patent_count: patentNumber ? 1 : 0,
+                    dev_enrich_all: true
+                };
+
+                if (organization) {
+                    record.organization = organization;
+                }
+
+                ['email', 'phone', 'raw_name'].forEach((field) => {
+                    if (source[field]) {
+                        record[field] = source[field];
+                    }
+                });
+
+                newPeople.push(record);
+                personCounter += 1;
+            };
+
+            inventors.forEach((inventor) => normalizeAndPush(inventor, 'inventor'));
+            assignees.forEach((assignee) => normalizeAndPush(assignee, 'assignee'));
+        });
+
+        if (newPeople.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'No people were found in the downloaded data.'
+            });
+        }
+
+        writeJsonFile('output/new_people_for_enrichment.json', newPeople);
+        writeJsonFile('output/filtered_new_patents.json', newPatents);
+        writeJsonFile('output/existing_people_found.json', []);
+        writeJsonFile('output/same_name_diff_address.json', []);
+
+        const summaryMessage = `Dev Enrich All complete: queued ${newPeople.length.toLocaleString()} people from ${newPatents.length.toLocaleString()} patents.`;
+
+        const integrationSummary = {
+            success: true,
+            mode: 'dev_enrich_all',
+            message: summaryMessage,
+            original_patents_count: downloadedPatents.length,
+            new_patents_count: newPatents.length,
+            new_people_count: newPeople.length,
+            total_xml_patents: downloadedPatents.length,
+            total_xml_people: newPeople.length,
+            verification_completed: true,
+            dev_enrich_all: true,
+            processed_at: new Date().toISOString(),
+            match_statistics: {
+                auto_matched: 0,
+                needs_review: 0,
+                definitely_new: newPeople.length
+            },
+            warning: 'Integration bypassed in dev mode: all people queued for enrichment.'
+        };
+
+        writeJsonFile('output/integration_results.json', integrationSummary);
+
+        try {
+            fs.writeFileSync(path.join(outputDir, 'last_step1_output.txt'), summaryMessage);
+        } catch (errorWriting) {
+            console.warn('Could not persist last_step1_output.txt:', errorWriting.message);
+        }
+
+        const files = getStep1Files();
+
+        runningProcesses.set(stepId + '_completed', {
+            completed: true,
+            success: true,
+            output: summaryMessage,
+            files,
+            potentialMatches: [],
+            devMode: true,
+            devEnrichAll: true,
+            completedAt: new Date()
+        });
+
+        res.json({
+            success: true,
+            output: summaryMessage,
+            files,
+            potentialMatches: [],
+            mode: 'dev_enrich_all'
+        });
+    } catch (error) {
+        console.error('Step 1 (Dev Enrich All) error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+app.post('/api/step2/dev/zaba-enrich', async (req, res) => {
+    const { testMode = false } = req.body;
+    const stepId = 'step2_zaba';
+    
+    if (runningProcesses.has(stepId)) {
+        return res.json({
+            success: false,
+            error: 'ZabaSearch enrichment is already running'
+        });
+    }
+    
+    try {
+        console.log(`Starting Step 2: ZabaSearch Enrichment${testMode ? ' (TEST MODE)' : ''} (Async)`);
+        
+        // Use the updated wrapper with --zaba flag
+        const args = testMode ? ['--zaba', '--test'] : ['--zaba'];
+        
+        runPythonScriptAsync('front-end/run_step2_wrapper.py', args, stepId)
+            .then((result) => {
+                console.log('Step 2 ZabaSearch enrichment completed successfully');
+                
+                // Read ZabaSearch-specific result files
+                const enrichedData = readJsonFile('output/enriched_patents.json');
+                const enrichmentResults = readJsonFile('output/enrichment_results.json');
+                const resolveRelPath = (...relPaths) => {
+                    for (const rel of relPaths) {
+                        const abs = path.join(__dirname, '..', rel);
+                        if (fs.existsSync(abs)) {
+                            return rel;
+                        }
+                    }
+                    return relPaths[0];
+                };
+
+                const currentFormattedRel = resolveRelPath('output/current_enrichments_formatted.csv', 'output/enrichments_formatted_zaba.csv');
+                const newFormattedRel = resolveRelPath('output/new_enrichments_formatted.csv', 'output/new_enrichments_formatted_zaba.csv');
+                const contactCurrentRel = resolveRelPath('output/contact_current.csv', 'output/contacts_zaba.csv');
+                const contactNewRel = resolveRelPath('output/contact_new.csv');
+                const combinedRel = resolveRelPath('output/new_and_existing_enrichments.csv');
+                const newCsvRel = resolveRelPath('output/new_enrichments.csv');
+
+                const files = {
+                    enrichedData: {
+                        count: enrichedData ? enrichedData.length : 0,
+                        stats: getFileStats('output/enriched_patents.json')
+                    },
+                    enrichedCsv: getFileStats('output/enriched_patents.csv'),
+                    currentFormatted: getFileStats(currentFormattedRel),
+                    newFormatted: getFileStats(newFormattedRel),
+                    contactCurrent: getFileStats(contactCurrentRel),
+                    contactNew: getFileStats(contactNewRel),
+                    combinedCsv: getFileStats(combinedRel),
+                    newEnrichmentsCsv: getFileStats(newCsvRel),
+                    enrichmentResults: getFileStats('output/enrichment_results.json')
+                };
+                
+                // Persist output for retrieval after refresh
+                try {
+                    fs.writeFileSync(
+                        path.join(__dirname, '..', 'output', 'last_step2_zaba_output.txt'), 
+                        (result && result.output) ? String(result.output) : ''
+                    );
+                } catch (e) { 
+                    console.warn('Could not persist last_step2_zaba_output.txt:', e.message); 
+                }
+                
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: true,
+                    method: 'zabasearch',
+                    output: result.output,
+                    files: files,
+                    results: {
+                        ...enrichmentResults,
+                        method: 'zabasearch',
+                        scraping_cost: '$0.00'
+                    },
+                    completedAt: new Date()
+                });
+            })
+            .catch((error) => {
+                console.error('Step 2 ZabaSearch enrichment failed:', error);
+                
+                try {
+                    const msg = [
+                        error.error || error.message || 'ZabaSearch enrichment failed', 
+                        error.stderr || '', 
+                        error.stdout || ''
+                    ].filter(Boolean).join('\n\n');
+                    
+                    fs.writeFileSync(
+                        path.join(__dirname, '..', 'output', 'last_step2_zaba_output.txt'), 
+                        msg
+                    );
+                } catch (e) { /* ignore */ }
+                
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: false,
+                    method: 'zabasearch',
+                    error: error.error || error.message,
+                    stderr: error.stderr,
+                    stdout: error.stdout,
+                    completedAt: new Date()
+                });
+            });
+        
+        res.json({
+            success: true,
+            status: 'started',
+            processing: true,
+            method: 'zabasearch',
+            message: `ZabaSearch enrichment started successfully${testMode ? ' (test mode)' : ''}. Use /api/step2/zaba/status to check progress.`
+        });
+        
+    } catch (error) {
+        console.error('ZabaSearch enrichment startup error:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message,
+            method: 'zabasearch'
+        });
+    }
+});
+
+// Status endpoint for ZabaSearch enrichment
+app.get('/api/step2/zaba/status', (req, res) => {
+    const stepId = 'step2_zaba';
+    
+    const runningInfo = runningProcesses.get(stepId);
+    if (runningInfo) {
+        const progressPath = path.join(__dirname, '..', 'output', 'step2_zaba_progress.json');
+        let progressDetails = null;
+
+        try {
+            if (fs.existsSync(progressPath)) {
+                const progressData = fs.readFileSync(progressPath, 'utf8');
+                progressDetails = JSON.parse(progressData);
+            }
+        } catch (e) {
+            console.warn('Could not read ZabaSearch progress file:', e.message);
+        }
+
+        const elapsedSeconds = runningInfo.startTime ? Math.round((Date.now() - runningInfo.startTime.getTime()) / 1000) : null;
+        let progressText = (runningInfo.progress && typeof runningInfo.progress === 'string') ? runningInfo.progress.trim() : '';
+        if (!progressText) {
+            progressText = formatZabaProgress(progressDetails) || '';
+        }
+
+        const responsePayload = {
+            success: true,
+            status: 'running',
+            running: true,
+            processing: true,
+            method: 'zabasearch',
+            progress: progressText || null,
+            progressDetails,
+            message: progressText ? `ZabaSearch enrichment in progress — ${progressText}` : 'ZabaSearch enrichment is currently running...'
+        };
+
+        if (Number.isFinite(elapsedSeconds) && elapsedSeconds >= 0) {
+            responsePayload.elapsedSeconds = elapsedSeconds;
+        }
+
+        return res.json(responsePayload);
+    }
+    
+    // Check for completed process
+    const completedKey = stepId + '_completed';
+    if (runningProcesses.has(completedKey)) {
+        const completedResult = runningProcesses.get(completedKey);
+        const progressPath = path.join(__dirname, '..', 'output', 'step2_zaba_progress.json');
+        let progressDetails = null;
+
+        try {
+            if (fs.existsSync(progressPath)) {
+                const progressData = fs.readFileSync(progressPath, 'utf8');
+                progressDetails = JSON.parse(progressData);
+            }
+        } catch (e) {
+            console.warn('Could not read ZabaSearch progress file after completion:', e.message);
+        }
+
+        return res.json({
+            success: true,
+            status: 'completed',
+            processing: false,
+            method: 'zabasearch',
+            completed: true,
+            progress: formatZabaProgress(progressDetails),
+            progressDetails,
+            ...completedResult
+        });
+    }
+    
+    // No process found
+    res.json({
+        success: true,
+        status: 'idle',
+        processing: false,
+        method: 'zabasearch',
+        message: 'No ZabaSearch enrichment process running'
+    });
+});
+
+// Output endpoint for ZabaSearch enrichment logs
+app.get('/api/step2/zaba/output', (req, res) => {
+    const outputPath = path.join(__dirname, '..', 'output', 'last_step2_zaba_output.txt');
+    
+    try {
+        if (fs.existsSync(outputPath)) {
+            const output = fs.readFileSync(outputPath, 'utf8');
+            res.json({
+                success: true,
+                output: output,
+                method: 'zabasearch'
+            });
+        } else {
+            res.json({
+                success: true,
+                output: 'No ZabaSearch enrichment output available',
+                method: 'zabasearch'
+            });
+        }
+    } catch (error) {
+        console.error('Error reading ZabaSearch output file:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Could not read ZabaSearch output file',
+            method: 'zabasearch'
+        });
+    }
+});
+
+// Files endpoint to download ZabaSearch-specific CSV files
+app.get('/api/step2/zaba/files/:filename', (req, res) => {
+    const { filename } = req.params;
+    
+    // Whitelist allowed ZabaSearch CSV files
+    const allowedFiles = [
+        'current_enrichments_formatted.csv',
+        'enrichments_formatted_zaba.csv',
+        'new_enrichments_formatted.csv',
+        'new_enrichments_formatted_zaba.csv',
+        'contact_current.csv',
+        'contacts_zaba.csv',
+        'contact_new.csv',
+        'new_enrichments.csv',
+        'new_and_existing_enrichments.csv',
+        'enriched_patents.csv',
+        'enriched_patents.json',
+        'enrichment_results.json'
+    ];
+    
+    if (!allowedFiles.includes(filename)) {
+        return res.status(400).json({
+            success: false,
+            error: 'File not allowed',
+            method: 'zabasearch'
+        });
+    }
+    
+    const filePath = path.join(__dirname, '..', 'output', filename);
+    
+    if (!fs.existsSync(filePath)) {
+        return res.status(404).json({
+            success: false,
+            error: 'File not found',
+            method: 'zabasearch'
+        });
+    }
+    
+    try {
+        res.download(filePath, filename, (err) => {
+            if (err) {
+                console.error('Error downloading ZabaSearch file:', err);
+                res.status(500).json({
+                    success: false,
+                    error: 'Error downloading file',
+                    method: 'zabasearch'
+                });
+            }
+        });
+    } catch (error) {
+        console.error('Error serving ZabaSearch file:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error serving file',
+            method: 'zabasearch'
+        });
+    }
+});
+
 app.post('/api/step1', async (req, res) => {
     const stepId = 'step1';
     
@@ -1295,6 +1870,33 @@ app.post('/api/step2/rebuild-csvs', async (req, res) => {
     res.json({ success: true, status: 'started', processing: true, message: 'Rebuild CSVs started. Use /api/step2/status to check progress.' });
   } catch (e) {
     console.error('Failed to start Step 2 rebuild:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/step2/rebuild-zaba-csvs', async (req, res) => {
+  try {
+    const stepId = `step2-zaba-rebuild-${Date.now()}`;
+    const pythonExec = resolvePython();
+    const args = ['front-end/run_step2_wrapper.py', '--rebuild', '--zaba'];
+    console.log('Starting Step 2: Rebuild ZabaSearch CSVs (no scraping)');
+    runPythonScriptAsync('front-end/run_step2_wrapper.py', args, stepId)
+      .then((result) => {
+        const msg = result && result.output ? String(result.output) : '';
+        fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_zaba_output.txt'), msg);
+      })
+      .catch((err) => {
+        const msg = `Step 2 ZabaSearch Rebuild failed: ${err && err.message ? err.message : String(err)}`;
+        fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_zaba_output.txt'), msg);
+      });
+    res.json({ 
+      success: true, 
+      status: 'started', 
+      processing: true, 
+      message: 'ZabaSearch CSV rebuild started. Use /api/step2/status to check progress.' 
+    });
+  } catch (e) {
+    console.error('Failed to start Step 2 ZabaSearch rebuild:', e);
     res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -2246,6 +2848,21 @@ app.get('/api/export/new-enrichments-formatted', (req, res) => {
     fs.createReadStream(outPath).pipe(res);
   } catch (e) {
     console.error('Export new formatted failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/export/new-and-existing-enrichments-formatted', (req, res) => {
+  try {
+    const outPath = path.join(__dirname, '..', 'output', 'new_and_existing_enrichments.csv');
+    if (!fs.existsSync(outPath)) {
+      return res.status(404).json({ error: 'new_and_existing_enrichments.csv not found. Run Step 2 first.' });
+    }
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="new_and_existing_enrichments.csv"');
+    fs.createReadStream(outPath).pipe(res);
+  } catch (e) {
+    console.error('Export new+existing formatted failed:', e);
     res.status(500).json({ error: e.message });
   }
 });

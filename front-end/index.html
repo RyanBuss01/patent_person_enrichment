@@ -33,6 +33,22 @@
             padding: 30px;
             text-align: center;
         }
+
+        .dev-banner {
+            background: #fff4e6;
+            color: #d35400;
+            padding: 12px 20px;
+            text-align: center;
+            font-weight: 600;
+            border-bottom: 2px solid #e67e22;
+        }
+
+        .dev-banner span {
+            display: block;
+            font-size: 0.9em;
+            font-weight: 500;
+            margin-top: 3px;
+        }
         
         .header h1 {
             font-size: 2.5em;
@@ -170,6 +186,28 @@
             gap: 15px;
             align-items: center;
             flex-wrap: wrap;
+        }
+
+        .dev-mode-panel {
+            margin-top: 15px;
+            padding: 14px 18px;
+            border: 2px dashed #e67e22;
+            border-radius: 10px;
+            background: #fff7ec;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 18px;
+            align-items: flex-start;
+        }
+
+        .dev-mode-panel .field-group {
+            margin: 0;
+            min-width: 220px;
+            max-width: 260px;
+        }
+
+        .dev-mode-panel .field-group label {
+            color: #d35400;
         }
         
         .btn {
@@ -415,6 +453,108 @@
             border-radius: 10px;
             padding: 20px;
             margin-top: 20px;
+        }
+        .bulk-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+        }
+        .bulk-overlay.hidden { display: none; }
+        .bulk-overlay-content {
+            background: #ffffff;
+            max-width: 860px;
+            width: 92%;
+            max-height: 75vh;
+            border-radius: 12px;
+            box-shadow: 0 12px 40px rgba(0,0,0,0.25);
+            display: flex;
+            flex-direction: column;
+            font-size: 0.85em;
+        }
+        .bulk-overlay-header {
+            padding: 14px 20px;
+            border-bottom: 1px solid #e9ecef;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .bulk-overlay-header h3 {
+            margin: 0;
+            font-size: 1.2em;
+            font-weight: 500;
+            color: #2c3e50;
+        }
+        .bulk-overlay-body {
+            padding: 0 20px 20px;
+            overflow-y: auto;
+        }
+        .bulk-overlay-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .bulk-overlay-table th,
+        .bulk-overlay-table td {
+            border-bottom: 1px solid #f1f3f5;
+            padding: 9px 8px;
+            vertical-align: middle;
+            color: #495057;
+        }
+        .bulk-overlay-table th {
+            background: #f8f9fa;
+            text-align: left;
+            font-weight: 500;
+        }
+        .bulk-overlay-table tbody tr:hover {
+            background: #fdf0d5;
+        }
+        .bulk-name {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .bulk-name span {
+            line-height: 1.2;
+        }
+        .bulk-meta {
+            font-size: 0.72em;
+            color: #adb5bd;
+        }
+        .disabled-note {
+            font-size: 0.72em;
+            color: #c0392b;
+        }
+        .bulk-overlay-footer {
+            padding: 14px 20px;
+            border-top: 1px solid #e9ecef;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+        }
+        .bulk-selection-count {
+            font-weight: 500;
+            color: #2c3e50;
+        }
+        .bulk-transition {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #343a40;
+        }
+        .bulk-transition span {
+            line-height: 1.2;
+        }
+        .bulk-transition .arrow {
+            color: #adb5bd;
+            font-size: 1.1em;
+        }
+        .bulk-check {
+            text-align: right;
+            width: 90px;
         }
         .verification-tabs {
             display: flex;
@@ -669,7 +809,12 @@
             </div>
             -->
         </div>
-        
+
+        <div class="dev-banner hidden" id="devBanner">
+            🚧 Dev Mode Active — integration filters existing people by issue date
+            <span>Current cutoff: <span id="devBannerCutoff">not set</span></span>
+        </div>
+
         <div class="content">
             <!-- Status Overview -->
             <div class="status-bar">
@@ -695,9 +840,6 @@
                         <button class="btn btn-primary" onclick="toggleDownloadConfig()" id="step0ConfigBtn">
                             ⚙️ Configure Download
                         </button>
-                        <button class="btn btn-test" onclick="runStep0Quick()" id="step0QuickBtn">
-                            ⚡ Quick Download (7 days)
-                        </button>
                         <button class="btn btn-success" onclick="triggerCsvUpload()" id="step0UploadBtn">
                             ⬆️ Upload CSV/XLSX
                         </button>
@@ -706,6 +848,12 @@
                         </button>
                         <button class="btn btn-secondary" onclick="showSample('step0')" id="step0Sample">
                             📋 View Sample
+                        </button>
+                    </div>
+
+                    <div class="dev-mode-panel dev-only hidden" id="step0DevPanel">
+                        <button class="btn btn-test" onclick="runStep0Quick()" id="step0QuickBtn">
+                            ⚡ Quick Download (7 days)
                         </button>
                     </div>
                     <input type="file" id="step0CsvInput" accept=".csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx" style="display:none" />
@@ -818,6 +966,19 @@
                             🔍 Review Potential Matches (optional)
                         </button>
                     </div>
+
+                    <div class="dev-mode-panel dev-only hidden" id="step1DevPanel">
+                        <button class="btn btn-test" onclick="runStep1DevIntegration()" id="step1DevBtn">
+                            🧪 Dev Integration
+                        </button>
+                        <button class="btn btn-success" onclick="runStep1DevEnrichAll()" id="step1DevEnrichAllBtn">
+                            ✅ Enrich All
+                        </button>
+                        <div class="field-group">
+                            <label for="devIssueDate">Issue Date Cutoff</label>
+                            <input type="datetime-local" id="devIssueDate">
+                        </div>
+                    </div>
                     
                     <!-- Progress display for Step 1 -->
                     <div class="progress-info hidden" id="step1Progress">
@@ -836,8 +997,13 @@
                     <div class="verification-interface hidden" id="verificationInterface">
                         <div class="verification-header">
                             <h4>🔍 Review Potential Matches</h4>
-                            <div class="verification-counter" id="verificationCounter">
-                                Person 1 of 10
+                            <div style="display:flex; align-items:center; gap:12px;">
+                                <div class="verification-counter" id="verificationCounter">
+                                    Person 1 of 10
+                                </div>
+                                <button class="btn btn-update-db hidden" id="bulkUpdateBtn" onclick="openMovedBulkOverlay()">
+                                    ⬆️ Update All
+                                </button>
                             </div>
                         </div>
                         <div class="verification-tabs">
@@ -889,6 +1055,15 @@
                         </button>
                         <button class="btn btn-secondary" onclick="showSample('step2')" id="step2Sample">
                             👥 View Enriched Sample
+                        </button>
+                    </div>
+                    
+                    <div class="dev-mode-panel dev-only hidden" id="step2DevPanel">
+                        <button class="btn btn-test" onclick="runZabaEnrich()" id="step2ZabaEnrichBtn">
+                            zaba enrich
+                        </button>
+                        <button class="btn btn-secondary" onclick="rebuildZabaCsvs()" id="step2RebuildZabaBtn">
+                            🧱 Rebuild Zaba CSVs (no scraping)
                         </button>
                     </div>
                     
@@ -987,6 +1162,7 @@
             <div class="export-actions" style="margin-bottom: 8px;">
                 <button class="btn btn-success" onclick="exportCurrentEnrichmentsFormatted()">Current (Formatted)</button>
                 <button class="btn btn-success" onclick="exportNewEnrichmentsFormatted()">New (Formatted)</button>
+                <button class="btn btn-success" onclick="exportNewAndExistingEnrichmentsFormatted()">New &amp; Existing (Formatted)</button>
                 <button class="btn btn-success" onclick="exportAllEnrichmentsFormatted()">All (Formatted)</button>
             </div>
             <h3>📇 Contact CSV Exports</h3>
@@ -1003,6 +1179,38 @@
         </div>
     </div>
 
+    <div class="bulk-overlay hidden" id="bulkUpdateOverlay">
+        <div class="bulk-overlay-content">
+            <div class="bulk-overlay-header">
+                <h3>📦 Update Existing Records</h3>
+                <button class="btn btn-secondary" onclick="closeMovedBulkOverlay()">❌ Close</button>
+            </div>
+            <div class="bulk-overlay-body">
+                <table class="bulk-overlay-table">
+                    <thead>
+                        <tr>
+                            <th>Name &amp; State</th>
+                            <th>City Change</th>
+                            <th style="text-align:right; width:90px;">Keep</th>
+                        </tr>
+                    </thead>
+                    <tbody id="bulkOverlayTableBody">
+                        <!-- Rows injected dynamically -->
+                    </tbody>
+                </table>
+            </div>
+            <div class="bulk-overlay-footer">
+                <span class="bulk-selection-count" id="bulkSelectionCount">Selected: 0</span>
+                <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                    <span id="bulkOverlayStatus" style="color:#6c757d; font-size:0.9em;"></span>
+                    <button class="btn btn-secondary" onclick="selectAllBulkMoved(true)">Select All</button>
+                    <button class="btn btn-secondary" onclick="selectAllBulkMoved(false)">Clear All</button>
+                    <button class="btn btn-success" id="bulkOverlayApplyBtn" onclick="applyMovedBulkUpdates()">⬆️ Update Selected</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
         // Global state
         let currentStatus = {};
@@ -1014,6 +1222,62 @@
         let pollingIntervals = new Map(); // Track active polling intervals
         let downloadMode = 'smart'; // Default to smart mode
         let step0Runner = 'download'; // 'download' | 'extract'
+        const pathLower = window.location.pathname.toLowerCase();
+        const isDevMode = pathLower === '/dev' || pathLower.startsWith('/dev/');
+        let step1LastBatchLabel = '';
+        let bulkMovedSelections = new Set();
+
+        function formatDateTimeForInput(date) {
+            const pad = (value) => String(value).padStart(2, '0');
+            return [
+                `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+                `${pad(date.getHours())}:${pad(date.getMinutes())}`
+            ].join('T');
+        }
+
+        function updateDevCutoffLabel(rawValue) {
+            const label = document.getElementById('devBannerCutoff');
+            if (!label) return;
+
+            if (!rawValue) {
+                label.textContent = 'not set';
+                return;
+            }
+
+            const parsed = new Date(rawValue);
+            if (Number.isNaN(parsed.getTime())) {
+                label.textContent = rawValue;
+                return;
+            }
+
+            label.textContent = parsed.toLocaleString();
+        }
+
+        function initializeDevModeIfNeeded() {
+            const devElements = document.querySelectorAll('.dev-only');
+            const banner = document.getElementById('devBanner');
+            if (!isDevMode) {
+                devElements.forEach((el) => el.classList.add('hidden'));
+                if (banner) banner.classList.add('hidden');
+                updateDevCutoffLabel('');
+                return;
+            }
+
+            devElements.forEach((el) => el.classList.remove('hidden'));
+
+            if (banner) banner.classList.remove('hidden');
+
+            const cutoffInput = document.getElementById('devIssueDate');
+            if (cutoffInput) {
+                if (!cutoffInput.value) {
+                    cutoffInput.value = formatDateTimeForInput(new Date());
+                }
+                updateDevCutoffLabel(cutoffInput.value);
+                cutoffInput.addEventListener('change', () => updateDevCutoffLabel(cutoffInput.value));
+            } else {
+                updateDevCutoffLabel('');
+            }
+        }
         
         // Initialize page
         document.addEventListener('DOMContentLoaded', function() {
@@ -1026,7 +1290,9 @@
             const sevenDaysAgo = new Date(today.getTime() - (7 * 24 * 60 * 60 * 1000));
             
             document.getElementById('startDate').value = sevenDaysAgo.toISOString().split('T')[0];
-            document.getElementById('endDate').value = today.toISOString().split('T')[0];
+            document.getElementById('endDate').value =  today.toISOString().split('T')[0];
+
+            initializeDevModeIfNeeded();
         });
         
         // Update status from server
@@ -1246,6 +1512,7 @@
             const step = document.getElementById(stepId);
             const statusEl = document.getElementById(stepId + 'Status');
             const btn = document.getElementById(stepId + 'Btn');
+            const devBtn = document.getElementById(stepId + 'DevBtn');
             const progressDiv = document.getElementById(stepId + 'Progress');
             
             step.classList.add('running');
@@ -1253,6 +1520,10 @@
             statusEl.innerHTML = '<div class="loading"></div> Starting...';
             statusEl.className = 'step-status status-running';
             if (btn) btn.disabled = true;
+            if (stepId === 'step1') {
+                step1LastBatchLabel = '';
+            }
+            if (devBtn) devBtn.disabled = true;
             
             // Show progress bar
             if (progressDiv) {
@@ -1260,6 +1531,11 @@
                 const progressBar = document.getElementById(stepId + 'ProgressBar');
                 if (progressBar) {
                     progressBar.style.width = '10%';
+                }
+                const liveProgress = document.getElementById(stepId + 'LiveProgress');
+                if (liveProgress) {
+                    liveProgress.textContent = '';
+                    liveProgress.classList.add('hidden');
                 }
             }
         }
@@ -1269,14 +1545,21 @@
             const step = document.getElementById(stepId);
             const statusEl = document.getElementById(stepId + 'Status');
             const btn = document.getElementById(stepId + 'Btn');
+            const devBtn = document.getElementById(stepId + 'DevBtn');
             const progressDiv = document.getElementById(stepId + 'Progress');
             
             step.classList.remove('running');
             if (btn) btn.disabled = false;
+            if (devBtn) devBtn.disabled = false;
             
             // Hide progress bar
             if (progressDiv) {
                 progressDiv.classList.add('hidden');
+                const liveProgress = document.getElementById(stepId + 'LiveProgress');
+                if (liveProgress) {
+                    liveProgress.textContent = '';
+                    liveProgress.classList.add('hidden');
+                }
             }
             
             // Stop polling for this step
@@ -1294,41 +1577,62 @@
                 statusEl.className = 'step-status status-ready';
             }
         }
-        
+        function coerceProgressText(progress) {
+            if (typeof progress === 'string') {
+                return progress;
+            }
+            if (progress && typeof progress === 'object') {
+                if (typeof progress.message === 'string' && progress.message.trim()) {
+                    return progress.message.trim();
+                }
+                if (typeof progress.text === 'string' && progress.text.trim()) {
+                    return progress.text.trim();
+                }
+            }
+            return '';
+        }
+
         // Start polling for step completion
-        function startPolling(stepId) {
-            if (pollingIntervals.has(stepId)) {
-                clearInterval(pollingIntervals.get(stepId));
+        function startPolling(stepId, options = {}) {
+            const domStepId = options.domStepId || stepId;
+            const statusEndpoint = options.statusEndpoint || `/api/${stepId}/status`;
+            const pollingKey = options.pollingKey || domStepId;
+            const progressFormatter = typeof options.progressFormatter === 'function' ? options.progressFormatter : null;
+            const liveProgressFormatter = typeof options.liveProgressFormatter === 'function' ? options.liveProgressFormatter : null;
+            const maxPolls = Number.isFinite(options.maxPolls) ? options.maxPolls : 360;
+            const intervalMs = Number.isFinite(options.intervalMs) ? options.intervalMs : 5000;
+
+            if (pollingIntervals.has(pollingKey)) {
+                clearInterval(pollingIntervals.get(pollingKey));
             }
             
             const startTime = Date.now();
             let pollCount = 0;
-            const maxPolls = 360; // Poll for up to 30 minutes (5 second intervals)
             
             const pollInterval = setInterval(async () => {
                 pollCount++;
                 const elapsed = Math.round((Date.now() - startTime) / 1000);
                 
                 try {
-                    const response = await fetch(`/api/${stepId}/status`);
+                    const response = await fetch(statusEndpoint);
                     const status = await response.json();
                     
                     // Update elapsed time
-                    const elapsedEl = document.getElementById(stepId + 'ElapsedTime');
+                    const elapsedEl = document.getElementById(domStepId + 'ElapsedTime');
                     if (elapsedEl) {
                         elapsedEl.textContent = `Elapsed: ${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
                     }
                     
                     if (status.completed) {
                         clearInterval(pollInterval);
-                        pollingIntervals.delete(stepId);
+                        pollingIntervals.delete(pollingKey);
                         
                         if (status.success) {
-                            setStepCompleted(stepId, true);
-                            showOutput(stepId, status.output);
-                            showFileInfo(stepId, status.files);
+                            setStepCompleted(domStepId, true);
+                            showOutput(domStepId, status.output);
+                            showFileInfo(domStepId, status.files);
                             
-                            if (stepId === 'step1') {
+                            if (domStepId === 'step1') {
                                 const hasPotential = Array.isArray(status.potentialMatches) && status.potentialMatches.length > 0;
                                 const hasMoved = Array.isArray(status.movedCandidates) && status.movedCandidates.length > 0;
                                 if (hasPotential || hasMoved) {
@@ -1339,25 +1643,92 @@
                             
                             updateStatus();
                         } else {
-                            setStepCompleted(stepId, false);
-                            showOutput(stepId, `Error: ${status.error}\n\n${status.stderr || ''}`);
+                            setStepCompleted(domStepId, false);
+                            showOutput(domStepId, `Error: ${status.error}\n\n${status.stderr || ''}`);
                         }
-                    } else if (status.running && status.progress) {
+                    } else if (status.running) {
                         // Update progress display
-                        const statusEl = document.getElementById(stepId + 'Status');
-                        const progressMsg = document.getElementById(stepId + 'ProgressMessage');
-                        const progressBar = document.getElementById(stepId + 'ProgressBar');
-                        
-                        statusEl.innerHTML = `<div class="loading"></div> ${status.progress}`;
+                        const statusEl = document.getElementById(domStepId + 'Status');
+                        const progressMsg = document.getElementById(domStepId + 'ProgressMessage');
+                        const progressBar = document.getElementById(domStepId + 'ProgressBar');
+                        const liveProgressEl = document.getElementById(domStepId + 'LiveProgress');
+
+                        let progressText = '';
+                        if (progressFormatter) {
+                            progressText = progressFormatter(status, { elapsed, domStepId }) || '';
+                        }
+                        if (!progressText) {
+                            progressText = coerceProgressText(status.progress);
+                        }
+                        if (!progressText) {
+                            progressText = coerceProgressText(status.progressDetails);
+                        }
+                        if (!progressText && typeof status.message === 'string') {
+                            progressText = status.message;
+                        }
+
+                        if (domStepId === 'step1') {
+                            const batchMatch = progressText.match(/Batch\s+(\d+)\s*\/\s*(\d+)(?:\s*[-–—]\s*(.*))?/i);
+                            if (batchMatch) {
+                                const current = batchMatch[1];
+                                const total = batchMatch[2];
+                                step1LastBatchLabel = `Batch ${current}/${total}`;
+                                const remainder = (batchMatch[3] || '').trim();
+                                progressText = remainder ? `${step1LastBatchLabel} — ${remainder}` : step1LastBatchLabel;
+                            } else if (step1LastBatchLabel) {
+                                progressText = `${step1LastBatchLabel} — ${progressText}`;
+                            }
+                        }
+
+                        if (!progressText) {
+                            progressText = 'Processing...';
+                        }
+
+                        if (statusEl) {
+                            statusEl.innerHTML = `<div class="loading"></div> ${progressText}`;
+                        }
                         
                         if (progressMsg) {
-                            progressMsg.textContent = status.progress;
+                            progressMsg.textContent = progressText;
                         }
                         
                         if (progressBar) {
                             // Estimate progress based on elapsed time (rough estimate)
                             let progressPercent = Math.min(90, (elapsed / 300) * 100); // Max 90% until actually complete
                             progressBar.style.width = progressPercent + '%';
+                        }
+
+                        if (liveProgressEl) {
+                            let liveText = '';
+                            if (liveProgressFormatter) {
+                                liveText = liveProgressFormatter(status, { elapsed, domStepId }) || '';
+                            } else if (status.progressDetails && typeof status.progressDetails === 'object') {
+                                const details = status.progressDetails;
+                                const processed = Number(details.processed ?? details.total_processed ?? 0);
+                                const total = Number(details.total_to_enrich ?? details.total ?? 0);
+                                const enriched = Number(details.newly_enriched ?? details.enriched ?? 0);
+                                const failed = Number(details.failed ?? 0);
+                                const parts = [];
+                                if (Number.isFinite(processed) && Number.isFinite(total) && total > 0) {
+                                    parts.push(`Processed ${processed}/${total}`);
+                                } else if (Number.isFinite(processed) && processed > 0) {
+                                    parts.push(`Processed ${processed}`);
+                                }
+                                if (Number.isFinite(enriched)) {
+                                    parts.push(`Enriched ${enriched}`);
+                                }
+                                if (Number.isFinite(failed) && failed > 0) {
+                                    parts.push(`Failed ${failed}`);
+                                }
+                                liveText = parts.join(' · ');
+                            }
+
+                            if (liveText) {
+                                liveProgressEl.textContent = liveText;
+                                liveProgressEl.classList.remove('hidden');
+                            } else {
+                                liveProgressEl.classList.add('hidden');
+                            }
                         }
                     }
                     
@@ -1368,15 +1739,15 @@
                 // Stop polling after max attempts
                 if (pollCount >= maxPolls) {
                     clearInterval(pollInterval);
-                    pollingIntervals.delete(stepId);
+                    pollingIntervals.delete(pollingKey);
                     console.warn(`Polling timeout for ${stepId} after ${elapsed} seconds`);
-                    setStepCompleted(stepId, false);
-                    showOutput(stepId, `Polling timeout after ${Math.floor(elapsed / 60)} minutes. The process may still be running.`);
+                    setStepCompleted(domStepId, false);
+                    showOutput(domStepId, `Polling timeout after ${Math.floor(elapsed / 60)} minutes. The process may still be running.`);
                 }
                 
-            }, 5000); // Poll every 5 seconds
+            }, intervalMs);
             
-            pollingIntervals.set(stepId, pollInterval);
+            pollingIntervals.set(pollingKey, pollInterval);
         }
 
         // NEW STEP 0 FUNCTIONS
@@ -1407,9 +1778,48 @@
             document.getElementById('startDateGroup').classList.toggle('hidden', mode === 'smart');
             document.getElementById('endDateGroup').classList.toggle('hidden', mode === 'smart');
         }
-        
+
+        async function rebuildZabaCsvs() {
+            try {
+                const btn = document.getElementById('step2RebuildZabaBtn');
+                if (btn) { 
+                    btn.disabled = true; 
+                    btn.textContent = 'Rebuilding Zaba CSVs...'; 
+                }
+                
+                const resp = await fetch('/api/step2/rebuild-zaba-csvs', { method: 'POST' });
+                
+                if (!resp.ok) {
+                    const js = await resp.json().catch(() => ({}));
+                    alert('Failed to start Zaba CSV rebuild: ' + (js.error || resp.statusText));
+                } else {
+                    alert('Zaba CSV rebuild started. Check status and then export the files.');
+                    updateStatus(); // Refresh status
+                }
+            } catch (e) {
+                console.error('Zaba rebuild error:', e);
+                alert('Zaba rebuild error: ' + e.message);
+            } finally {
+                const btn = document.getElementById('step2RebuildZabaBtn');
+                if (btn) { 
+                    btn.disabled = false; 
+                    btn.textContent = '🧱 Rebuild Zaba CSVs (no scraping)'; 
+                }
+            }
+        }
+
         // Quick download with default settings
         async function runStep0Quick() {
+            if (!isDevMode) {
+                alert('Quick download is only available on the /dev route.');
+                return;
+            }
+
+            const quickBtn = document.getElementById('step0QuickBtn');
+            if (quickBtn) {
+                quickBtn.disabled = true;
+            }
+
             setStepRunning('step0');
             // Immediately reset Step 1 and Step 2 visuals for a new cycle
             try {
@@ -1452,6 +1862,10 @@
                 setStepCompleted('step0', false);
                 showOutput('step0', `Network error: ${error.message}`);
                 console.error('Step 0 error:', error);
+            } finally {
+                if (quickBtn) {
+                    quickBtn.disabled = false;
+                }
             }
         }
         
@@ -1519,6 +1933,148 @@
             }
         }
         
+        async function runStep1DevIntegration() {
+            if (!isDevMode) {
+                alert('Dev Integration is only available on the /dev route.');
+                return;
+            }
+
+            const cutoffInput = document.getElementById('devIssueDate');
+            if (!cutoffInput || !cutoffInput.value) {
+                alert('Please set an issue date cutoff before running Dev Integration.');
+                return;
+            }
+
+            updateDevCutoffLabel(cutoffInput.value);
+            setStepRunning('step1');
+
+            try {
+                const response = await fetch('/api/step1/dev', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ issueDateCutoff: cutoffInput.value })
+                });
+                const result = await response.json();
+
+                if (result.success && (result.status === 'started' || result.processing === true)) {
+                    console.log('Step 1 (Dev) started, beginning polling...');
+                    startPolling('step1');
+                } else if (result.success) {
+                    setStepCompleted('step1', true);
+                    showOutput('step1', result.output);
+                    if (result.files) showFileInfo('step1', result.files);
+                    if (result.potentialMatches && result.potentialMatches.length > 0) {
+                        document.getElementById('step1VerifyBtn').classList.remove('hidden');
+                    }
+                    updateStatus();
+                } else {
+                    setStepCompleted('step1', false);
+                    showOutput('step1', `Error: ${result.error}`);
+                }
+            } catch (error) {
+                setStepCompleted('step1', false);
+                showOutput('step1', `Network error: ${error.message}`);
+                console.error('Step 1 (Dev) error:', error);
+            }
+        }
+
+        async function runStep1DevEnrichAll() {
+            if (!isDevMode) {
+                alert('Enrich All is only available on the /dev route.');
+                return;
+            }
+
+            const enrichAllBtn = document.getElementById('step1DevEnrichAllBtn');
+            if (enrichAllBtn) {
+                enrichAllBtn.disabled = true;
+            }
+
+            setStepRunning('step1');
+
+            try {
+                const response = await fetch('/api/step1/dev/enrich-all', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const result = await response.json();
+
+                if (result.success) {
+                    setStepCompleted('step1', true);
+                    const verifyBtn = document.getElementById('step1VerifyBtn');
+                    if (verifyBtn) {
+                        if (result.potentialMatches && result.potentialMatches.length > 0) {
+                            verifyBtn.classList.remove('hidden');
+                        } else {
+                            verifyBtn.classList.add('hidden');
+                        }
+                    }
+                    showOutput('step1', result.output || result.message || 'Enrich All completed.');
+                    if (result.files) showFileInfo('step1', result.files);
+                    updateStatus();
+                } else {
+                    setStepCompleted('step1', false);
+                    showOutput('step1', `Error: ${result.error || 'Unknown error'}`);
+                }
+            } catch (error) {
+                setStepCompleted('step1', false);
+                showOutput('step1', `Network error: ${error.message}`);
+                console.error('Step 1 (Dev Enrich All) error:', error);
+            } finally {
+                if (enrichAllBtn) {
+                    enrichAllBtn.disabled = false;
+                }
+            }
+        }
+
+        async function runZabaEnrich() {
+            if (!isDevMode) {
+                alert('Zaba Enrich is only available on the /dev route.');
+                return;
+            }
+
+            const button = document.getElementById('step2ZabaEnrichBtn');
+            if (button) {
+                button.disabled = true;
+            }
+
+            setStepRunning('step2');
+
+            try {
+                const response = await fetch('/api/step2/dev/zaba-enrich', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const result = await response.json().catch(() => ({}));
+
+                if (response.ok && result.success && (result.status === 'started' || result.processing === true)) {
+                    console.log('Zaba enrich started, beginning polling...');
+                    startPolling('step2', {
+                        statusEndpoint: '/api/step2/zaba/status'
+                    });
+                } else if (response.ok && result.success) {
+                    setStepCompleted('step2', true);
+                    showOutput('step2', result.output || result.message || 'Zaba Enrich completed.');
+                    if (result.files) {
+                        showFileInfo('step2', result.files);
+                    }
+                    updateStatus();
+                } else {
+                    setStepCompleted('step2', false);
+                    const errorMessage = result.error || `Request failed with status ${response.status}`;
+                    showOutput('step2', `Error: ${errorMessage}`);
+                }
+            } catch (error) {
+                setStepCompleted('step2', false);
+                showOutput('step2', `Network error: ${error.message}`);
+                console.error('Zaba Enrich error:', error);
+            } finally {
+                if (button) {
+                    button.disabled = false;
+                }
+            }
+        }
+
         // Run Step 1 with proper async handling (was Step 0)
         async function runStep1() {
             setStepRunning('step1');
@@ -1576,6 +2132,7 @@
                 document.getElementById('verificationInterface').classList.remove('hidden');
                 document.getElementById('verificationComplete').classList.add('hidden');
                 switchVerificationTab(currentTab);
+                toggleBulkUpdateButton();
             } catch (error) {
                 console.error('Error starting verification:', error);
                 alert('Error loading verification data.');
@@ -1591,6 +2148,7 @@
             const data = (currentTab === 'moved') ? movedVerificationData : potentialVerificationData;
             if (currentVerificationIndex >= data.length) currentVerificationIndex = 0;
             showCurrentVerificationItem();
+            toggleBulkUpdateButton();
         }
         
         // Show current verification item (tab-aware)
@@ -1691,8 +2249,10 @@
                     </div>
                 `;
             }
+
+            toggleBulkUpdateButton();
         }
-        
+
         // Make verification decision
         function makeVerificationDecision(decision) {
             const data = (currentTab === 'moved') ? movedVerificationData : potentialVerificationData;
@@ -1704,20 +2264,23 @@
             showCurrentVerificationItem();
         }
 
-        // Update existing person address in SQL and mark as existing in decisions
-        async function updateExistingAddressInDB() {
-            if (currentTab !== 'moved') { return; }
-            const item = movedVerificationData[currentVerificationIndex];
-            if (!item) return;
+        function toggleBulkUpdateButton() {
+            const btn = document.getElementById('bulkUpdateBtn');
+            if (!btn) return;
+            const shouldShow = currentTab === 'moved' && Array.isArray(movedVerificationData) && movedVerificationData.length > 0;
+            btn.classList.toggle('hidden', !shouldShow);
+        }
+
+        function buildMovedUpdatePayload(item) {
+            if (!item) return null;
             const p = item.new_person || {};
             const existing = item.existing_person || {};
             const orig = existing.original_record || {};
-            const existingId = orig.id || existing.id; // prefer original SQL id
+            const existingId = orig.id || existing.id;
             if (!existingId) {
-                alert('Missing existing person ID; cannot update.');
-                return;
+                return null;
             }
-            const payload = {
+            return {
                 existing_id: existingId,
                 city: p.city || '',
                 state: p.state || '',
@@ -1725,6 +2288,19 @@
                 address: p.address || '',
                 zip: p.zip || ''
             };
+        }
+
+        // Update existing person address in SQL and mark as existing in decisions
+        async function updateExistingAddressInDB() {
+            if (currentTab !== 'moved') { return; }
+            const item = movedVerificationData[currentVerificationIndex];
+            if (!item) return;
+            const payload = buildMovedUpdatePayload(item);
+            if (!payload) {
+                alert('Missing existing person ID; cannot update.');
+                return;
+            }
+            const p = item.new_person || {};
             try {
                 const resp = await fetch('/api/step1/update-existing-address', {
                     method: 'POST',
@@ -1745,6 +2321,213 @@
                 showCurrentVerificationItem();
             } catch (e) {
                 alert('Network error updating database: ' + e.message);
+            }
+        }
+
+        function openMovedBulkOverlay() {
+            if (!Array.isArray(movedVerificationData) || movedVerificationData.length === 0) {
+                alert('No moved candidates available to update.');
+                return;
+            }
+            bulkMovedSelections = new Set();
+            movedVerificationData.forEach((item, idx) => {
+                if (buildMovedUpdatePayload(item)) {
+                    bulkMovedSelections.add(idx);
+                }
+            });
+            renderMovedBulkOverlayTable();
+            updateBulkSelectionCount();
+            const status = document.getElementById('bulkOverlayStatus');
+            if (status) status.textContent = '';
+            const applyBtn = document.getElementById('bulkOverlayApplyBtn');
+            if (applyBtn) applyBtn.disabled = false;
+            document.getElementById('bulkUpdateOverlay').classList.remove('hidden');
+        }
+
+        function closeMovedBulkOverlay() {
+            document.getElementById('bulkUpdateOverlay').classList.add('hidden');
+        }
+
+        function renderMovedBulkOverlayTable() {
+            const tbody = document.getElementById('bulkOverlayTableBody');
+            if (!tbody) return;
+            if (!Array.isArray(movedVerificationData) || movedVerificationData.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; padding:20px;">No moved candidates available.</td></tr>';
+                return;
+            }
+            const rows = movedVerificationData.map((item, idx) => {
+                const p = item.new_person || {};
+                const existing = item.existing_person || {};
+                const orig = existing.original_record || {};
+                const existingCity = orig.city || existing.city || 'Unknown';
+                const existingState = orig.state || existing.state || (p.state || '');
+                const existingIssue = orig.issue_date || existing.issue_date || '—';
+                const newCity = p.city || 'Unknown';
+                const newState = p.state || '';
+                const payloadAvailable = !!buildMovedUpdatePayload(item);
+                const isChecked = payloadAvailable && bulkMovedSelections.has(idx);
+                const checkboxAttrs = `${payloadAvailable ? '' : 'disabled'} ${isChecked ? 'checked' : ''}`.trim();
+                const disabledNote = payloadAvailable ? '' : '<div class="disabled-note">Missing existing ID</div>';
+                const name = `${existing.first_name || ''} ${existing.last_name || ''}`.trim() || '(Unknown name)';
+                const stateLabel = existingState || newState || '';
+                return `
+                    <tr>
+                        <td>
+                            <div class="bulk-name">
+                                <span>${name}</span>
+                                ${stateLabel ? `<span class="bulk-meta">State: ${stateLabel}</span>` : ''}
+                                <span class="bulk-meta">Issue date: ${existingIssue}</span>
+                                ${disabledNote}
+                            </div>
+                        </td>
+                        <td>
+                            <div class="bulk-transition">
+                                <span>${existingCity}${existingState ? ', ' + existingState : ''}</span>
+                                <span class="arrow">→</span>
+                                <span>${newCity}${newState ? ', ' + newState : ''}</span>
+                            </div>
+                            ${p.patent_number ? `<div class="bulk-meta">Patent: ${p.patent_number}</div>` : ''}
+                        </td>
+                        <td class="bulk-check">
+                            <input type="checkbox" class="bulk-select-checkbox" data-index="${idx}" ${checkboxAttrs}>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+            tbody.innerHTML = rows;
+            tbody.querySelectorAll('input.bulk-select-checkbox').forEach(cb => {
+                cb.addEventListener('change', (event) => {
+                    const idx = Number(event.target.dataset.index);
+                    if (event.target.checked) {
+                        bulkMovedSelections.add(idx);
+                    } else {
+                        bulkMovedSelections.delete(idx);
+                    }
+                    updateBulkSelectionCount();
+                });
+            });
+        }
+
+        function updateBulkSelectionCount() {
+            const countEl = document.getElementById('bulkSelectionCount');
+            if (countEl) {
+                countEl.textContent = `Selected: ${bulkMovedSelections.size}`;
+            }
+        }
+
+        function selectAllBulkMoved(selectAll) {
+            if (!Array.isArray(movedVerificationData)) return;
+            bulkMovedSelections = new Set();
+            movedVerificationData.forEach((item, idx) => {
+                if (selectAll && buildMovedUpdatePayload(item)) {
+                    bulkMovedSelections.add(idx);
+                }
+            });
+            const tbody = document.getElementById('bulkOverlayTableBody');
+            if (tbody) {
+                tbody.querySelectorAll('input.bulk-select-checkbox').forEach(cb => {
+                    if (!cb.disabled) {
+                        cb.checked = !!selectAll;
+                    }
+                });
+            }
+            updateBulkSelectionCount();
+        }
+
+        function updateCountsAndUIAfterBulk() {
+            const tabMovedCount = document.getElementById('tabMovedCount');
+            const tabMoved = document.getElementById('tabMoved');
+            if (tabMovedCount) tabMovedCount.textContent = movedVerificationData.length;
+            if (tabMoved) tabMoved.disabled = movedVerificationData.length === 0;
+
+            if (currentTab === 'moved') {
+                if (movedVerificationData.length === 0) {
+                    if (potentialVerificationData.length > 0) {
+                        switchVerificationTab('potential');
+                    } else {
+                        showVerificationComplete();
+                    }
+                } else {
+                    currentVerificationIndex = Math.min(currentVerificationIndex, movedVerificationData.length - 1);
+                    showCurrentVerificationItem();
+                }
+            }
+            toggleBulkUpdateButton();
+        }
+
+        async function applyMovedBulkUpdates() {
+            if (!bulkMovedSelections || bulkMovedSelections.size === 0) {
+                alert('Select at least one record to update.');
+                return;
+            }
+            const indices = Array.from(bulkMovedSelections).sort((a, b) => a - b);
+            const applyBtn = document.getElementById('bulkOverlayApplyBtn');
+            const statusEl = document.getElementById('bulkOverlayStatus');
+            if (applyBtn) applyBtn.disabled = true;
+            if (statusEl) statusEl.textContent = 'Updating selected records...';
+
+            let successCount = 0;
+            const failures = [];
+            const successIndexes = [];
+
+            for (const idx of indices) {
+                const item = movedVerificationData[idx];
+                const payload = buildMovedUpdatePayload(item);
+                if (!payload) {
+                    failures.push({ idx, reason: 'Missing existing ID', item });
+                    continue;
+                }
+                try {
+                    const resp = await fetch('/api/step1/update-existing-address', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    const result = await resp.json();
+                    if (resp.ok && result.success) {
+                        successCount++;
+                        successIndexes.push(idx);
+                        const p = item.new_person || {};
+                        if (p.person_id) {
+                            verificationDecisions[p.person_id] = { decision: 'existing', person: p, tab: 'moved', updated_db: true };
+                        }
+                    } else {
+                        failures.push({ idx, reason: result && result.error ? result.error : 'Update failed', item });
+                    }
+                } catch (error) {
+                    failures.push({ idx, reason: error.message, item });
+                }
+            }
+
+            if (statusEl) {
+                statusEl.textContent = `Updated ${successCount} of ${indices.length} selected${failures.length ? ` • Failed: ${failures.length}` : ''}`;
+                statusEl.style.color = failures.length ? '#c0392b' : '#2c3e50';
+            }
+
+            if (successIndexes.length > 0) {
+                const toRemove = successIndexes.slice().reverse();
+                for (const idx of toRemove) {
+                    movedVerificationData.splice(idx, 1);
+                }
+                updateCountsAndUIAfterBulk();
+            }
+
+            if (failures.length === 0) {
+                bulkMovedSelections.clear();
+                setTimeout(() => {
+                    closeMovedBulkOverlay();
+                }, 800);
+            } else {
+                bulkMovedSelections = new Set();
+                failures.forEach(f => {
+                    const newIdx = movedVerificationData.indexOf(f.item);
+                    if (newIdx !== -1) {
+                        bulkMovedSelections.add(newIdx);
+                    }
+                });
+                renderMovedBulkOverlayTable();
+                updateBulkSelectionCount();
+                if (applyBtn) applyBtn.disabled = false;
             }
         }
         
@@ -2001,6 +2784,9 @@
         function exportNewEnrichmentsFormatted() {
             window.open('/api/export/new-enrichments-formatted', '_blank');
         }
+        function exportNewAndExistingEnrichmentsFormatted() {
+            window.open('/api/export/new-and-existing-enrichments-formatted', '_blank');
+        }
         function exportAllEnrichmentsFormatted() {
             window.open('/api/export/all-enrichments-formatted', '_blank');
         }
@@ -2033,6 +2819,9 @@
 
         // Poll Step 2 progress periodically and show (processed/total)
         async function pollStep2Progress() {
+            if (pollingIntervals && pollingIntervals.has('step2')) {
+                return; // Live polling already managing progress output
+            }
             try {
                 const resp = await fetch('/api/step2/progress');
                 const p = await resp.json();

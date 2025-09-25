@@ -202,73 +202,6 @@ class ExistingDataDAO:
         
         return self.db.execute_query(query)
 
-    def find_people_by_lastnames_batch(self, last_names: List[str], limit_per_name: int = 1000) -> List[Dict[str, Any]]:
-        """
-        OPTIMIZED with deduplication and pagination: Find all people for multiple last names
-        Uses DISTINCT to eliminate exact duplicates on the 4 key matching fields
-        Uses pagination to ensure all records are returned regardless of MySQL limits
-        """
-        if not last_names:
-            return []
-            
-        try:
-            # Create placeholders for IN clause
-            placeholders = ', '.join(['%s'] * len(last_names))
-            
-            # UPDATED query to include the missing fields: address, email, issue_id, inventor_id, mod_user
-            base_query = f"""
-            SELECT DISTINCT 
-                LOWER(TRIM(first_name)) as first_name,
-                LOWER(TRIM(last_name)) as last_name, 
-                LOWER(TRIM(city)) as city, 
-                LOWER(TRIM(state)) as state,
-                country, address, zip, phone, email, company_name, record_type, source_file,
-                issue_id, inventor_id, mod_user
-            FROM existing_people 
-            WHERE LOWER(TRIM(last_name)) IN ({placeholders})
-            ORDER BY last_name, first_name, city, state
-            """
-            
-            # Implement pagination to get ALL records
-            page_size = 50000  # Reasonable page size to avoid memory issues
-            all_results = []
-            offset = 0
-            cleaned_names = [name.strip().lower() for name in last_names]
-            
-            with self.db.get_connection() as conn:
-                with conn.cursor(dictionary=True) as cursor:
-                    
-                    while True:
-                        # Add pagination to the query
-                        paginated_query = base_query + f" LIMIT {page_size} OFFSET {offset}"
-                        
-                        cursor.execute(paginated_query, tuple(cleaned_names))
-                        page_results = cursor.fetchall()
-                        
-                        if not page_results:
-                            break  # No more results
-                        
-                        all_results.extend(page_results)
-                        
-                        logger.info(f"Batch query page {offset//page_size + 1}: {len(page_results)} records (total so far: {len(all_results)})")
-                        
-                        # If we got fewer results than page_size, we're done
-                        if len(page_results) < page_size:
-                            break
-                            
-                        offset += page_size
-                        
-                        # Safety check to prevent infinite loops
-                        if offset > 1000000:  # Max 1M records per batch
-                            logger.warning(f"Reached maximum offset limit for batch query")
-                            break
-            
-            logger.info(f"Batch query for {len(last_names)} last names returned {len(all_results)} total DISTINCT records across {offset//page_size + 1} pages")
-            return all_results
-            
-        except Exception as e:
-            logger.error(f"Error in batch query for last names {last_names[:5]}...: {e}")
-            return []
 
     def bulk_insert_patents(self, patents: List[Dict[str, Any]]) -> int:
         """Bulk insert existing patents"""
@@ -338,6 +271,125 @@ class ExistingDataDAO:
         
         return self.db.execute_query(query, tuple(all_params))
 
+    def _clean_lastname_for_matching(self, lastname: str) -> str:
+        """Clean lastname by removing common suffixes for better matching"""
+        if not lastname:
+            return ''
+        
+        cleaned = self._clean_string(lastname).lower().strip()
+        
+        # Remove common suffixes (order matters - longer suffixes first)
+        suffixes_to_remove = [
+            ', jr.', ', jr', ' jr.', ' jr',
+            ', sr.', ', sr', ' sr.', ' sr', 
+            ', ii', ', iii', ', iv', ', v',
+            ' ii', ' iii', ' iv', ' v'
+        ]
+        
+        for suffix in suffixes_to_remove:
+            if cleaned.endswith(suffix):
+                cleaned = cleaned[:-len(suffix)].strip()
+                break
+        
+        return cleaned
+
+    def find_people_by_batch_selective(self, people_batch: List[Dict], limit_per_person: int = 20, dev_cutoff_datetime=None) -> List[Dict[str, Any]]:
+        """
+        Query database for people using lastname-only approach to find all name variations
+        """
+        if not people_batch:
+            return []
+        
+        # Collect all unique last names from the batch
+        unique_last_names = set()
+        
+        for person in people_batch:
+            last_name = self._clean_lastname_for_matching(person.get('last_name', ''))
+            if last_name:
+                unique_last_names.add(last_name)
+        
+        if not unique_last_names:
+            return []
+        
+        # Convert to list for SQL parameters
+        lastname_list = list(unique_last_names)
+        
+        # Build SQL query with lastname-only WHERE clause
+        placeholders = ', '.join(['%s'] * len(lastname_list))
+        
+        # Add dev mode datetime filter if provided
+        dev_filter = ""
+        if dev_cutoff_datetime:
+            dev_filter = " AND (issue_date IS NULL OR issue_date <= %s)"
+            lastname_list.append(dev_cutoff_datetime)  # Add to parameters
+        
+        query = f"""
+        SELECT DISTINCT
+            LOWER(TRIM(first_name)) as first_name,
+            LOWER(TRIM(last_name)) as last_name, 
+            LOWER(TRIM(city)) as city, 
+            LOWER(TRIM(state)) as state,
+            MAX(country) as country,
+            MAX(address) as address,
+            MAX(zip) as zip,
+            MAX(phone) as phone,
+            MAX(email) as email,
+            MAX(company_name) as company_name,
+            MAX(record_type) as record_type,
+            MAX(source_file) as source_file,
+            MAX(issue_id) as issue_id,
+            MAX(inventor_id) as inventor_id,
+            MAX(mod_user) as mod_user,
+            MAX(issue_date) as issue_date
+        FROM existing_people 
+        WHERE LOWER(TRIM(last_name)) IN ({placeholders}){dev_filter}
+        GROUP BY LOWER(TRIM(first_name)), LOWER(TRIM(last_name)), 
+                LOWER(TRIM(city)), LOWER(TRIM(state))
+        ORDER BY last_name, state, city, first_name
+        """
+        
+        try:
+            filter_msg = f" with dev cutoff {dev_cutoff_datetime}" if dev_cutoff_datetime else ""
+            logger.info(f"Lastname-based batch query: {len(unique_last_names)} unique last names{filter_msg}")
+            
+            with self.db.get_connection() as conn:
+                with conn.cursor(dictionary=True) as cursor:
+                    cursor.execute(query, tuple(lastname_list))
+                    results = cursor.fetchall()
+            
+            # Debug logging for specific problem people
+            debug_people = {
+                'kenneth mott': ('kenneth', 'mott'),
+                'christopher bell': ('christopher', 'bell'), 
+                'david benedetti': ('david', 'benedetti')
+            }
+            
+            for debug_name, (debug_first, debug_last) in debug_people.items():
+                debug_results = [
+                    result for result in results 
+                    if (result.get('first_name', '').lower().strip() == debug_first and 
+                        result.get('last_name', '').lower().strip() == debug_last)
+                ]
+                
+                if debug_results:
+                    logger.info(f"DEBUG SQL: Found {len(debug_results)} {debug_name.title()} records:")
+                    for i, record in enumerate(debug_results, 1):
+                        logger.info(f"  {debug_name.title()} #{i}: city='{record.get('city')}', state='{record.get('state')}', address='{record.get('address')}'")
+                else:
+                    logger.info(f"DEBUG SQL: No {debug_name.title()} records found in results")
+            
+            logger.info(f"Lastname-based query returned {len(results)} records total")
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error in lastname-based batch query: {e}")
+            return []
+    
+    def _clean_string(self, value) -> str:
+        """Clean string values"""
+        if not value or str(value).lower() in ['nan', 'none', 'null', '']:
+            return ''
+        return str(value).strip()
 
 class ProcessingDataDAO:
     """Data Access Object for processing pipeline data"""

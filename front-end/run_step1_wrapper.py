@@ -8,6 +8,7 @@ import os
 import json
 import logging
 import time
+import argparse
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -41,6 +42,13 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+def parse_cli_args():
+    parser = argparse.ArgumentParser(description='Run Step 1 integration wrapper')
+    parser.add_argument('--dev-mode', action='store_true', help='Enable dev mode filtering by issue date cutoff')
+    parser.add_argument('--issue-date', dest='issue_date', help='Issue date cutoff (ISO datetime) for dev mode filtering')
+    return parser.parse_args()
+
 
 def load_config():
     """Load configuration exactly like main.py does"""
@@ -279,9 +287,22 @@ def main():
     print("🚀 STARTING STEP 1: INTEGRATE EXISTING DATA")
     print("=" * 60)
     
+    args = parse_cli_args()
+
     # Load configuration (same as main.py)
     config = load_config()
-    
+
+    if args.dev_mode:
+        config['DEV_MODE'] = True
+        if args.issue_date:
+            config['DEV_ISSUE_CUTOFF'] = args.issue_date
+            print(f"DEV MODE: Filtering existing SQL people using issue date cutoff {args.issue_date}")
+        else:
+            print("DEV MODE: Enabled without explicit cutoff — defaulting to current timestamp")
+            config['DEV_ISSUE_CUTOFF'] = datetime.now().isoformat(timespec='minutes')
+    else:
+        config['DEV_MODE'] = False
+
     # Create output directory
     os.makedirs(config['OUTPUT_DIR'], exist_ok=True)
     

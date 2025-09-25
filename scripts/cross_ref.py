@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # =============================================================================
-# cross_reference_field_updater.py - Cross-reference Access DB to update SQL missing fields
-# Pull records from SQL, find missing fields in Access DB, update SQL table
+# optimized_cross_reference_field_updater.py - Fast cross-reference updater with batching and caching
 # =============================================================================
 import pandas as pd
 import os
@@ -15,25 +14,28 @@ import sys
 import traceback
 from io import StringIO
 import time
+from collections import defaultdict
+import hashlib
 
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(f'cross_reference_updater_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'),
+        logging.FileHandler(f'optimized_updater_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-class CrossReferenceFieldUpdater:
-    """Cross-reference Access database to update missing SQL fields"""
+class OptimizedCrossReferenceUpdater:
+    """Optimized cross-reference Access database to update missing SQL fields"""
     
-    def __init__(self, database_folder_path: str = "../", progress_file: str = "field_update_progress.json"):
+    def __init__(self, database_folder_path: str = "../", progress_file: str = "optimized_update_progress.json"):
         self.database_folder = Path(database_folder_path)
         self.progress_file = Path(progress_file)
-        self.batch_size = 500
+        self.batch_size = 2000  # Much larger batch size
+        self.update_batch_size = 500  # SQL update batch size
         
         # SQL connection config from environment
         self.sql_config = {
@@ -43,18 +45,16 @@ class CrossReferenceFieldUpdater:
             'user': os.getenv('DB_USER', os.getenv('SQL_USER', 'root')),
             'password': os.getenv('DB_PASSWORD', os.getenv('SQL_PASSWORD', 'password')),
             'charset': 'utf8mb4',
-            'sql_mode': ''  # Disable strict mode
+            'sql_mode': '',
+            'autocommit': False  # Manual commit for batching
         }
         
-        # Fields to check and update (excluding problematic date field for now)
+        # Updated fields to check and update
         self.target_fields = [
             'address', 'zip', 'issue_id', 'new_issue_rec_num', 'inventor_id', 
             'patent_no', 'mail_to_name', 'mail_to_send_key', 
-            'mod_user', 'bar_code'
+            'mod_user', 'bar_code', 'issue_date', 'inventor_contact'
         ]
-        
-        # Date fields to handle separately
-        self.date_fields = ['issue_date']
         
         # Progress tracking
         self.progress = {
@@ -64,11 +64,15 @@ class CrossReferenceFieldUpdater:
             'records_with_missing_fields': 0,
             'fields_found_and_updated': {},
             'start_time': None,
-            'last_update_time': None
+            'last_update_time': None,
+            'cache_hits': 0,
+            'cache_misses': 0
         }
         
-        # Access database cache
+        # Access database cache with optimized indexing
         self.access_tables_cache = {}
+        self.lookup_cache = {}  # Cache for duplicate lookups
+        self.indexed_tables = {}  # Pre-indexed tables for fast lookup
         
         # Check tools
         self.check_mdb_tools()
@@ -93,61 +97,9 @@ class CrossReferenceFieldUpdater:
             logger.warning(f"mdb-tools version check failed: {e}, but continuing...")
             return True
 
-    def find_access_databases(self):
-        """Find Access database files"""
-        access_files = []
-        
-        for pattern in ["*.accdb", "*.mdb"]:
-            for file_path in self.database_folder.rglob(pattern):
-                if not file_path.name.startswith('~'):  # Skip temp files
-                    access_files.append(file_path)
-                    logger.info(f"Found Access database: {file_path}")
-        
-        return access_files
-
-    def get_table_list(self, db_path: Path):
-        """Get list of tables in Access database"""
-        try:
-            result = subprocess.run(['mdb-tables', str(db_path)], 
-                                  capture_output=True, text=True, timeout=30)
-            
-            if result.returncode == 0:
-                tables = [t.strip() for t in result.stdout.strip().split() if t.strip()]
-                user_tables = [t for t in tables if not t.startswith('MSys') and t.strip()]
-                return user_tables
-            else:
-                logger.error(f"mdb-tables failed for {db_path}: {result.stderr}")
-                return []
-                
-        except Exception as e:
-            logger.error(f"Error getting tables for {db_path}: {e}")
-            return []
-
-    def export_access_table(self, db_path: Path, table_name: str):
-        """Export table from Access database"""
-        try:
-            result = subprocess.run(['mdb-export', str(db_path), table_name], 
-                                  capture_output=True, text=True, timeout=120)
-            
-            if result.returncode == 0:
-                csv_data = result.stdout
-                if csv_data.strip():
-                    df = pd.read_csv(StringIO(csv_data))
-                    logger.debug(f"Exported {table_name}: {df.shape}")
-                    return df
-                else:
-                    return None
-            else:
-                logger.error(f"mdb-export failed for {table_name}: {result.stderr}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error exporting {table_name}: {e}")
-            return None
-
-    def load_csv_tables(self):
-        """Load CSV files from converted databases into cache"""
-        logger.info("Loading CSV files from converted databases...")
+    def load_csv_tables_optimized(self):
+        """Load and index CSV tables for fast lookup"""
+        logger.info("Loading and indexing CSV files for optimized lookup...")
         
         csv_folder = self.database_folder / "converted_databases" / "csv"
         if not csv_folder.exists():
@@ -162,7 +114,7 @@ class CrossReferenceFieldUpdater:
         
         logger.info(f"Found {len(csv_files)} CSV files")
         
-        # Look for relevant CSV files that might contain our target fields
+        # Look for relevant CSV files
         relevant_patterns = [
             'inventor', 'new_issue', 'issue', 'matches', 'match', 'patent'
         ]
@@ -175,14 +127,18 @@ class CrossReferenceFieldUpdater:
             
             if is_relevant:
                 try:
-                    logger.info(f"Loading CSV: {csv_file.name}")
-                    df = pd.read_csv(csv_file)
+                    logger.info(f"Loading and indexing CSV: {csv_file.name}")
+                    df = pd.read_csv(csv_file, low_memory=False)
                     
                     if not df.empty:
                         # Use filename (without extension) as cache key
                         cache_key = csv_file.stem
                         self.access_tables_cache[cache_key] = df
-                        logger.info(f"Cached {cache_key}: {df.shape} - Columns: {list(df.columns)[:5]}...")
+                        
+                        # Create indexed version for fast lookup
+                        self.create_table_index(cache_key, df)
+                        
+                        logger.info(f"Cached and indexed {cache_key}: {df.shape} - Columns: {list(df.columns)[:10]}...")
                     else:
                         logger.warning(f"Empty CSV file: {csv_file.name}")
                         
@@ -191,15 +147,90 @@ class CrossReferenceFieldUpdater:
             else:
                 logger.debug(f"Skipping non-relevant CSV: {csv_file.name}")
         
-        logger.info(f"Loaded {len(self.access_tables_cache)} CSV tables into cache")
-        
-        # Show what tables we have
-        if self.access_tables_cache:
-            logger.info("Available tables:")
-            for key, df in self.access_tables_cache.items():
-                logger.info(f"  {key}: {df.shape[0]:,} rows, {df.shape[1]} columns")
-        
+        logger.info(f"Loaded and indexed {len(self.access_tables_cache)} CSV tables")
         return len(self.access_tables_cache) > 0
+
+    def create_table_index(self, table_name, df):
+        """Create optimized indexes for fast lookup"""
+        if df.empty:
+            return
+            
+        # Create indexes based on common lookup patterns
+        indexes = {}
+        
+        # Find name columns
+        name_columns = {
+            'first_name': None,
+            'last_name': None,
+            'city': None,
+            'state': None
+        }
+        
+        for col in df.columns:
+            col_lower = col.lower()
+            if any(x in col_lower for x in ['first', 'fname']) and 'name' in col_lower:
+                name_columns['first_name'] = col
+            elif any(x in col_lower for x in ['last', 'lname']) and 'name' in col_lower:
+                name_columns['last_name'] = col
+            elif 'city' in col_lower:
+                name_columns['city'] = col
+            elif 'state' in col_lower:
+                name_columns['state'] = col
+        
+        # Create lookup key index if we have the necessary columns
+        if name_columns['first_name'] and name_columns['last_name']:
+            logger.info(f"Creating lookup index for {table_name}")
+            
+            # Create multi-level index for fast lookup
+            df_clean = df.copy()
+            
+            # Clean and normalize lookup columns
+            for key, col in name_columns.items():
+                if col:
+                    df_clean[f'norm_{key}'] = df_clean[col].astype(str).str.strip().str.upper()
+            
+            # Group by lookup keys for fast access
+            if name_columns['city'] and name_columns['state']:
+                # Full match index: first_name + last_name + city + state
+                full_key = df_clean.apply(lambda row: 
+                    f"{row.get(f'norm_first_name', '')}__{row.get(f'norm_last_name', '')}__{row.get(f'norm_city', '')}__{row.get(f'norm_state', '')}", 
+                    axis=1)
+                indexes['full_match'] = df_clean.groupby(full_key).apply(lambda x: x.index.tolist()).to_dict()
+                
+                # State match index: first_name + last_name + state
+                state_key = df_clean.apply(lambda row: 
+                    f"{row.get(f'norm_first_name', '')}__{row.get(f'norm_last_name', '')}__{row.get(f'norm_state', '')}", 
+                    axis=1)
+                indexes['state_match'] = df_clean.groupby(state_key).apply(lambda x: x.index.tolist()).to_dict()
+            
+            # Name-only index: first_name + last_name
+            name_key = df_clean.apply(lambda row: 
+                f"{row.get(f'norm_first_name', '')}__{row.get(f'norm_last_name', '')}", 
+                axis=1)
+            indexes['name_match'] = df_clean.groupby(name_key).apply(lambda x: x.index.tolist()).to_dict()
+            
+            self.indexed_tables[table_name] = {
+                'indexes': indexes,
+                'columns': name_columns,
+                'df': df
+            }
+        
+        logger.debug(f"Created {len(indexes)} indexes for {table_name}")
+
+    def create_lookup_key(self, first_name, last_name, city=None, state=None):
+        """Create standardized lookup key"""
+        # Normalize values
+        first = str(first_name or '').strip().upper()
+        last = str(last_name or '').strip().upper()
+        city_norm = str(city or '').strip().upper()
+        state_norm = str(state or '').strip().upper()
+        
+        if city and state:
+            return f"{first}__{last}__{city_norm}__{state_norm}"
+        elif state:
+            return f"{first}__{last}__{state_norm}"
+        else:
+            return f"{first}__{last}"
 
     def load_progress(self):
         """Load progress from file"""
@@ -222,76 +253,117 @@ class CrossReferenceFieldUpdater:
             logger.error(f"Could not save progress: {e}")
 
     def connect_sql(self):
-        """Connect to SQL database"""
+        """Connect to SQL database with optimized settings"""
         try:
             connection = mysql.connector.connect(**self.sql_config)
             
-            # Set SQL mode to handle problematic dates
+            # Optimize connection settings
             cursor = connection.cursor()
             cursor.execute("SET SESSION sql_mode = 'ALLOW_INVALID_DATES'")
             cursor.execute("SET SESSION foreign_key_checks = 0")
+            cursor.execute("SET SESSION unique_checks = 0")
+            cursor.execute("SET SESSION autocommit = 0")  # Manual commits
             cursor.close()
             
-            logger.info(f"Connected to SQL database: {self.sql_config['database']}")
+            logger.info(f"Connected to SQL database with optimizations: {self.sql_config['database']}")
             return connection
         except Exception as e:
             logger.error(f"SQL connection failed: {e}")
             return None
 
-    def get_records_with_missing_fields(self, connection, limit=None):
-        """Get records that have missing fields - avoiding problematic date fields"""
-        # Simple query avoiding date fields entirely
+    def get_records_batch_optimized(self, connection, limit):
+        """Get batch of records with optimized query"""
         query = """
         SELECT id, first_name, last_name, city, state, country,
                address, zip, issue_id, new_issue_rec_num, inventor_id, 
-               patent_no, mail_to_name, mail_to_send_key, mod_user, bar_code
+               patent_no, mail_to_name, mail_to_send_key, mod_user, 
+               bar_code, issue_date, inventor_contact
         FROM existing_people 
         WHERE id > %s
         ORDER BY id
+        LIMIT %s
         """
         
-        if limit:
-            query += f" LIMIT {limit}"
-        
         cursor = connection.cursor(dictionary=True)
-        cursor.execute(query, (self.progress['last_processed_id'],))
+        cursor.execute(query, (self.progress['last_processed_id'], limit))
         records = cursor.fetchall()
         cursor.close()
         
-        # Filter to only records that actually have missing fields
-        filtered_records = []
+        return records
+
+    def identify_missing_fields_batch(self, records):
+        """Identify missing fields for a batch of records"""
+        records_with_missing = []
+        
         for record in records:
-            missing_fields = self.identify_missing_fields(record)
+            missing_fields = []
+            for field in self.target_fields:
+                value = record.get(field)
+                # Consider empty strings, NULL, '0000-00-00' dates as missing
+                if (not value or 
+                    value == '' or 
+                    value == '0000-00-00' or 
+                    str(value).lower() in ['null', 'none'] or
+                    (field == 'inventor_contact' and value in [0, '0', None]) or
+                    (field == 'issue_date' and value in ['0000-00-00 00:00:00', None])):
+                    missing_fields.append(field)
+            
             if missing_fields:
-                filtered_records.append(record)
+                record['_missing_fields'] = missing_fields
+                records_with_missing.append(record)
         
-        logger.info(f"Found {len(filtered_records)} records with missing fields out of {len(records)} total")
-        return filtered_records
+        return records_with_missing
 
-    def identify_missing_fields(self, record):
-        """Identify which fields are missing for a record"""
-        missing_fields = []
-        for field in self.target_fields:
-            value = record.get(field)
-            # Consider empty strings, NULL, '0000-00-00' dates as missing
-            if (not value or 
-                value == '' or 
-                value == '0000-00-00' or 
-                str(value).lower() in ['null', 'none']):
-                missing_fields.append(field)
-        return missing_fields
+    def search_access_optimized(self, records_batch):
+        """Optimized search using indexes and caching"""
+        updates_needed = []
+        
+        # Group records by lookup key to avoid duplicate searches
+        lookup_groups = defaultdict(list)
+        
+        for record in records_batch:
+            lookup_key = self.create_lookup_key(
+                record.get('first_name'), 
+                record.get('last_name'),
+                record.get('city'),
+                record.get('state')
+            )
+            lookup_groups[lookup_key].append(record)
+        
+        logger.info(f"Processing {len(lookup_groups)} unique lookup keys for {len(records_batch)} records")
+        
+        # Process each unique lookup key
+        for lookup_key, records_group in lookup_groups.items():
+            # Check cache first
+            if lookup_key in self.lookup_cache:
+                found_fields = self.lookup_cache[lookup_key]
+                self.progress['cache_hits'] += len(records_group)
+            else:
+                # Search in indexed tables
+                found_fields = self.search_indexed_tables(records_group[0])  # Use first record as template
+                self.lookup_cache[lookup_key] = found_fields
+                self.progress['cache_misses'] += 1
+            
+            # Apply found fields to all records in this group
+            if found_fields:
+                for record in records_group:
+                    # Only apply fields that are actually missing
+                    applicable_fields = {
+                        field: value for field, value in found_fields.items()
+                        if field in record.get('_missing_fields', [])
+                    }
+                    
+                    if applicable_fields:
+                        updates_needed.append({
+                            'id': record['id'],
+                            'fields': applicable_fields
+                        })
+        
+        return updates_needed
 
-    def search_access_for_fields(self, record, missing_fields):
-        """Search Access tables for missing field values"""
+    def search_indexed_tables(self, record):
+        """Search using pre-built indexes"""
         found_fields = {}
-        
-        # Create search criteria
-        search_criteria = {
-            'first_name': record.get('first_name', ''),
-            'last_name': record.get('last_name', ''),
-            'city': record.get('city', ''),
-            'state': record.get('state', ''),
-        }
         
         # Field mappings from Access to SQL
         field_mappings = {
@@ -301,28 +373,46 @@ class CrossReferenceFieldUpdater:
             'new_issue_rec_num': ['new_issue_rec_num', 'issue_rec_num', 'rec_num'],
             'inventor_id': ['inventor_id', 'id'],
             'patent_no': ['patent_num', 'patent_number', 'patent_no'],
-            'issue_date': ['issue_date', 'patent_date', 'date'],
+            'issue_date': ['inventor_created', 'issue_date', 'date_created', 'created_date'],
             'mail_to_name': ['mail_to_name', 'inventor_first', 'inventor_last'],
             'mail_to_send_key': ['mail_to_send_key', 'send_key'],
             'mod_user': ['mod_user', 'modified_by', 'last_modified_by'],
-            'bar_code': ['bar_code', 'barcode']
+            'bar_code': ['bar_code', 'barcode'],
+            'inventor_contact': ['inventor_contact', 'contact']
         }
         
-        # Search through cached Access tables
-        for table_key, df in self.access_tables_cache.items():
-            if df.empty:
-                continue
-                
-            # Try to find matching record
-            matches = self.find_matching_records(df, search_criteria)
+        # Create lookup keys
+        first_name = record.get('first_name', '')
+        last_name = record.get('last_name', '')
+        city = record.get('city', '')
+        state = record.get('state', '')
+        
+        full_key = self.create_lookup_key(first_name, last_name, city, state)
+        state_key = self.create_lookup_key(first_name, last_name, None, state)
+        name_key = self.create_lookup_key(first_name, last_name)
+        
+        # Search indexed tables in priority order
+        for table_name, table_info in self.indexed_tables.items():
+            df = table_info['df']
+            indexes = table_info['indexes']
             
-            if not matches.empty:
-                logger.debug(f"Found {len(matches)} matches in {table_key}")
+            # Try full match first (highest priority)
+            matching_indices = None
+            if 'full_match' in indexes and full_key in indexes['full_match']:
+                matching_indices = indexes['full_match'][full_key]
+            elif 'state_match' in indexes and state_key in indexes['state_match']:
+                matching_indices = indexes['state_match'][state_key]
+            elif 'name_match' in indexes and name_key in indexes['name_match']:
+                matching_indices = indexes['name_match'][name_key]
+            
+            if matching_indices:
+                # Get matching records
+                matches_df = df.iloc[matching_indices]
                 
                 # Extract field values
-                for missing_field in missing_fields:
+                for missing_field in record.get('_missing_fields', []):
                     if missing_field in found_fields:
-                        continue  # Already found this field
+                        continue  # Already found
                     
                     possible_columns = field_mappings.get(missing_field, [missing_field])
                     
@@ -334,16 +424,16 @@ class CrossReferenceFieldUpdater:
                                 actual_col = actual
                                 break
                         
-                        if actual_col and actual_col in matches.columns:
+                        if actual_col and actual_col in matches_df.columns:
                             # Get the first non-null, non-empty value
-                            values = matches[actual_col].dropna()
-                            values = values[values != '']
+                            values = matches_df[actual_col].dropna()
+                            values = values[values.astype(str) != '']
+                            values = values[values.astype(str).str.lower() != 'null']
                             
                             if not values.empty:
                                 found_value = str(values.iloc[0]).strip()
-                                if found_value and found_value.lower() != 'null':
+                                if found_value:
                                     found_fields[missing_field] = found_value
-                                    logger.debug(f"Found {missing_field} = {found_value} in {table_key}.{actual_col}")
                                     break
                     
                     if missing_field in found_fields:
@@ -351,120 +441,122 @@ class CrossReferenceFieldUpdater:
         
         return found_fields
 
-    def find_matching_records(self, df, search_criteria):
-        """Find records in DataFrame matching search criteria"""
-        mask = pd.Series([True] * len(df))
+    def batch_update_sql(self, connection, updates_batch):
+        """Batch update SQL records"""
+        if not updates_batch:
+            return 0
         
-        # Try exact match first
-        for field, value in search_criteria.items():
-            if not value:
-                continue
-                
-            # Find matching column (case insensitive)
-            matching_cols = []
-            possible_names = [field, f'inventor_{field}']
-            
-            for possible in possible_names:
-                for col in df.columns:
-                    if possible.lower() == col.lower():
-                        matching_cols.append(col)
-                        break
-            
-            if matching_cols:
-                col = matching_cols[0]
-                mask &= df[col].astype(str).str.lower() == str(value).lower()
+        # Group updates by field combinations for efficient batching
+        update_groups = defaultdict(list)
         
-        exact_matches = df[mask]
+        for update in updates_batch:
+            field_signature = tuple(sorted(update['fields'].keys()))
+            update_groups[field_signature].append(update)
         
-        if not exact_matches.empty:
-            return exact_matches
-        
-        # Try partial match (state + last name)
-        mask = pd.Series([True] * len(df))
-        
-        if search_criteria.get('last_name') and search_criteria.get('state'):
-            last_name = search_criteria['last_name']
-            state = search_criteria['state']
-            
-            # Find last name column
-            for col in df.columns:
-                if 'last' in col.lower():
-                    mask &= df[col].astype(str).str.lower() == last_name.lower()
-                    break
-            
-            # Find state column
-            for col in df.columns:
-                if 'state' in col.lower():
-                    mask &= df[col].astype(str).str.lower() == state.lower()
-                    break
-            
-            return df[mask]
-        
-        return pd.DataFrame()
-
-    def update_sql_record(self, connection, record_id, found_fields):
-        """Update SQL record with found field values"""
-        if not found_fields:
-            return False
-        
-        # Build UPDATE query
-        set_clauses = []
-        values = []
-        
-        for field, value in found_fields.items():
-            set_clauses.append(f"{field} = %s")
-            # Clean and format value
-            cleaned_value = self.clean_field_value(field, value)
-            values.append(cleaned_value)
-        
-        set_clauses.append("updated_at = NOW()")
-        
-        query = f"""
-        UPDATE existing_people 
-        SET {', '.join(set_clauses)}
-        WHERE id = %s
-        """
-        
-        values.append(record_id)
+        total_updated = 0
         
         try:
             cursor = connection.cursor()
-            cursor.execute(query, values)
+            
+            for field_signature, group_updates in update_groups.items():
+                if not group_updates:
+                    continue
+                
+                # Build batch UPDATE query
+                set_clauses = [f"{field} = %s" for field in field_signature]
+                set_clauses.append("updated_at = NOW()")
+                
+                query = f"""
+                UPDATE existing_people 
+                SET {', '.join(set_clauses)}
+                WHERE id = %s
+                """
+                
+                # Prepare batch data
+                batch_data = []
+                for update in group_updates:
+                    values = []
+                    for field in field_signature:
+                        cleaned_value = self.clean_field_value(field, update['fields'][field])
+                        values.append(cleaned_value)
+                    values.append(update['id'])  # WHERE id = %s
+                    batch_data.append(values)
+                
+                # Execute batch update
+                cursor.executemany(query, batch_data)
+                updated_count = cursor.rowcount
+                total_updated += updated_count
+                
+                # Update progress tracking
+                for field in field_signature:
+                    if field not in self.progress['fields_found_and_updated']:
+                        self.progress['fields_found_and_updated'][field] = 0
+                    self.progress['fields_found_and_updated'][field] += updated_count
+                
+                logger.debug(f"Batch updated {updated_count} records with fields: {field_signature}")
+            
+            # Commit all updates
             connection.commit()
             cursor.close()
             
-            # Update progress tracking
-            for field in found_fields.keys():
-                if field not in self.progress['fields_found_and_updated']:
-                    self.progress['fields_found_and_updated'][field] = 0
-                self.progress['fields_found_and_updated'][field] += 1
-            
-            return True
+            logger.info(f"Successfully batch updated {total_updated} records")
+            return total_updated
             
         except Exception as e:
-            logger.error(f"Failed to update record {record_id}: {e}")
+            logger.error(f"Batch update failed: {e}")
             connection.rollback()
-            return False
+            return 0
 
     def clean_field_value(self, field_name, value):
-        """Clean and format field value"""
+        """Clean and format field value with enhanced date handling"""
         if not value or str(value).lower() in ['null', 'none', '']:
             return None
         
         value = str(value).strip()
         
-        # Date fields
-        if 'date' in field_name.lower():
+        # Date fields - handle issue_date specially with multiple formats
+        if field_name == 'issue_date':
             try:
                 # Handle various date formats and empty dates
                 if value in ['', '0000-00-00', '00/00/0000', 'NULL']:
                     return None
-                date = pd.to_datetime(value)
+                
+                # Handle MM/DD/YY format (like "01/04/22 00:00:00")
+                if '/' in value and len(value.split('/')[2].split()[0]) == 2:
+                    # Convert YY to 20YY
+                    parts = value.replace('\\/', '/').split()
+                    date_part = parts[0]  # Get just the date part
+                    month, day, year = date_part.split('/')
+                    
+                    # Convert 2-digit year to 4-digit
+                    if len(year) == 2:
+                        year_int = int(year)
+                        if year_int <= 30:  # Assume 00-30 means 2000-2030
+                            year = f"20{year}"
+                        else:  # Assume 31-99 means 1931-1999
+                            year = f"19{year}"
+                    
+                    # Reconstruct date string
+                    formatted_date = f"{month}/{day}/{year}"
+                    date = pd.to_datetime(formatted_date)
+                else:
+                    # Try standard parsing
+                    date = pd.to_datetime(value.replace('\\/', '/'))
+                
                 if pd.isna(date):
                     return None
                 return date.strftime('%Y-%m-%d')
-            except:
+            except Exception as e:
+                logger.debug(f"Date parsing failed for '{value}': {e}")
                 return None
+        
+        # Boolean fields
+        if field_name == 'inventor_contact':
+            # Convert to boolean integer
+            if str(value).lower() in ['true', '1', 'yes', 'y']:
+                return 1
+            else:
+                return 0
         
         # Integer fields
         if field_name in ['issue_id', 'new_issue_rec_num', 'inventor_id']:
@@ -485,64 +577,58 @@ class CrossReferenceFieldUpdater:
         else:
             return value[:100] if value else None
 
-    def process_batch(self, connection):
-        """Process a batch of records"""
+    def process_batch_optimized(self, connection):
+        """Process a batch with all optimizations"""
         logger.info(f"Getting batch of {self.batch_size} records starting from ID {self.progress['last_processed_id']}")
         
-        records = self.get_records_with_missing_fields(connection, self.batch_size)
+        # Get batch of records
+        records = self.get_records_batch_optimized(connection, self.batch_size)
         
         if not records:
             logger.info("No more records to process")
             return False
         
-        logger.info(f"Processing {len(records)} records with missing fields")
+        # Identify records with missing fields
+        records_with_missing = self.identify_missing_fields_batch(records)
         
-        batch_updated = 0
-        batch_checked = 0
+        if not records_with_missing:
+            # Update progress even if no missing fields
+            self.progress['last_processed_id'] = records[-1]['id']
+            self.progress['total_records_checked'] += len(records)
+            logger.info(f"Batch complete: {len(records)} records, 0 with missing fields")
+            return True
         
-        for record in records:
-            batch_checked += 1
-            record_id = record['id']
-            
-            # Identify missing fields
-            missing_fields = self.identify_missing_fields(record)
-            
-            if missing_fields:
-                self.progress['records_with_missing_fields'] += 1
-                logger.debug(f"Record {record_id}: Missing fields: {missing_fields}")
-                
-                # Search Access databases
-                found_fields = self.search_access_for_fields(record, missing_fields)
-                
-                if found_fields:
-                    logger.info(f"Record {record_id}: Found fields: {list(found_fields.keys())}")
-                    
-                    # Update SQL record
-                    if self.update_sql_record(connection, record_id, found_fields):
-                        batch_updated += 1
-                        self.progress['total_records_updated'] += 1
-                    else:
-                        logger.error(f"Failed to update record {record_id}")
-                else:
-                    logger.debug(f"Record {record_id}: No fields found in Access databases")
-            
-            # Update progress
-            self.progress['last_processed_id'] = record_id
-            self.progress['total_records_checked'] += 1
-            
-            # Log progress every 50 records
-            if batch_checked % 50 == 0:
-                logger.info(f"Batch progress: {batch_checked}/{len(records)} checked, {batch_updated} updated")
+        logger.info(f"Processing {len(records_with_missing)} records with missing fields out of {len(records)} total")
         
-        # Save progress after each batch
+        # Search for missing fields using optimized lookup
+        updates_needed = self.search_access_optimized(records_with_missing)
+        
+        # Batch update SQL
+        updated_count = 0
+        if updates_needed:
+            # Process updates in smaller batches
+            for i in range(0, len(updates_needed), self.update_batch_size):
+                batch = updates_needed[i:i + self.update_batch_size]
+                updated_count += self.batch_update_sql(connection, batch)
+        
+        # Update progress
+        self.progress['last_processed_id'] = records[-1]['id']
+        self.progress['total_records_checked'] += len(records)
+        self.progress['records_with_missing_fields'] += len(records_with_missing)
+        self.progress['total_records_updated'] += updated_count
+        
+        # Save progress
         self.save_progress()
         
-        logger.info(f"Batch complete: {batch_checked} checked, {batch_updated} updated")
+        logger.info(f"Batch complete: {len(records)} checked, {len(records_with_missing)} with missing fields, {updated_count} updated")
+        logger.info(f"Cache stats: {self.progress['cache_hits']} hits, {self.progress['cache_misses']} misses")
+        
         return True
 
     def run(self):
-        """Main execution method"""
-        logger.info("Starting cross-reference field updater")
+        """Main execution method with all optimizations"""
+        logger.info("Starting optimized cross-reference field updater (ROUND 2 - Focus on remaining fields)")
+        logger.info("Primarily targeting: issue_date, inventor_contact, bar_code")
         
         # Load progress
         self.load_progress()
@@ -550,8 +636,8 @@ class CrossReferenceFieldUpdater:
         if not self.progress['start_time']:
             self.progress['start_time'] = datetime.now().isoformat()
         
-        # Load CSV tables instead of Access databases
-        if not self.load_csv_tables():
+        # Load and index CSV tables
+        if not self.load_csv_tables_optimized():
             logger.error("Failed to load CSV tables")
             return False
         
@@ -563,12 +649,16 @@ class CrossReferenceFieldUpdater:
         
         try:
             # Process batches until no more records
+            batch_count = 0
             while True:
-                if not self.process_batch(connection):
+                batch_count += 1
+                logger.info(f"Starting batch {batch_count}")
+                
+                if not self.process_batch_optimized(connection):
                     break
                 
-                # Small delay between batches
-                time.sleep(1)
+                # Small delay between batches (reduced)
+                time.sleep(0.1)
             
             # Final report
             self.generate_final_report()
@@ -587,49 +677,60 @@ class CrossReferenceFieldUpdater:
 
     def generate_final_report(self):
         """Generate final processing report"""
-        logger.info("\n" + "="*50)
-        logger.info("CROSS-REFERENCE UPDATE COMPLETE")
-        logger.info("="*50)
+        logger.info("\n" + "="*60)
+        logger.info("OPTIMIZED CROSS-REFERENCE UPDATE COMPLETE")
+        logger.info("="*60)
         logger.info(f"Total records checked: {self.progress['total_records_checked']:,}")
         logger.info(f"Records with missing fields: {self.progress['records_with_missing_fields']:,}")
         logger.info(f"Records updated: {self.progress['total_records_updated']:,}")
         logger.info(f"Last processed ID: {self.progress['last_processed_id']:,}")
+        logger.info(f"Cache hits: {self.progress['cache_hits']:,}")
+        logger.info(f"Cache misses: {self.progress['cache_misses']:,}")
+        
+        if self.progress['cache_hits'] + self.progress['cache_misses'] > 0:
+            cache_hit_rate = self.progress['cache_hits'] / (self.progress['cache_hits'] + self.progress['cache_misses']) * 100
+            logger.info(f"Cache hit rate: {cache_hit_rate:.1f}%")
         
         if self.progress['fields_found_and_updated']:
             logger.info("\nFields found and updated:")
-            for field, count in self.progress['fields_found_and_updated'].items():
+            for field, count in sorted(self.progress['fields_found_and_updated'].items()):
                 logger.info(f"  {field}: {count:,}")
         
-        # Calculate processing time
+        # Calculate processing time and rate
         if self.progress['start_time']:
             start_time = datetime.fromisoformat(self.progress['start_time'])
             elapsed = datetime.now() - start_time
             logger.info(f"\nTotal processing time: {elapsed}")
+            
+            if elapsed.total_seconds() > 0:
+                rate = self.progress['total_records_checked'] / elapsed.total_seconds()
+                logger.info(f"Processing rate: {rate:.1f} records/second")
         
-        logger.info("="*50)
+        logger.info("="*60)
 
 def main():
     """Main function"""
-    print("Cross-Reference Access to SQL Field Updater")
-    print("===========================================")
-    print("This script will:")
-    print("1. Read records from SQL existing_people table")
-    print("2. Identify missing fields")
-    print("3. Search Access databases for those fields")
-    print("4. Update SQL records with found values")
-    print("5. Process in batches with resumable progress")
+    print("Optimized Cross-Reference Access to SQL Field Updater")
+    print("=====================================================")
+    print("This optimized script includes:")
+    print("• Larger batch processing (2000 records at a time)")
+    print("• Pre-indexed table lookups for fast searches")
+    print("• Duplicate detection and caching")
+    print("• Batch SQL updates")
+    print("• Enhanced progress tracking")
+    print("• Support for issue_date, inventor_contact, and bar_code fields")
     print()
     
     # Configuration
     DATABASE_FOLDER = "../"  # Where Access databases are located
-    PROGRESS_FILE = "field_update_progress.json"
+    PROGRESS_FILE = "optimized_update_progress.json"
     
     try:
-        updater = CrossReferenceFieldUpdater(DATABASE_FOLDER, PROGRESS_FILE)
+        updater = OptimizedCrossReferenceUpdater(DATABASE_FOLDER, PROGRESS_FILE)
         success = updater.run()
         
         if success:
-            print("\nCross-reference update completed!")
+            print("\nOptimized cross-reference update completed!")
             print(f"Check the log file for detailed results.")
             print(f"Progress saved in: {PROGRESS_FILE}")
         else:
