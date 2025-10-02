@@ -3,6 +3,17 @@
 🚀 Patent Processing Environment Setup Script
 ==============================================================
 
+--------------- Checklist -------------------
+
+git --version
+node --version
+python3.9 --version
+python3.13 --version
+
+# Windows only
+choco --version
+
+
 ----------------- MacOS --------------------
 
 // Install Node.js (if not installed)
@@ -13,7 +24,7 @@ brew install node
 git --version 
 
 
------------------ Windows -----------------
+----------------- Windows (administrator) -----------------
 
 # Install Chocolatey first
 Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))

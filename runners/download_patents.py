@@ -3,6 +3,7 @@
 # Step 0 Runner: Download patents from PatentsView API
 # Fixed to use correct API and handle current data limitations
 # =============================================================================
+import os
 import requests
 import time
 import logging
@@ -13,6 +14,28 @@ from typing import Dict, Any, List, Optional
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _write_json_atomic(path: Path, data: Any) -> None:
+    """Write JSON to disk atomically so readers never see partial files."""
+    tmp_path = path.with_name(path.name + '.tmp')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(tmp_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
+
+
+def _write_csv_atomic(df: pd.DataFrame, path: Path) -> None:
+    """Write a DataFrame to CSV atomically."""
+    tmp_path = path.with_name(path.name + '.tmp')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(tmp_path, index=False, encoding='utf-8')
+    with open(tmp_path, 'rb+') as f:
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
+
 
 class PatentsViewAPIClient:
     """Fixed API client for PatentsView with current API endpoint and data limitations"""
@@ -55,23 +78,12 @@ class PatentsViewAPIClient:
             raise ValueError(f"Invalid date format. Use YYYY-MM-DD: {e}")
         
         # FIXED: Adjust dates to be within available data range
-        original_start = start_dt
-        original_end = end_dt
-        
-        if start_dt > self.max_date:
-            logger.warning(f"Start date {start_date} is beyond available data. Using {self.max_date}")
-            start_dt = self.max_date
-            
-        if end_dt > self.max_date:
-            logger.warning(f"End date {end_date} is beyond available data. Using {self.max_date}")
-            end_dt = self.max_date
-        
-        # If both dates are in the future, use recent data instead
-        if original_start > self.max_date and original_end > self.max_date:
-            logger.info("Both dates are in the future. Using recent data from past 30 days instead.")
-            end_dt = self.max_date
-            start_dt = self.max_date - timedelta(days=30)
-        
+        if start_dt > self.max_date or end_dt > self.max_date:
+            raise ValueError(
+                f"PatentsView data is only available through {self.max_date}. "
+                f"Requested range {start_date} to {end_date} exceeds this limit."
+            )
+
         return start_dt.strftime('%Y-%m-%d'), end_dt.strftime('%Y-%m-%d')
     
     def fetch_patents(self, query: Dict, fields: List[str], max_results: int = 1000) -> List[Dict]:
@@ -373,92 +385,54 @@ class PatentDownloader:
             "assignees.assignee_country",
             "assignees.assignee_type"
         ]
-    
+        self.latest_smart_range: Optional[Dict[str, Any]] = None
+
     def download_smart_mode(self, days_back: int = 7, max_results: int = 1000) -> List[Dict]:
         """
-        FIXED Smart mode: Searches for patents going back from the latest available data
-        Handles the fact that PatentsView data only goes through 2024-12-31
+        Use the current date as the end of the range and look `days_back` days
+        into the past, mirroring how manual mode constructs its ranges.
         """
-        logger.info(f"Starting smart mode download - {days_back} days back, max {max_results} results")
-        
-        # FIXED: Start from the latest available data date, not current date
-        max_date = self.api_client.max_date
-        logger.info(f"Using latest available data date: {max_date}")
-        
-        all_patents = []
-        
-        # Strategy 1: Try recent days one by one from the latest available data
-        for day_offset in range(days_back):
-            if len(all_patents) >= max_results:
-                break
-                
-            target_date = max_date - timedelta(days=day_offset)
-            date_str = target_date.strftime('%Y-%m-%d')
-            
-            logger.info(f"Checking for patents on {date_str}")
-            
-            # FIXED: Use correct query format for PatentSearch API
-            query = {
-                "_and": [
-                    {"_gte": {"patent_date": date_str}},
-                    {"_lt": {"patent_date": (target_date + timedelta(days=1)).strftime('%Y-%m-%d')}}
-                ]
-            }
-            
-            day_patents = self.api_client.fetch_patents(
-                query, 
-                self.standard_fields, 
-                max_results - len(all_patents)
+        safe_days_back = max(int(days_back), 0)
+        logger.info(
+            f"Starting smart mode download - {safe_days_back} days back from current date, max {max_results} results"
+        )
+
+        end_date = datetime.utcnow().date()
+        start_date = end_date - timedelta(days=safe_days_back)
+        requested_start_str = start_date.strftime('%Y-%m-%d')
+        requested_end_str = end_date.strftime('%Y-%m-%d')
+        logger.info(f"Requested date range: {requested_start_str} to {requested_end_str}")
+
+        # Query mirrors manual mode: inclusive lower bound, exclusive upper bound (next day)
+        query = {
+            "_and": [
+                {"_gte": {"patent_date": requested_start_str}},
+                {"_lt": {"patent_date": (end_date + timedelta(days=1)).strftime('%Y-%m-%d')}}
+            ]
+        }
+
+        if end_date > self.api_client.max_date:
+            error_msg = (
+                f"Requested smart range {requested_start_str} to {requested_end_str} exceeds PatentsView's "
+                f"current data availability (through {self.api_client.max_date}). "
+                "Reduce days_back or switch to manual mode with an earlier range."
             )
-            
-            if day_patents:
-                all_patents.extend(day_patents)
-                logger.info(f"Found {len(day_patents)} patents on {date_str}. Total: {len(all_patents)}")
-                
-                # If we have enough patents, we can stop
-                if len(all_patents) >= max_results:
-                    break
-        
-        # Strategy 2: If we didn't find enough patents, try a broader range
-        if len(all_patents) < min(max_results // 4, 100):  # If we found very few patents
-            logger.info("Insufficient patents found in recent days, trying broader range")
-            
-            end_date = max_date
-            start_date = max_date - timedelta(days=days_back * 4)  # Broader range
-            
-            broader_query = {
-                "_and": [
-                    {"_gte": {"patent_date": start_date.strftime('%Y-%m-%d')}},
-                    {"_lte": {"patent_date": end_date.strftime('%Y-%m-%d')}}
-                ]
-            }
-            
-            broader_patents = self.api_client.fetch_patents(
-                broader_query,
-                self.standard_fields,
-                max_results
-            )
-            
-            # FIXED: Also try a simple query without date restrictions to test the API
-        if len(all_patents) < min(max_results // 10, 50):  # If we found very few patents
-            logger.info("Still insufficient patents found, trying simple test query...")
-            
-            # Try a simple query for recent patents without specific date ranges
-            test_query = {"_gte": {"patent_date": "2024-01-01"}}  # Just get patents from 2024
-            
-            test_patents = self.api_client.fetch_patents(
-                test_query,
-                self.standard_fields,
-                max_results
-            )
-            
-            # Use test results if they're better
-            if len(test_patents) > len(all_patents):
-                logger.info(f"Simple test query yielded more results: {len(test_patents)} vs {len(all_patents)}")
-                all_patents = test_patents
-        
-        logger.info(f"Smart mode complete: {len(all_patents)} patents downloaded")
-        return all_patents
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        patents = self.api_client.fetch_patents(query, self.standard_fields, max_results)
+
+        self.latest_smart_range = {
+            'days_back': safe_days_back,
+            'requested_start_date': requested_start_str,
+            'requested_end_date': requested_end_str,
+            'effective_start_date': requested_start_str,
+            'effective_end_date': requested_end_str,
+            'fallback_used': False
+        }
+
+        logger.info(f"Smart mode complete: {len(patents)} patents downloaded")
+        return patents
     
     def download_manual_mode(self, start_date: str, end_date: str, max_results: int = 1000) -> List[Dict]:
         """
@@ -607,10 +581,13 @@ def run_patent_download(config: Dict[str, Any]) -> Dict[str, Any]:
         # Download patents based on mode
         start_time = time.time()
         
+        smart_range: Optional[Dict[str, Any]] = None
+
         if mode == 'smart':
             days_back = config.get('days_back', 7)
-            logger.info(f"Using smart mode: {days_back} days back from latest data")
+            logger.info(f"Using smart mode: {days_back} days back from current date")
             raw_patents = downloader.download_smart_mode(days_back, max_results)
+            smart_range = downloader.latest_smart_range or None
             
         elif mode == 'manual':
             start_date = config.get('start_date')
@@ -652,10 +629,9 @@ def run_patent_download(config: Dict[str, Any]) -> Dict[str, Any]:
         # Save results
         logger.info("Saving download results to files")
         
-        # Save JSON
+        # Save JSON atomically to avoid partial reads by the frontend
         patents_json_file = output_dir / 'downloaded_patents.json'
-        with open(patents_json_file, 'w', encoding='utf-8') as f:
-            json.dump(processed_patents, f, indent=2, ensure_ascii=False, default=str)
+        _write_json_atomic(patents_json_file, processed_patents)
         
         # Save CSV (flattened format)
         try:
@@ -699,16 +675,18 @@ def run_patent_download(config: Dict[str, Any]) -> Dict[str, Any]:
             
             df = pd.DataFrame(csv_data)
             patents_csv_file = output_dir / 'downloaded_patents.csv'
-            df.to_csv(patents_csv_file, index=False, encoding='utf-8')
+            _write_csv_atomic(df, patents_csv_file)
             
         except Exception as e:
-            logger.warning(f"Could not create CSV file: {e}")
+            logger.error(f"Could not create CSV file: {e}")
+            raise RuntimeError(f"Could not create CSV output: {e}") from e
         
         # Also persist to SQL for downstream hydration (best-effort)
         try:
             _save_download_to_sql(processed_patents)
         except Exception as e:
-            logger.warning(f"Could not save downloaded patents to SQL: {e}")
+            logger.error(f"Could not save downloaded patents to SQL: {e}")
+            raise RuntimeError(f"Could not save downloaded patents to SQL: {e}") from e
         
         # Create summary results
         results = {
@@ -718,9 +696,14 @@ def run_patent_download(config: Dict[str, Any]) -> Dict[str, Any]:
             'download_parameters': {
                 'mode': mode,
                 'max_results': max_results,
-                'days_back': config.get('days_back') if mode == 'smart' else None,
+                'days_back': (smart_range or {}).get('days_back') if mode == 'smart' else None,
                 'start_date': config.get('start_date') if mode == 'manual' else None,
-                'end_date': config.get('end_date') if mode == 'manual' else None
+                'end_date': config.get('end_date') if mode == 'manual' else None,
+                'requested_start_date': (smart_range or {}).get('requested_start_date') if mode == 'smart' else None,
+                'requested_end_date': (smart_range or {}).get('requested_end_date') if mode == 'smart' else None,
+                'effective_start_date': (smart_range or {}).get('effective_start_date') if mode == 'smart' else None,
+                'effective_end_date': (smart_range or {}).get('effective_end_date') if mode == 'smart' else None,
+                'fallback_used': (smart_range or {}).get('fallback_used') if mode == 'smart' else None
             },
             'download_time_minutes': download_time / 60,
             'api_requests_made': downloader.api_client.request_count,
@@ -733,8 +716,7 @@ def run_patent_download(config: Dict[str, Any]) -> Dict[str, Any]:
         
         # Save results summary
         results_file = output_dir / 'download_results.json'
-        with open(results_file, 'w', encoding='utf-8') as f:
-            json.dump(results, f, indent=2, ensure_ascii=False, default=str)
+        _write_json_atomic(results_file, results)
         
         logger.info(f"Download complete: {len(processed_patents)} patents saved")
         return results
@@ -805,7 +787,7 @@ def _save_download_to_sql(patents: List[Dict[str, Any]]):
             'patent_title': p.get('patent_title') or '',
             'patent_date': p.get('patent_date') or None,
             'patent_abstract': p.get('patent_abstract') or '',
-            'raw_data': p,
+            'raw_data': json.dumps(p, ensure_ascii=False),
         })
         for inv in (p.get('inventors') or []):
             people_rows.append({
@@ -823,7 +805,10 @@ def _save_download_to_sql(patents: List[Dict[str, Any]]):
         placeholders = ', '.join(['%s'] * len(cols))
         sql = f"INSERT IGNORE INTO downloaded_patents ({', '.join(cols)}) VALUES ({placeholders})"
         params = [tuple(r.get(c) for c in cols) for r in patent_rows]
-        db.execute_many(sql, params)
+        step = 500
+        for i in range(0, len(params), step):
+            batch = params[i:i+step]
+            db.execute_many(sql, batch)
 
     # Insert people (no unique constraint)
     if people_rows:

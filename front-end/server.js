@@ -279,6 +279,52 @@ function writeJsonFile(filePath, data) {
     }
 }
 
+function truncateText(text, maxLength = 4000) {
+    if (typeof text !== 'string') {
+        return text;
+    }
+    if (text.length <= maxLength) {
+        return text;
+    }
+    const trimmed = text.slice(0, maxLength);
+    const omitted = text.length - maxLength;
+    return `${trimmed}\n...[truncated ${omitted} chars]`;
+}
+
+function stepStatusPath(stepId) {
+    return path.join(__dirname, '..', 'output', `${stepId}_status.json`);
+}
+
+function readStepStatus(stepId) {
+    try {
+        const fullPath = stepStatusPath(stepId);
+        if (fs.existsSync(fullPath)) {
+            return JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+        }
+    } catch (error) {
+        console.warn(`Could not read status for ${stepId}:`, error.message);
+    }
+    return null;
+}
+
+function writeStepStatus(stepId, payload) {
+    try {
+        const fullPath = stepStatusPath(stepId);
+        const dir = path.dirname(fullPath);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+        const enrichedPayload = {
+            stepId,
+            updatedAt: new Date().toISOString(),
+            ...payload
+        };
+        fs.writeFileSync(fullPath, JSON.stringify(enrichedPayload, null, 2));
+    } catch (error) {
+        console.warn(`Could not persist status for ${stepId}:`, error.message);
+    }
+}
+
 // Helper function to get file stats
 function getFileStats(filePath) {
     try {
@@ -1760,13 +1806,20 @@ app.post('/api/step2', async (req, res) => {
                 try {
                     fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_output.txt'), (result && result.output) ? String(result.output) : '');
                 } catch (e) { console.warn('Could not persist last_step2_output.txt:', e.message); }
+                const completedAt = new Date();
+                writeStepStatus(stepId, {
+                    success: true,
+                    completedAt: completedAt.toISOString(),
+                    files,
+                    outputSummary: truncateText((result && result.output) ? String(result.output) : '', 4000)
+                });
                 runningProcesses.set(stepId + '_completed', {
                     completed: true,
                     success: true,
                     output: result.output,
                     files: files,
                     results: enrichmentResults,
-                    completedAt: new Date()
+                    completedAt
                 });
             })
             .catch((error) => {
@@ -1775,13 +1828,21 @@ app.post('/api/step2', async (req, res) => {
                     const msg = [error.error || error.message || 'Step 2 failed', error.stderr || '', error.stdout || ''].filter(Boolean).join('\n\n');
                     fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_output.txt'), msg);
                 } catch (e) { /* ignore */ }
+                const completedAt = new Date();
+                writeStepStatus(stepId, {
+                    success: false,
+                    completedAt: completedAt.toISOString(),
+                    error: error.error || error.message || 'Step 2 failed',
+                    stderr: truncateText(error.stderr || '', 4000),
+                    stdoutSnippet: truncateText(error.stdout || '', 2000)
+                });
                 runningProcesses.set(stepId + '_completed', {
                     completed: true,
                     success: false,
                     error: error.error || error.message,
                     stderr: error.stderr,
                     stdout: error.stdout,
-                    completedAt: new Date()
+                    completedAt
                 });
             });
         
@@ -1856,19 +1917,53 @@ app.post('/api/step2/express', async (req, res) => {
 // Step 2: Rebuild CSVs from SQL (no API calls)
 app.post('/api/step2/rebuild-csvs', async (req, res) => {
   try {
-    const stepId = `step2-rebuild-${Date.now()}`;
-    const pythonExec = resolvePython();
-    const args = ['front-end/run_step2_wrapper.py', '--rebuild'];
+    const stepId = 'step2';
+    if (runningProcesses.has(stepId)) {
+      return res.json({ success: false, error: 'Step 2 is already running' });
+    }
+
+    const args = ['--rebuild'];
     console.log('Starting Step 2: Rebuild CSVs (no API calls)');
     runPythonScriptAsync('front-end/run_step2_wrapper.py', args, stepId)
       .then((result) => {
         const msg = result && result.output ? String(result.output) : '';
-        fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_output.txt'), msg);
+        try {
+          fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_output.txt'), msg);
+        } catch (_) {}
+
+        const files = {
+          currentFormatted: getFileStats('output/current_enrichments_formatted.csv'),
+          newFormatted: getFileStats('output/new_enrichments_formatted.csv'),
+          combinedFormatted: getFileStats('output/new_and_existing_enrichments_formatted.csv'),
+          currentCsv: getFileStats('output/current_enrichments.csv'),
+          combinedCsv: getFileStats('output/new_and_existing_enrichments.csv'),
+          contactCurrent: getFileStats('output/contact_current.csv'),
+          contactNew: getFileStats('output/contact_new.csv')
+        };
+
+        runningProcesses.set(stepId + '_completed', {
+          completed: true,
+          success: true,
+          output: msg,
+          files,
+          completedAt: new Date()
+        });
       })
       .catch((err) => {
         const msg = `Step 2 Rebuild failed: ${err && err.message ? err.message : String(err)}`;
-        fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_output.txt'), msg);
+        try {
+          fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_output.txt'), msg);
+        } catch (_) {}
+        runningProcesses.set(stepId + '_completed', {
+          completed: true,
+          success: false,
+          error: err && err.message ? err.message : String(err),
+          stderr: err && err.stderr,
+          stdout: err && err.stdout,
+          completedAt: new Date()
+        });
       });
+
     res.json({ success: true, status: 'started', processing: true, message: 'Rebuild CSVs started. Use /api/step2/status to check progress.' });
   } catch (e) {
     console.error('Failed to start Step 2 rebuild:', e);
@@ -1997,6 +2092,10 @@ app.get('/api/status', (req, res) => {
             running: runningProcesses.has('step2')
         }
     };
+    let step2LastStatus = readStepStatus('step2');
+    if (step2LastStatus) {
+        status.step2.lastRunStatus = step2LastStatus;
+    }
     // Apply cycle reset: treat Step 1/2 results as not completed if older than cycle start
     try {
         const cycleStartTs = readCycleStart();
@@ -2032,6 +2131,12 @@ app.get('/api/status', (req, res) => {
                             status.step2.enrichedCsv.exists = false;
                         }
                     }
+                    if (status.step2.lastRunStatus && status.step2.lastRunStatus.completedAt) {
+                        const completedAt = new Date(status.step2.lastRunStatus.completedAt);
+                        if (!Number.isNaN(completedAt.getTime()) && completedAt.getTime() <= cycleStartTs.getTime()) {
+                            status.step2.lastRunStatus = null;
+                        }
+                    }
                 }
             } catch (_) {}
             // If enrichment_results.json contains a reset flag, force Step 2 to appear not completed
@@ -2047,6 +2152,7 @@ app.get('/api/status', (req, res) => {
             } catch (_) { /* ignore */ }
         }
     } catch (_) { /* ignore */ }
+    step2LastStatus = status.step2.lastRunStatus || null;
     
     // Add file counts
     const downloadedPatents = readJsonFile('output/downloaded_patents.json');
@@ -2075,6 +2181,9 @@ app.get('/api/status', (req, res) => {
                 const enr = readJsonFile('output/enrichment_results.json');
                 if (enr && enr.reset === true) return null;
             } catch (_) {}
+            if (step2LastStatus && step2LastStatus.completedAt) {
+                return step2LastStatus.completedAt;
+            }
             return status.step2.enrichmentResults.modified || null;
         })()
     };
@@ -2872,12 +2981,12 @@ app.get('/api/export/new-enrichments-formatted', (req, res) => {
 
 app.get('/api/export/new-and-existing-enrichments-formatted', (req, res) => {
   try {
-    const outPath = path.join(__dirname, '..', 'output', 'new_and_existing_enrichments.csv');
+    const outPath = path.join(__dirname, '..', 'output', 'new_and_existing_enrichments_formatted.csv');
     if (!fs.existsSync(outPath)) {
-      return res.status(404).json({ error: 'new_and_existing_enrichments.csv not found. Run Step 2 first.' });
+      return res.status(404).json({ error: 'new_and_existing_enrichments_formatted.csv not found. Run Step 2 first.' });
     }
     res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', 'attachment; filename="new_and_existing_enrichments.csv"');
+    res.setHeader('Content-Disposition', 'attachment; filename="new_and_existing_enrichments_formatted.csv"');
     fs.createReadStream(outPath).pipe(res);
   } catch (e) {
     console.error('Export new+existing formatted failed:', e);

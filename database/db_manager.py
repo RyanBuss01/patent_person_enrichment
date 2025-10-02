@@ -139,8 +139,15 @@ class DatabaseManager:
     
     def execute_many(self, query: str, params_list: List[tuple]) -> int:
         """Execute query with multiple parameter sets"""
+        if not params_list:
+            return 0
+        
         with self.get_connection() as conn:
-            cursor = conn.cursor()
+            if self.config.engine == 'mysql':
+                cursor = conn.cursor(prepared=True)
+            else:
+                cursor = conn.cursor()
+
             cursor.executemany(query, params_list)
             conn.commit()
             return cursor.rowcount

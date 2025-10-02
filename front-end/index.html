@@ -152,10 +152,15 @@
             border-left-color: #27ae60;
             background: #f0f8f5;
         }
-        
+
         .step.running {
             border-left-color: #f39c12;
             background: #fef9e7;
+        }
+
+        .step.error {
+            border-left-color: #c0392b;
+            background: #fdecea;
         }
         
         .step-header {
@@ -187,10 +192,15 @@
             background: #d5f4e6;
             color: #27ae60;
         }
-        
+
         .status-running {
             background: #fef3cd;
             color: #f39c12;
+        }
+
+        .status-error {
+            background: #f8d7da;
+            color: #c0392b;
         }
         
         .step-description {
@@ -934,6 +944,9 @@
                         <button class="btn btn-success" onclick="triggerCsvUpload()" id="step0UploadBtn">
                             ⬆️ Upload CSV/XLSX
                         </button>
+                        <button class="btn btn-success" onclick="triggerXmlUpload()" id="step0XmlUploadBtn">
+                            ⬆️ Upload XML
+                        </button>
                         <button class="btn btn-secondary" onclick="showSample('step0')" id="step0Sample">
                             📋 View Sample
                         </button>
@@ -942,9 +955,6 @@
                     <div class="dev-mode-panel dev-only hidden" id="step0DevPanel">
                         <button class="btn btn-test" onclick="runStep0Quick()" id="step0QuickBtn">
                             ⚡ Quick Download (7 days)
-                        </button>
-                        <button class="btn btn-success" onclick="triggerXmlUpload()" id="step0XmlUploadBtn">
-                            ⬆️ Upload XML
                         </button>
                     </div>
                     <input type="file" id="step0CsvInput" accept=".csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx" style="display:none" />
@@ -1254,9 +1264,9 @@
         <div class="export-widget">
             <h3>🧾 Formatted CSV Exports</h3>
             <div class="export-actions" style="margin-bottom: 8px;">
-                <button class="btn btn-success" onclick="exportCurrentEnrichmentsFormatted()">Current (Formatted)</button>
                 <button class="btn btn-success" onclick="exportNewEnrichmentsFormatted()">New (Formatted)</button>
                 <button class="btn btn-success" onclick="exportNewAndExistingEnrichmentsFormatted()">New &amp; Existing (Formatted)</button>
+                <button class="btn btn-success" onclick="exportCurrentEnrichmentsFormatted()">Current (Formatted)</button>
                 <button class="btn btn-success" onclick="exportAllEnrichmentsFormatted()">All (Formatted)</button>
             </div>
             <h3>📇 Contact CSV Exports</h3>
@@ -1481,7 +1491,23 @@
             // Update step statuses - don't override running states
             updateStepStatus('step0', currentStatus.step0?.downloadedPatents?.exists, currentStatus.step0?.running);
             updateStepStatus('step1', currentStatus.step1?.integrationResults?.exists, currentStatus.step1?.running);
-            updateStepStatus('step2', currentStatus.step2?.enrichedData?.exists, currentStatus.step2?.running);
+            const step2Info = currentStatus.step2 || {};
+            const step2Error = Boolean(step2Info.lastRunStatus && step2Info.lastRunStatus.success === false && !step2Info.running);
+            updateStepStatus('step2', step2Info.enrichedData?.exists, step2Info.running, step2Error);
+            const step2StatusEl = document.getElementById('step2Status');
+            if (step2StatusEl) {
+                step2StatusEl.title = step2Error ? (step2Info.lastRunStatus?.error || '') : '';
+            }
+            if (step2Error) {
+                const parts = [
+                    step2Info.lastRunStatus?.error,
+                    step2Info.lastRunStatus?.stderr,
+                    step2Info.lastRunStatus?.stdoutSnippet
+                ].filter(part => typeof part === 'string' && part.trim().length > 0);
+                if (parts.length) {
+                    showOutput('step2', parts.join('\n\n'));
+                }
+            }
 
             // Auto-resume polling on page load/refresh if a step is running
             try {
@@ -1627,7 +1653,7 @@
         }
         
         // Update individual step status
-        function updateStepStatus(stepId, hasResults, isRunning) {
+        function updateStepStatus(stepId, hasResults, isRunning, hasError = false) {
             const step = document.getElementById(stepId);
             const statusEl = document.getElementById(stepId + 'Status');
             
@@ -1636,18 +1662,38 @@
                 return;
             }
             
+            const btn = document.getElementById(stepId + 'Btn');
+            const devBtn = document.getElementById(stepId + 'DevBtn');
+            const progressDiv = document.getElementById(stepId + 'Progress');
+
+            if (hasError) {
+                step.classList.remove('running');
+                step.classList.remove('completed');
+                step.classList.add('error');
+                statusEl.textContent = 'Error';
+                statusEl.className = 'step-status status-error';
+                if (btn) btn.disabled = false;
+                if (devBtn) devBtn.disabled = false;
+                if (progressDiv) {
+                    progressDiv.classList.add('hidden');
+                }
+                return;
+            }
+
             if (isRunning) {
                 step.classList.add('running');
                 step.classList.remove('completed');
+                step.classList.remove('error');
                 statusEl.innerHTML = '<div class="loading"></div> Running';
                 statusEl.className = 'step-status status-running';
             } else if (hasResults) {
                 step.classList.add('completed');
                 step.classList.remove('running');
+                step.classList.remove('error');
                 statusEl.textContent = 'Completed';
                 statusEl.className = 'step-status status-completed';
             } else {
-                step.classList.remove('completed', 'running');
+                step.classList.remove('completed', 'running', 'error');
                 statusEl.textContent = 'Ready';
                 statusEl.className = 'step-status status-ready';
             }
@@ -1663,6 +1709,7 @@
             
             step.classList.add('running');
             step.classList.remove('completed');
+            step.classList.remove('error');
             statusEl.innerHTML = '<div class="loading"></div> Starting...';
             statusEl.className = 'step-status status-running';
             if (btn) btn.disabled = true;
@@ -1716,11 +1763,22 @@
             
             if (success) {
                 step.classList.add('completed');
+                step.classList.remove('error');
                 statusEl.textContent = 'Completed';
                 statusEl.className = 'step-status status-completed';
             } else {
+                step.classList.remove('completed');
+                step.classList.add('error');
                 statusEl.textContent = 'Error';
-                statusEl.className = 'step-status status-ready';
+                statusEl.className = 'step-status status-error';
+            }
+
+            if (stepId === 'step2') {
+                const rebuildBtn = document.getElementById('step2RebuildBtn');
+                if (rebuildBtn) {
+                    rebuildBtn.disabled = false;
+                    rebuildBtn.textContent = '🧱 Rebuild CSVs (no API calls)';
+                }
             }
         }
         function coerceProgressText(progress) {
@@ -1790,7 +1848,14 @@
                             updateStatus();
                         } else {
                             setStepCompleted(domStepId, false);
-                            showOutput(domStepId, `Error: ${status.error}\n\n${status.stderr || ''}`);
+                            let output = `Error: ${status.error || 'Step failed'}`;
+                            if (status.stderr) {
+                                output += `\n\n${status.stderr}`;
+                            }
+                            if (status.stdout) {
+                                output += `\n\n${status.stdout}`;
+                            }
+                            showOutput(domStepId, output);
                         }
                     } else if (status.running) {
                         // Update progress display
@@ -2002,11 +2067,15 @@
                     updateStatus();
                 } else {
                     setStepCompleted('step0', false);
-                    showOutput('step0', `Error: ${result.error}`);
+                    const parts = [`Error: ${result.error || 'Step 0 failed'}`];
+                    if (result.stderr) parts.push(result.stderr);
+                    if (result.stdout) parts.push(result.stdout);
+                    const fallbackMsg = parts.filter(Boolean).join('\n\n');
+                    await showLatestOutput('step0', fallbackMsg);
                 }
             } catch (error) {
                 setStepCompleted('step0', false);
-                showOutput('step0', `Network error: ${error.message}`);
+                await showLatestOutput('step0', `Network error: ${error.message}`);
                 console.error('Step 0 error:', error);
             } finally {
                 if (quickBtn) {
@@ -2070,11 +2139,15 @@
                     toggleDownloadConfig();
                 } else {
                     setStepCompleted('step0', false);
-                    showOutput('step0', `Error: ${result.error}`);
+                    const parts = [`Error: ${result.error || 'Step 0 failed'}`];
+                    if (result.stderr) parts.push(result.stderr);
+                    if (result.stdout) parts.push(result.stdout);
+                    const fallbackMsg = parts.filter(Boolean).join('\n\n');
+                    await showLatestOutput('step0', fallbackMsg);
                 }
             } catch (error) {
                 setStepCompleted('step0', false);
-                showOutput('step0', `Network error: ${error.message}`);
+                await showLatestOutput('step0', `Network error: ${error.message}`);
                 console.error('Step 0 configuration error:', error);
             }
         }
@@ -2808,7 +2881,8 @@
             if (!outputEl) return;
             if (stepId === 'step1' || stepId === 'step2') {
                 const stepEl = document.getElementById(stepId);
-                if (!stepEl || !stepEl.classList.contains('completed')) {
+                const allowDisplay = stepEl && (stepEl.classList.contains('completed') || stepEl.classList.contains('error'));
+                if (!allowDisplay) {
                     // Hide output if not completed for steps 1 and 2
                     outputEl.textContent = '';
                     outputEl.classList.add('hidden');
@@ -2817,6 +2891,27 @@
             }
             outputEl.textContent = output;
             outputEl.classList.remove('hidden');
+        }
+
+        async function showLatestOutput(stepId, fallback = '') {
+            try {
+                const resp = await fetch(`/api/${stepId}/latest-output`);
+                if (resp.ok) {
+                    const data = await resp.json();
+                    if (data && typeof data.output === 'string' && data.output.trim()) {
+                        showOutput(stepId, data.output);
+                        if (data.files) {
+                            showFileInfo(stepId, data.files);
+                        }
+                        return;
+                    }
+                }
+            } catch (e) {
+                console.warn(`Failed to fetch latest output for ${stepId}:`, e);
+            }
+            if (fallback) {
+                showOutput(stepId, fallback);
+            }
         }
         
         // Show file information
@@ -2956,19 +3051,23 @@
             try {
                 const btn = document.getElementById('step2RebuildBtn');
                 if (btn) { btn.disabled = true; btn.textContent = 'Rebuilding CSVs...'; }
+                setStepRunning('step2');
                 const resp = await fetch('/api/step2/rebuild-csvs', { method: 'POST' });
-                if (!resp.ok) {
+                const payload = await resp.json().catch(() => ({}));
+                if (!resp.ok || !payload.success) {
                     const js = await resp.json().catch(() => ({}));
-                    alert('Failed to start rebuild: ' + (js.error || resp.statusText));
+                    alert('Failed to start rebuild: ' + (js.error || payload.error || resp.statusText));
+                    setStepCompleted('step2', false);
+                    if (btn) { btn.disabled = false; btn.textContent = '🧱 Rebuild CSVs (no API calls)'; }
                 } else {
-                    alert('Rebuild started. Check status in Step 2 output and then export.');
+                    startPolling('step2');
                 }
             } catch (e) {
                 console.error('Rebuild error:', e);
                 alert('Rebuild error: ' + e.message);
-            } finally {
                 const btn = document.getElementById('step2RebuildBtn');
                 if (btn) { btn.disabled = false; btn.textContent = '🧱 Rebuild CSVs (no API calls)'; }
+                setStepCompleted('step2', false);
             }
         }
 

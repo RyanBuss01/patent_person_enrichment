@@ -145,12 +145,28 @@ def main():
         print("=" * 60)
         print(f"📊 DOWNLOAD SUMMARY:")
         print(f"   🔧 Mode: {result.get('mode', 'unknown')}")
-        
+        download_params = result.get('download_parameters', {}) or {}
+
         if result.get('mode') == 'smart':
-            print(f"   📅 Days back: {config.get('days_back', 'unknown')}")
+            days_back_val = download_params.get('days_back', config.get('days_back', 'unknown'))
+            print(f"   📅 Days back: {days_back_val}")
+            requested_start = download_params.get('requested_start_date')
+            requested_end = download_params.get('requested_end_date')
+            if requested_start and requested_end:
+                print(f"   📆 Requested range: {requested_start} to {requested_end}")
+            effective_start = download_params.get('effective_start_date')
+            effective_end = download_params.get('effective_end_date')
+            if effective_start and effective_end and (
+                effective_start != requested_start or effective_end != requested_end
+            ):
+                print(f"   ⚠️ Effective range: {effective_start} to {effective_end}")
+                if download_params.get('fallback_used'):
+                    print("   ⚠️ Using available PatentsView data due to current data limits")
         elif result.get('mode') == 'manual':
-            print(f"   📅 Date range: {config.get('start_date')} to {config.get('end_date')}")
-            
+            print(
+                f"   📅 Date range: {download_params.get('start_date')} to {download_params.get('end_date')}"
+            )
+        
         print(f"   📋 Patents downloaded: {result.get('patents_downloaded', 0):,}")
         print(f"   🌐 API requests made: {result.get('api_requests_made', 'unknown')}")
         print(f"   ⏱️  Total download time: {elapsed_time/60:.1f} minutes")

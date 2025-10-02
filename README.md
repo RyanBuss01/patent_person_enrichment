@@ -116,6 +116,17 @@ EMAIL_DELAY_SECONDS=2
 🚀 Patent Processing Environment Setup Script
 ==============================================================
 
+--------------- Checklist -------------------
+
+git --version
+node --version
+python3.9 --version
+python3.13 --version
+
+# Windows only
+choco --version
+
+
 ----------------- MacOS --------------------
 
 # Install Node.js (if not installed)

@@ -1100,8 +1100,12 @@ def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
     try:
         output_dir = config.get('OUTPUT_DIR', 'output')
         use_zaba = config.get('USE_ZABA', False)
-        
+        test_mode = bool(config.get('TEST_MODE'))
+
         files_generated = {}
+
+        if test_mode:
+            return _generate_test_mode_csvs(config, output_dir, use_zaba, files_generated)
 
         db_config = DatabaseConfig.from_env()
         db_manager = DatabaseManager(db_config)
@@ -1368,3 +1372,192 @@ def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
             'error': str(e),
             'files_generated': {}
         }
+
+
+def _generate_test_mode_csvs(
+    config: Dict[str, Any],
+    output_dir: str,
+    use_zaba: bool,
+    files_generated: Dict[str, Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Generate limited CSV outputs for test-mode enrichment runs."""
+
+    enrichment_result = config.get('enrichment_result') or {}
+    new_items = enrichment_result.get('newly_enriched_data') or []
+    matched_existing = enrichment_result.get('matched_existing') or []
+    current_cycle_records = list(new_items) + list(matched_existing)
+
+    current_cycle_path = os.path.join(output_dir, 'current_cycle_enriched.json')
+    write_combined_json(current_cycle_path, current_cycle_records)
+    files_generated[current_cycle_path] = {
+        'records_written': len(current_cycle_records),
+        'records_filtered': 0,
+        'data_type': 'current_cycle_snapshot'
+    }
+
+    preferred_columns = ['record_scope', 'source_table', 'id', 'first_name', 'last_name', 'city', 'state', 'patent_number']
+
+    new_signatures = _extract_signatures_from_enriched_items(new_items)
+
+    step1_existing_records = _load_json_list(os.path.join(output_dir, 'existing_people_in_db.json'))
+    if not step1_existing_records:
+        step1_existing_records = _load_json_list(os.path.join(output_dir, 'existing_people_found.json'))
+
+    formatted_new_records: List[Dict[str, Any]] = []
+    formatted_new_existing_records: List[Dict[str, Any]] = []
+    formatted_current_records: List[Dict[str, Any]] = []
+
+    new_rows_for_csv: List[Dict[str, Any]] = []
+    new_and_existing_rows: List[Dict[str, Any]] = []
+    current_rows: List[Dict[str, Any]] = []
+
+    new_signatures_seen: Set[str] = set()
+    new_existing_signatures_seen: Set[str] = set()
+    current_signatures_seen: Set[str] = set()
+
+    for item in current_cycle_records:
+        original = (item.get('enriched_data') or {}).get('original_person') or {}
+        sig = _person_signature_values(
+            original.get('first_name'),
+            original.get('last_name'),
+            original.get('city'),
+            original.get('state'),
+            original.get('patent_number')
+        )
+        if not sig:
+            continue
+
+        record_scope = 'new' if sig in new_signatures else 'existing'
+        formatted_item = _build_formatted_item_from_current_cycle(item, use_zaba)
+        csv_row = _build_csv_row_from_current_cycle(item, record_scope, 'current_cycle', use_zaba)
+
+        if sig not in new_existing_signatures_seen:
+            formatted_new_existing_records.append(formatted_item)
+            new_and_existing_rows.append(csv_row)
+            new_existing_signatures_seen.add(sig)
+
+        if record_scope == 'new' and sig not in new_signatures_seen:
+            formatted_new_records.append(formatted_item)
+            new_rows_for_csv.append(csv_row)
+            new_signatures_seen.add(sig)
+
+        if sig not in current_signatures_seen:
+            formatted_current_records.append(formatted_item)
+            current_rows.append(csv_row)
+            current_signatures_seen.add(sig)
+
+    for record in step1_existing_records:
+        sig = _person_signature_values(
+            record.get('first_name'),
+            record.get('last_name'),
+            record.get('city'),
+            record.get('state'),
+            record.get('patent_number') or record.get('patent_no')
+        )
+        if not sig or sig in current_signatures_seen:
+            continue
+        formatted_item = _build_formatted_item_from_step1(record, use_zaba)
+        csv_row = _build_csv_row_from_step1(record, use_zaba)
+        formatted_current_records.append(formatted_item)
+        current_rows.append(csv_row)
+        current_signatures_seen.add(sig)
+
+    new_path = os.path.join(output_dir, 'new_enrichments.csv')
+    _write_rows_to_csv(new_path, new_rows_for_csv, preferred_columns)
+    files_generated[new_path] = {
+        'records_written': len(new_rows_for_csv),
+        'records_filtered': 0,
+        'data_type': 'full_new'
+    }
+
+    new_formatted_path = os.path.join(output_dir, 'new_enrichments_formatted.csv')
+    removed_new_formatted = write_formatted_csv(
+        new_formatted_path,
+        formatted_new_records,
+        'zaba' if use_zaba else 'pdl'
+    )
+    files_generated[new_formatted_path] = {
+        'records_written': len(formatted_new_records) - removed_new_formatted,
+        'records_filtered': removed_new_formatted,
+        'data_type': 'new_formatted'
+    }
+
+    new_existing_path = os.path.join(output_dir, 'new_and_existing_enrichments.csv')
+    _write_rows_to_csv(new_existing_path, new_and_existing_rows, preferred_columns)
+    files_generated[new_existing_path] = {
+        'records_written': len(new_and_existing_rows),
+        'records_filtered': 0,
+        'data_type': 'full_new_and_existing'
+    }
+
+    new_existing_formatted_path = os.path.join(output_dir, 'new_and_existing_enrichments_formatted.csv')
+    removed_new_existing_formatted = write_formatted_csv(
+        new_existing_formatted_path,
+        formatted_new_existing_records,
+        'zaba' if use_zaba else 'pdl'
+    )
+    files_generated[new_existing_formatted_path] = {
+        'records_written': len(formatted_new_existing_records) - removed_new_existing_formatted,
+        'records_filtered': removed_new_existing_formatted,
+        'data_type': 'formatted_new_and_existing'
+    }
+
+    current_path = os.path.join(output_dir, 'current_enrichments.csv')
+    _write_rows_to_csv(current_path, current_rows, preferred_columns)
+    files_generated[current_path] = {
+        'records_written': len(current_rows),
+        'records_filtered': 0,
+        'data_type': 'full_current'
+    }
+
+    current_formatted_path = os.path.join(output_dir, 'current_enrichments_formatted.csv')
+    removed_current_formatted = write_formatted_csv(
+        current_formatted_path,
+        formatted_current_records,
+        'zaba' if use_zaba else 'pdl'
+    )
+    files_generated[current_formatted_path] = {
+        'records_written': len(formatted_current_records) - removed_current_formatted,
+        'records_filtered': removed_current_formatted,
+        'data_type': 'current_formatted'
+    }
+
+    # Contact CSVs - limit to the current cycle records so they match the test subset
+    contact_current_path = os.path.join(output_dir, 'contact_current.csv')
+    removed_contact_current = write_contact_csv(contact_current_path, current_cycle_records, 'zaba' if use_zaba else 'pdl')
+    files_generated[contact_current_path] = {
+        'records_written': len(current_cycle_records) - removed_contact_current,
+        'records_filtered': removed_contact_current,
+        'data_type': 'contact_current'
+    }
+
+    contact_current_addresses_path = os.path.join(output_dir, 'contact_current_addresses.csv')
+    removed_contact_current_addresses = write_address_csv(contact_current_addresses_path, current_cycle_records, 'zaba' if use_zaba else 'pdl')
+    files_generated[contact_current_addresses_path] = {
+        'records_written': len(current_cycle_records) - removed_contact_current_addresses,
+        'records_filtered': removed_contact_current_addresses,
+        'data_type': 'contact_current_addresses'
+    }
+
+    contact_new_path = os.path.join(output_dir, 'contact_new.csv')
+    removed_contact_new = write_contact_csv(contact_new_path, new_items, 'zaba' if use_zaba else 'pdl')
+    files_generated[contact_new_path] = {
+        'records_written': len(new_items) - removed_contact_new,
+        'records_filtered': removed_contact_new,
+        'data_type': 'contact_new'
+    }
+
+    contact_new_addresses_path = os.path.join(output_dir, 'contact_new_addresses.csv')
+    removed_contact_new_addresses = write_address_csv(contact_new_addresses_path, new_items, 'zaba' if use_zaba else 'pdl')
+    files_generated[contact_new_addresses_path] = {
+        'records_written': len(new_items) - removed_contact_new_addresses,
+        'records_filtered': removed_contact_new_addresses,
+        'data_type': 'contact_new_addresses'
+    }
+
+    return {
+        'success': True,
+        'files_generated': files_generated,
+        'method': 'zabasearch' if use_zaba else 'peopledatalabs',
+        'test_mode': True
+    }
