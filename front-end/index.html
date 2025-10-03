@@ -1350,6 +1350,7 @@
         const isDevMode = pathLower === '/dev' || pathLower.startsWith('/dev/');
         let step1LastBatchLabel = '';
         let bulkMovedSelections = new Set();
+        let step0ManualError = false;
 
         async function parseJsonResponse(response) {
             const text = await response.text();
@@ -1502,10 +1503,14 @@
             
             // Update step statuses - don't override running states
             const step0Info = currentStatus.step0 || {};
-            const step0Error = Boolean(step0Info.lastRunStatus && step0Info.lastRunStatus.success === false && !step0Info.running);
-            const step0HasResults = step0Info.lastRunStatus
+            if (step0Info.lastRunStatus && step0Info.lastRunStatus.success === true) {
+                step0ManualError = false;
+            }
+            const step0DerivedError = Boolean(step0Info.lastRunStatus && step0Info.lastRunStatus.success === false && !step0Info.running);
+            const step0Error = step0ManualError || step0DerivedError;
+            const step0HasResults = !step0Error && (step0Info.lastRunStatus
                 ? (step0Info.lastRunStatus.success === true && step0Info.downloadedPatents?.exists)
-                : Boolean(step0Info.downloadedPatents?.exists);
+                : Boolean(step0Info.downloadedPatents?.exists));
             updateStepStatus('step0', step0HasResults, step0Info.running, step0Error);
             updateStepStatus('step1', currentStatus.step1?.integrationResults?.exists, currentStatus.step1?.running);
             const step2Info = currentStatus.step2 || {};
@@ -1642,6 +1647,11 @@
                         const alreadyShown0 = outEl0 && !outEl0.classList.contains('hidden') && (outEl0.textContent || '').trim().length > 0;
                         let showingOutput = alreadyShown0;
 
+                        if (step0ManualError) {
+                            updateStepStatus('step0', false, false, true);
+                            showingOutput = true;
+                        }
+
                         if (step0Info.lastRunStatus) {
                             if (step0Error) {
                                 const parts = [
@@ -1664,7 +1674,7 @@
                             }
                         }
 
-                        if (!showingOutput) {
+                        if (!showingOutput && !step0ManualError) {
                             fetch('/api/step0/latest-output').then(r => r.json()).then(data => {
                                 if (data && data.success && data.output) {
                                     showOutput('step0', data.output);
@@ -1748,6 +1758,9 @@
             const devBtn = document.getElementById(stepId + 'DevBtn');
             const progressDiv = document.getElementById(stepId + 'Progress');
             
+            if (stepId === 'step0') {
+                step0ManualError = false;
+            }
             step.classList.add('running');
             step.classList.remove('completed');
             step.classList.remove('error');
@@ -2108,8 +2121,10 @@
                     updateStatus();
                 } else {
                     setStepCompleted('step0', false);
+                    step0ManualError = true;
+                    updateStepStatus('step0', false, false, true);
                     const parts = [
-                        `Error: ${(result && result.error) || (parseError ? `Unexpected response (status ${response.status})` : response.statusText) || 'Step 0 failed'}`
+                        `Error: ${(response.status === 413 ? 'Upload rejected: request entity too large (413).' : (result && result.error) || (parseError ? `Unexpected response (status ${response.status})` : response.statusText) || 'Step 0 failed')}`
                     ];
                     if (result && result.stderr) parts.push(result.stderr);
                     if (result && result.stdout) parts.push(result.stdout);
@@ -2125,6 +2140,8 @@
                 }
             } catch (error) {
                 setStepCompleted('step0', false);
+                step0ManualError = true;
+                updateStepStatus('step0', false, false, true);
                 await showLatestOutput('step0', `Network error: ${error.message}`);
                 console.error('Step 0 error:', error);
             } finally {
@@ -2189,8 +2206,10 @@
                     toggleDownloadConfig();
                 } else {
                     setStepCompleted('step0', false);
+                    step0ManualError = true;
+                    updateStepStatus('step0', false, false, true);
                     const parts = [
-                        `Error: ${(result && result.error) || (parseError ? `Unexpected response (status ${response.status})` : response.statusText) || 'Step 0 failed'}`
+                        `Error: ${(response.status === 413 ? 'Upload rejected: request entity too large (413).' : (result && result.error) || (parseError ? `Unexpected response (status ${response.status})` : response.statusText) || 'Step 0 failed')}`
                     ];
                     if (result && result.stderr) parts.push(result.stderr);
                     if (result && result.stdout) parts.push(result.stdout);
@@ -2206,6 +2225,8 @@
                 }
             } catch (error) {
                 setStepCompleted('step0', false);
+                step0ManualError = true;
+                updateStepStatus('step0', false, false, true);
                 await showLatestOutput('step0', `Network error: ${error.message}`);
                 console.error('Step 0 configuration error:', error);
             }
@@ -3214,6 +3235,8 @@
                     const { data: result, rawText, parseError } = await parseJsonResponse(resp);
                     if (!resp.ok || !result || result.success !== true) {
                         setStepCompleted('step0', false);
+                        step0ManualError = true;
+                        updateStepStatus('step0', false, false, true);
                         const fallback = result && result.error ? result.error : (parseError ? `Unexpected response (status ${resp.status})` : resp.statusText);
                         let snippet = '';
                         if (parseError && rawText) {
@@ -3225,16 +3248,20 @@
                         } else if (result && result.stderr) {
                             snippet = `\n\n${result.stderr}`;
                         }
-                        const msg = `Error processing file: ${fallback || 'Unknown error'}` + snippet;
+                        const tooLarge = resp.status === 413 ? 'Upload rejected: request entity too large (413).' : null;
+                        const msg = `Error processing file: ${tooLarge || fallback || 'Unknown error'}` + snippet;
                         showOutput('step0', msg);
                         return;
                     }
                     setStepCompleted('step0', true);
+                    step0ManualError = false;
                     showOutput('step0', result.output || result.message || 'File uploaded successfully');
                     if (result.files) showFileInfo('step0', result.files);
                     updateStatus();
                 } catch (err) {
                     setStepCompleted('step0', false);
+                    step0ManualError = true;
+                    updateStepStatus('step0', false, false, true);
                     showOutput('step0', `Error: ${err.message}`);
                 }
             };
@@ -3269,6 +3296,8 @@
                     const { data: result, rawText, parseError } = await parseJsonResponse(resp);
                     if (!resp.ok || !result || result.success !== true) {
                         setStepCompleted('step0', false);
+                        step0ManualError = true;
+                        updateStepStatus('step0', false, false, true);
                         const fallback = result && result.error ? result.error : (parseError ? `Unexpected response (status ${resp.status})` : resp.statusText);
                         let snippet = '';
                         if (parseError && rawText) {
@@ -3280,16 +3309,20 @@
                         } else if (result && result.stderr) {
                             snippet = `\n\n${result.stderr}`;
                         }
-                        const msg = `Error processing XML: ${fallback || 'Unknown error'}` + snippet;
+                        const tooLarge = resp.status === 413 ? 'Upload rejected: request entity too large (413).' : null;
+                        const msg = `Error processing XML: ${tooLarge || fallback || 'Unknown error'}` + snippet;
                         showOutput('step0', msg);
                         return;
                     }
                     setStepCompleted('step0', true);
+                    step0ManualError = false;
                     showOutput('step0', result.output || result.message || 'XML uploaded successfully');
                     if (result.files) showFileInfo('step0', result.files);
                     updateStatus();
                 } catch (err) {
                     setStepCompleted('step0', false);
+                    step0ManualError = true;
+                    updateStepStatus('step0', false, false, true);
                     showOutput('step0', `Error: ${err.message}`);
                 }
             };

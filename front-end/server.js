@@ -437,6 +437,14 @@ app.post('/api/step0', async (req, res) => {
             maxResults = 1000
         } = req.body;
         
+        console.log('[Step0] Download request received', {
+            mode,
+            startDate,
+            endDate,
+            daysBack,
+            maxResults
+        });
+
         // Prepare arguments for Python script
         const args = [];
         if (mode === 'manual' && startDate && endDate) {
@@ -449,7 +457,7 @@ app.post('/api/step0', async (req, res) => {
         // Start the process asynchronously
         runPythonScriptAsync('front-end/run_step0_wrapper.py', args, stepId)
             .then((result) => {
-                console.log('Step 0 completed successfully');
+                console.log('[Step0] Download process completed successfully');
                 const completedAt = new Date();
                 // Store completion result for status endpoint
                 try {
@@ -472,7 +480,7 @@ app.post('/api/step0', async (req, res) => {
                 });
             })
             .catch((error) => {
-                console.error('Step 0 failed:', error);
+                console.error('[Step0] Download process failed:', error);
                 
                 // Store error result for status endpoint
                 try {
@@ -510,7 +518,7 @@ app.post('/api/step0', async (req, res) => {
         });
         
     } catch (error) {
-        console.error('Step 0 startup error:', error);
+        console.error('[Step0] Startup error:', error);
         res.status(500).json({
             success: false,
             error: error.message
@@ -540,6 +548,7 @@ app.post('/api/step0/extract', async (req, res) => {
         } catch (e) { console.warn('Could not reset enrichment output files:', e.message); }
 
         const { daysBack = 7, maxResults = 1000 } = req.body || {};
+        console.log('[Step0] Alternate extractor request', { daysBack, maxResults });
         const args = ['--days-back', String(daysBack), '--max-results', String(maxResults)];
         runPythonScriptAsync('front-end/run_step0_extract_wrapper.py', args, stepId)
             .then((result) => {
@@ -548,6 +557,7 @@ app.post('/api/step0/extract', async (req, res) => {
                 try {
                     fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), (result && result.output) ? String(result.output) : '');
                 } catch (e) { /* ignore */ }
+                console.log('[Step0] Alternate extractor completed successfully');
                 writeStepStatus(stepId, {
                     success: true,
                     completedAt: completedAt.toISOString(),
@@ -564,6 +574,7 @@ app.post('/api/step0/extract', async (req, res) => {
                 } catch (e) { /* ignore */ }
                 const completedAt = new Date();
                 const files = getStep0Files();
+                console.error('[Step0] Alternate extractor failed:', error);
                 writeStepStatus(stepId, {
                     success: false,
                     completedAt: completedAt.toISOString(),
@@ -605,6 +616,7 @@ app.post('/api/step0/upload-csv', express.text({ type: ['text/csv', 'text/plain'
             console.warn('Could not reset enrichment output files on upload:', e.message);
         }
 
+        console.log('[Step0] CSV upload body length (chars):', req.body.length);
         // Hand off parsing to Python for robust CSV handling
         const pythonExec = resolvePython();
         const scriptPath = path.join(__dirname, '..', 'scripts', 'process_uploaded_csv.py');
@@ -612,6 +624,7 @@ app.post('/api/step0/upload-csv', express.text({ type: ['text/csv', 'text/plain'
         const proc = spawn(pythonExec, [scriptPath], { env, cwd: path.join(__dirname, '..') });
         let stdout = '';
         let stderr = '';
+        console.log('[Step0] CSV parser process spawned');
         proc.stdout.on('data', d => { stdout += d.toString(); });
         proc.stderr.on('data', d => { const s = d.toString(); stderr += s; console.error(s); });
         proc.on('close', (code) => {
@@ -620,6 +633,7 @@ app.post('/api/step0/upload-csv', express.text({ type: ['text/csv', 'text/plain'
                 try {
                     fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), stdout || '');
                 } catch (e) { /* ignore */ }
+                console.log('[Step0] CSV upload processed successfully');
                 const completedAt = new Date();
                 writeStepStatus('step0', {
                     success: true,
@@ -631,6 +645,7 @@ app.post('/api/step0/upload-csv', express.text({ type: ['text/csv', 'text/plain'
                 });
                 return res.json({ success: true, message: 'CSV uploaded and processed', files, output: stdout });
             } else {
+                console.error('[Step0] CSV parser exited with code', code);
                 try {
                     const msg = [
                         `Parser exited with code ${code}`,
@@ -661,7 +676,7 @@ app.post('/api/step0/upload-csv', express.text({ type: ['text/csv', 'text/plain'
         }
         proc.stdin.end();
     } catch (error) {
-        console.error('Upload CSV failed:', error);
+        console.error('[Step0] Upload CSV failed:', error);
         try {
             fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), `CSV upload failed: ${error.message}`);
         } catch (e) { /* ignore */ }
@@ -698,18 +713,21 @@ app.post('/api/step0/upload-xlsx', express.raw({ type: ['application/vnd.openxml
             console.warn('Could not reset enrichment output files on XLSX upload:', e.message);
         }
 
+        console.log('[Step0] XLSX upload body size (bytes):', buf.length);
         const pythonExec = resolvePython();
         const scriptPath = path.join(__dirname, '..', 'scripts', 'process_uploaded_xlsx.py');
         const env = { ...process.env, PYTHONPATH: path.join(__dirname, '..') };
         const proc = spawn(pythonExec, [scriptPath], { env, cwd: path.join(__dirname, '..') });
         let stdout = '';
         let stderr = '';
+        console.log('[Step0] XLSX parser process spawned');
         proc.stdout.on('data', d => { stdout += d.toString(); });
         proc.stderr.on('data', d => { const s = d.toString(); stderr += s; console.error(s); });
         proc.on('close', (code) => {
             if (code === 0) {
                 const files = getStep0Files();
                 try { fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), stdout || ''); } catch (e) { /* ignore */ }
+                console.log('[Step0] XLSX upload processed successfully');
                 const completedAt = new Date();
                 writeStepStatus('step0', {
                     success: true,
@@ -721,6 +739,7 @@ app.post('/api/step0/upload-xlsx', express.raw({ type: ['application/vnd.openxml
                 });
                 return res.json({ success: true, message: 'XLSX uploaded and processed', files, output: stdout });
             } else {
+                console.error('[Step0] XLSX parser exited with code', code);
                 try {
                     const msg = [
                         `Parser exited with code ${code}`,
@@ -744,7 +763,7 @@ app.post('/api/step0/upload-xlsx', express.raw({ type: ['application/vnd.openxml
         proc.stdin.write(buf);
         proc.stdin.end();
     } catch (error) {
-        console.error('Upload XLSX failed:', error);
+        console.error('[Step0] Upload XLSX failed:', error);
         try {
             fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), `XLSX upload failed: ${error.message}`);
         } catch (e) { /* ignore */ }
@@ -780,17 +799,20 @@ app.post('/api/step0/upload-xml', express.raw({ type: ['application/xml', 'text/
             if (fs.existsSync(csvPath)) fs.unlinkSync(csvPath);
         } catch (e) { console.warn('Could not reset enrichment output files on XML upload:', e.message); }
 
+        console.log('[Step0] XML upload body size (bytes):', buf.length);
         const pythonExec = resolvePython();
         const scriptPath = path.join(__dirname, '..', 'scripts', 'process_uploaded_xml.py');
         const env = { ...process.env, PYTHONPATH: path.join(__dirname, '..') };
         const proc = spawn(pythonExec, [scriptPath], { env, cwd: path.join(__dirname, '..') });
         let stdout = '', stderr = '';
+        console.log('[Step0] XML parser process spawned');
         proc.stdout.on('data', d => { stdout += d.toString(); });
         proc.stderr.on('data', d => { const s = d.toString(); stderr += s; console.error(s); });
         proc.on('close', (code) => {
             if (code === 0) {
                 const files = getStep0Files();
                 try { fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), stdout || ''); } catch (e) { /* ignore */ }
+                console.log('[Step0] XML upload processed successfully');
                 const completedAt = new Date();
                 writeStepStatus('step0', {
                     success: true,
@@ -811,6 +833,7 @@ app.post('/api/step0/upload-xml', express.raw({ type: ['application/xml', 'text/
                 fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), msg);
             } catch (e) { /* ignore */ }
             const completedAt = new Date();
+            console.error('[Step0] XML parser exited with code', code);
             writeStepStatus('step0', {
                 success: false,
                 completedAt: completedAt.toISOString(),
@@ -824,7 +847,7 @@ app.post('/api/step0/upload-xml', express.raw({ type: ['application/xml', 'text/
         proc.stdin.write(buf);
         proc.stdin.end();
     } catch (error) {
-        console.error('Upload XML failed:', error);
+        console.error('[Step0] Upload XML failed:', error);
         try {
             fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), `XML upload failed: ${error.message}`);
         } catch (e) { /* ignore */ }
@@ -843,6 +866,13 @@ app.post('/api/step0/upload-xml', express.raw({ type: ['application/xml', 'text/
 // Keep at the end of routes
 app.use((err, req, res, next) => {
     console.error('Express error handler:', err);
+    if (err && err.type === 'entity.too.large') {
+        console.error('[Step0] Request entity too large', {
+            path: req.path,
+            contentLength: req.headers['content-length'] || 'unknown'
+        });
+        return res.status(413).json({ success: false, error: 'Payload too large for current server configuration.' });
+    }
     if (res.headersSent) return next(err);
     res.status(500).json({ success: false, error: err.message, stack: err.stack });
 });

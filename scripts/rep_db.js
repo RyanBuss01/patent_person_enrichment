@@ -18,7 +18,7 @@ const CLOUD_CONFIG = {
   ssl: { rejectUnauthorized: false } // Azure MySQL requires SSL
 };
 
-const BATCH_SIZE = 1000; // Number of rows to insert per batch
+const BATCH_SIZE = 50000; // Number of rows to insert per batch
 const EXCLUDED_TABLES = ['existing_people_new', 'existing_people_old'];
 
 class DatabaseReplicator {
