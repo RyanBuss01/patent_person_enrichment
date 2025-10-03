@@ -13,6 +13,15 @@ const EXPORT_DEBUG = String(process.env.EXPORT_DEBUG || 'false').toLowerCase() =
 // Global state for tracking running processes
 const runningProcesses = new Map();
 
+const STEP0_CHUNK_DIR = path.join(__dirname, '..', 'uploads', 'step0_chunks');
+try {
+    if (!fs.existsSync(STEP0_CHUNK_DIR)) {
+        fs.mkdirSync(STEP0_CHUNK_DIR, { recursive: true });
+    }
+} catch (err) {
+    console.warn('Could not create chunk directory:', err.message);
+}
+
 // Middleware
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
@@ -342,6 +351,105 @@ function getFileStats(filePath) {
     } catch (error) {
         return { exists: false, error: error.message };
     }
+}
+
+function totalBytes(buffer) {
+    if (Buffer.isBuffer(buffer)) {
+        return buffer.length;
+    }
+    if (typeof buffer === 'string') {
+        return Buffer.byteLength(buffer, 'utf8');
+    }
+    return 0;
+}
+
+async function processStep0XmlBuffer(buffer, { modeLabel = 'upload-xml', cycleReason = 'step0_xml_upload' } = {}) {
+    const stepId = 'step0';
+    return new Promise((resolve, reject) => {
+        try {
+            markCycleReset(cycleReason);
+            try {
+                const outDir = path.join(__dirname, '..', 'output');
+                if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+                fs.writeFileSync(path.join(outDir, 'enriched_patents.json'), '[]');
+                const resetMeta = { reset: true, reset_by: modeLabel, timestamp: new Date().toISOString() };
+                fs.writeFileSync(path.join(outDir, 'enrichment_results.json'), JSON.stringify(resetMeta, null, 2));
+                const csvPath = path.join(outDir, 'enriched_patents.csv');
+                if (fs.existsSync(csvPath)) fs.unlinkSync(csvPath);
+            } catch (e) {
+                console.warn('Could not reset enrichment output files on XML processing:', e.message);
+            }
+
+            const pythonExec = resolvePython();
+            const scriptPath = path.join(__dirname, '..', 'scripts', 'process_uploaded_xml.py');
+            const env = { ...process.env, PYTHONPATH: path.join(__dirname, '..') };
+            const proc = spawn(pythonExec, [scriptPath], { env, cwd: path.join(__dirname, '..') });
+            let stdout = '';
+            let stderr = '';
+
+            console.log(`[Step0] XML processor started (${modeLabel})`);
+
+            proc.stdout.on('data', d => {
+                const out = d.toString();
+                stdout += out;
+                console.log(out);
+            });
+            proc.stderr.on('data', d => {
+                const err = d.toString();
+                stderr += err;
+                console.error(err);
+            });
+            proc.on('close', (code) => {
+                if (code === 0) {
+                    const files = getStep0Files();
+                    try {
+                        fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), stdout || '');
+                    } catch (e) { /* ignore */ }
+                    const completedAt = new Date();
+                    writeStepStatus(stepId, {
+                        success: true,
+                        completedAt: completedAt.toISOString(),
+                        files,
+                        mode: modeLabel,
+                        outputSummary: truncateText(stdout || '', 4000),
+                        stdoutSnippet: truncateText(stdout || '', 2000)
+                    });
+                    console.log(`[Step0] XML processing complete (${modeLabel})`);
+                    resolve({
+                        success: true,
+                        message: 'XML uploaded and processed',
+                        files,
+                        output: stdout
+                    });
+                } else {
+                    const msgParts = [
+                        `Parser exited with code ${code}`,
+                        stderr,
+                        stdout
+                    ].filter(Boolean);
+                    const combined = msgParts.join('\n\n');
+                    try {
+                        fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), combined);
+                    } catch (e) { /* ignore */ }
+                    const completedAt = new Date();
+                    writeStepStatus(stepId, {
+                        success: false,
+                        completedAt: completedAt.toISOString(),
+                        error: `Parser exited with code ${code}`,
+                        stderr: truncateText(stderr || '', 4000),
+                        stdoutSnippet: truncateText(stdout || '', 2000),
+                        mode: modeLabel
+                    });
+                    console.error(`[Step0] XML processing failed (${modeLabel}) with code ${code}`);
+                    reject({ success: false, error: `Parser exited with code ${code}`, stderr, stdout });
+                }
+            });
+
+            proc.stdin.end(buffer);
+        } catch (err) {
+            reject(err);
+        }
+    });
 }
 
 function formatZabaProgress(progress) {
@@ -780,74 +888,20 @@ app.post('/api/step0/upload-xlsx', express.raw({ type: ['application/vnd.openxml
 
 // Step 0: Upload XML (alternate direct ingest)
 app.post('/api/step0/upload-xml', express.raw({ type: ['application/xml', 'text/xml', 'application/octet-stream'], limit: '500mb' }), async (req, res) => {
-    const stepId = 'step0_upload_xml';
     try {
         console.log('XML upload hit. content-type=', req.headers['content-type'], 'length=', req.headers['content-length']);
         const buf = req.body;
         if (!buf || !buf.length) {
             return res.status(400).json({ success: false, error: 'No XML data received' });
         }
-        // Mark start of a new cycle to visually reset downstream steps (1 & 2)
-        markCycleReset('step0_xml_upload');
-        try {
-            const outDir = path.join(__dirname, '..', 'output');
-            if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
-            fs.writeFileSync(path.join(outDir, 'enriched_patents.json'), '[]');
-            const resetMeta = { reset: true, reset_by: 'xml_upload', timestamp: new Date().toISOString() };
-            fs.writeFileSync(path.join(outDir, 'enrichment_results.json'), JSON.stringify(resetMeta, null, 2));
-            const csvPath = path.join(outDir, 'enriched_patents.csv');
-            if (fs.existsSync(csvPath)) fs.unlinkSync(csvPath);
-        } catch (e) { console.warn('Could not reset enrichment output files on XML upload:', e.message); }
-
-        console.log('[Step0] XML upload body size (bytes):', buf.length);
-        const pythonExec = resolvePython();
-        const scriptPath = path.join(__dirname, '..', 'scripts', 'process_uploaded_xml.py');
-        const env = { ...process.env, PYTHONPATH: path.join(__dirname, '..') };
-        const proc = spawn(pythonExec, [scriptPath], { env, cwd: path.join(__dirname, '..') });
-        let stdout = '', stderr = '';
-        console.log('[Step0] XML parser process spawned');
-        proc.stdout.on('data', d => { stdout += d.toString(); });
-        proc.stderr.on('data', d => { const s = d.toString(); stderr += s; console.error(s); });
-        proc.on('close', (code) => {
-            if (code === 0) {
-                const files = getStep0Files();
-                try { fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), stdout || ''); } catch (e) { /* ignore */ }
-                console.log('[Step0] XML upload processed successfully');
-                const completedAt = new Date();
-                writeStepStatus('step0', {
-                    success: true,
-                    completedAt: completedAt.toISOString(),
-                    files,
-                    mode: 'upload-xml',
-                    outputSummary: truncateText(stdout || '', 4000),
-                    stdoutSnippet: truncateText(stdout || '', 2000)
-                });
-                return res.json({ success: true, message: 'XML uploaded and processed', files, output: stdout });
-            }
-            try {
-                const msg = [
-                    `Parser exited with code ${code}`,
-                    stderr,
-                    stdout
-                ].filter(Boolean).join('\n\n');
-                fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), msg);
-            } catch (e) { /* ignore */ }
-            const completedAt = new Date();
-            console.error('[Step0] XML parser exited with code', code);
-            writeStepStatus('step0', {
-                success: false,
-                completedAt: completedAt.toISOString(),
-                error: `Parser exited with code ${code}`,
-                stderr: truncateText(stderr || '', 4000),
-                stdoutSnippet: truncateText(stdout || '', 2000),
-                mode: 'upload-xml'
-            });
-            return res.status(500).json({ success: false, error: `Parser exited with code ${code}`, stderr, stdout });
-        });
-        proc.stdin.write(buf);
-        proc.stdin.end();
+        console.log('[Step0] XML upload body size (bytes):', totalBytes(buf));
+        const result = await processStep0XmlBuffer(buf, { modeLabel: 'upload-xml', cycleReason: 'step0_xml_upload' });
+        return res.json(result);
     } catch (error) {
         console.error('[Step0] Upload XML failed:', error);
+        if (error && error.success === false) {
+            return res.status(500).json(error);
+        }
         try {
             fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), `XML upload failed: ${error.message}`);
         } catch (e) { /* ignore */ }
@@ -858,6 +912,79 @@ app.post('/api/step0/upload-xml', express.raw({ type: ['application/xml', 'text/
             error: error.message,
             mode: 'upload-xml'
         });
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/api/step0/upload-xml-chunk', express.raw({ type: ['application/octet-stream', 'application/xml', 'text/plain'], limit: '8mb' }), async (req, res) => {
+    try {
+        const uploadId = (req.headers['x-upload-id'] || '').toString().trim();
+        const chunkIndex = Number.parseInt(req.headers['x-chunk-index'], 10);
+        const chunkCount = Number.parseInt(req.headers['x-chunk-count'], 10);
+        const originalName = (req.headers['x-original-filename'] || 'unknown.xml').toString();
+
+        if (!uploadId) {
+            return res.status(400).json({ success: false, error: 'Missing upload identifier' });
+        }
+        if (!Number.isFinite(chunkIndex) || chunkIndex < 0) {
+            return res.status(400).json({ success: false, error: 'Invalid chunk index' });
+        }
+        if (!Number.isFinite(chunkCount) || chunkCount <= 0) {
+            return res.status(400).json({ success: false, error: 'Invalid chunk count' });
+        }
+
+        const chunkBuffer = req.body;
+        if (!chunkBuffer || !chunkBuffer.length) {
+            return res.status(400).json({ success: false, error: 'Empty chunk received' });
+        }
+
+        const tempPath = path.join(STEP0_CHUNK_DIR, `${uploadId}.xml.part`);
+
+        if (chunkIndex === 0 && fs.existsSync(tempPath)) {
+            fs.unlinkSync(tempPath);
+        }
+
+        fs.appendFileSync(tempPath, chunkBuffer);
+        console.log(`[Step0] Received XML chunk ${chunkIndex + 1}/${chunkCount} for ${uploadId} (${totalBytes(chunkBuffer)} bytes, file ${originalName})`);
+
+        const progressPercent = Math.min(95, Math.round(((chunkIndex + 1) / chunkCount) * 100));
+
+        if (chunkIndex + 1 < chunkCount) {
+            return res.json({ success: true, chunkReceived: true, index: chunkIndex, progress: progressPercent });
+        }
+
+        let result;
+        try {
+            const fullBuffer = fs.readFileSync(tempPath);
+            console.log(`[Step0] Final chunk received for ${uploadId}, total size ${totalBytes(fullBuffer)} bytes. Processing...`);
+            result = await processStep0XmlBuffer(fullBuffer, { modeLabel: 'upload-xml-chunked', cycleReason: 'step0_xml_upload_chunked' });
+        } finally {
+            try {
+                if (fs.existsSync(tempPath)) {
+                    fs.unlinkSync(tempPath);
+                }
+            } catch (cleanupErr) {
+                console.warn(`[Step0] Could not remove temp chunk file ${tempPath}:`, cleanupErr.message);
+            }
+        }
+
+        return res.json(result);
+    } catch (error) {
+        console.error('[Step0] Chunked XML upload failed:', error);
+        try {
+            const uploadId = (req.headers['x-upload-id'] || '').toString().trim();
+            if (uploadId) {
+                const tempPath = path.join(STEP0_CHUNK_DIR, `${uploadId}.xml.part`);
+                if (fs.existsSync(tempPath)) {
+                    fs.unlinkSync(tempPath);
+                }
+            }
+        } catch (cleanupErr) {
+            console.warn('[Step0] Failed to clean up chunk temp file:', cleanupErr.message);
+        }
+        if (error && error.success === false) {
+            return res.status(500).json(error);
+        }
         res.status(500).json({ success: false, error: error.message });
     }
 });

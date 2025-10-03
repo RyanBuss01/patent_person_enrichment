@@ -1351,6 +1351,8 @@
         let step1LastBatchLabel = '';
         let bulkMovedSelections = new Set();
         let step0ManualError = false;
+        const STEP0_XML_BATCH_THRESHOLD = 20 * 1024 * 1024; // 20MB
+        const STEP0_XML_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB chunks
 
         async function parseJsonResponse(response) {
             const text = await response.text();
@@ -3268,6 +3270,83 @@
             inp.click();
         }
 
+        async function uploadXmlInChunks(file) {
+            const totalChunks = Math.ceil(file.size / STEP0_XML_CHUNK_SIZE);
+            const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+            const progressMsg = document.getElementById('step0ProgressMessage');
+            const progressBar = document.getElementById('step0ProgressBar');
+
+            for (let index = 0; index < totalChunks; index++) {
+                const start = index * STEP0_XML_CHUNK_SIZE;
+                const end = Math.min((index + 1) * STEP0_XML_CHUNK_SIZE, file.size);
+                const chunk = file.slice(start, end);
+
+                if (progressMsg) {
+                    const percent = Math.min(95, Math.round(((index + 1) / totalChunks) * 100));
+                    const label = index + 1 === totalChunks
+                        ? `Uploading final chunk ${index + 1} of ${totalChunks} (${percent}%)`
+                        : `Uploading chunk ${index + 1} of ${totalChunks} (${percent}%)`;
+                    progressMsg.textContent = label;
+                }
+                if (progressBar) {
+                    const percent = Math.min(95, ((index + 1) / totalChunks) * 100);
+                    progressBar.style.width = `${percent}%`;
+                }
+
+                const resp = await fetch('/api/step0/upload-xml-chunk', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/octet-stream',
+                        'X-Upload-ID': uploadId,
+                        'X-Chunk-Index': index,
+                        'X-Chunk-Count': totalChunks,
+                        'X-Original-Filename': file.name || 'upload.xml'
+                    },
+                    body: chunk
+                });
+
+                const { data: result, rawText, parseError } = await parseJsonResponse(resp);
+
+                if (!resp.ok || !result || result.success !== true) {
+                    setStepCompleted('step0', false);
+                    step0ManualError = true;
+                    updateStepStatus('step0', false, false, true);
+                    const fallback = result && result.error ? result.error : (parseError ? `Unexpected response (status ${resp.status})` : resp.statusText);
+                    let snippet = '';
+                    if (parseError && rawText) {
+                        const trimmed = rawText.trim();
+                        if (trimmed) {
+                            const short = trimmed.length > 500 ? `${trimmed.slice(0, 500)}…` : trimmed;
+                            snippet = `\n\nResponse body:\n${short}`;
+                        }
+                    } else if (result && result.stderr) {
+                        snippet = `\n\n${result.stderr}`;
+                    }
+                    const msg = `Error uploading chunk ${index + 1}/${totalChunks}: ${fallback || 'Unknown error'}` + snippet;
+                    showOutput('step0', msg);
+                    throw new Error('Chunk upload failed');
+                }
+
+                if (result.chunkReceived) {
+                    continue;
+                }
+
+                if (progressMsg) {
+                    progressMsg.textContent = 'Processing uploaded XML on server...';
+                }
+                if (progressBar) {
+                    progressBar.style.width = '100%';
+                }
+
+                setStepCompleted('step0', true);
+                step0ManualError = false;
+                showOutput('step0', result.output || result.message || 'XML uploaded successfully');
+                if (result.files) showFileInfo('step0', result.files);
+                updateStatus();
+                return;
+            }
+        }
+
         // XML Upload for Step 0
         function triggerXmlUpload() {
             const inp = document.getElementById('step0XmlInput');
@@ -3287,6 +3366,11 @@
                         const o2 = document.getElementById('step2Output'); if (o2) { o2.textContent = ''; o2.classList.add('hidden'); }
                         const f2 = document.getElementById('step2Files'); if (f2) { f2.innerHTML = ''; f2.classList.add('hidden'); }
                     } catch (_) { /* ignore */ }
+
+                    if (file.size > STEP0_XML_BATCH_THRESHOLD) {
+                        await uploadXmlInChunks(file);
+                        return;
+                    }
                     const buf = await file.arrayBuffer();
                     const resp = await fetch('/api/step0/upload-xml', {
                         method: 'POST',
@@ -3320,10 +3404,13 @@
                     if (result.files) showFileInfo('step0', result.files);
                     updateStatus();
                 } catch (err) {
+                    const alreadyHandled = step0ManualError;
                     setStepCompleted('step0', false);
-                    step0ManualError = true;
                     updateStepStatus('step0', false, false, true);
-                    showOutput('step0', `Error: ${err.message}`);
+                    if (!alreadyHandled) {
+                        step0ManualError = true;
+                        showOutput('step0', `Error: ${err.message}`);
+                    }
                 }
             };
             inp.click();

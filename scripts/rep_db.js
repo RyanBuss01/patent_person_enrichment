@@ -18,8 +18,10 @@ const CLOUD_CONFIG = {
   ssl: { rejectUnauthorized: false } // Azure MySQL requires SSL
 };
 
-const BATCH_SIZE = 50000; // Number of rows to insert per batch
+const BATCH_SIZE = 5000; // Number of rows to insert per batch
+const QUICK_TABLES_BATCH_SIZE = 1000; // Larger batch size for specific tables
 const EXCLUDED_TABLES = ['existing_people_new', 'existing_people_old'];
+const QUICK_TABLES = ['existing_people']; // Tables that use larger batch size
 
 class DatabaseReplicator {
   constructor() {
@@ -116,13 +118,17 @@ class DatabaseReplicator {
       return;
     }
 
+    // Determine batch size based on table name - QUICK_TABLES use larger batches
+    const batchSize = QUICK_TABLES.includes(tableName) ? QUICK_TABLES_BATCH_SIZE : BATCH_SIZE;
+    console.log(`  Using batch size: ${batchSize.toLocaleString()} rows per batch`);
+
     let offset = 0;
     let copiedRows = 0;
 
     while (offset < totalRows) {
       // Fetch batch from local
       const [rows] = await this.localConn.query(
-        `SELECT * FROM \`${tableName}\` LIMIT ${BATCH_SIZE} OFFSET ${offset}`
+        `SELECT * FROM \`${tableName}\` LIMIT ${batchSize} OFFSET ${offset}`
       );
 
       if (rows.length === 0) break;
@@ -163,14 +169,14 @@ class DatabaseReplicator {
       await this.cloudConn.execute(insertQuery, allValues);
 
       copiedRows += rows.length;
-      offset += BATCH_SIZE;
+      offset += batchSize;
 
       // Progress indicator
       const progress = ((copiedRows / totalRows) * 100).toFixed(1);
-      process.stdout.write(`\r  Progress: ${copiedRows}/${totalRows} rows (${progress}%)`);
+      process.stdout.write(`\r  Progress: ${copiedRows.toLocaleString()}/${totalRows.toLocaleString()} rows (${progress}%)`);
     }
 
-    console.log(`\r  ✓ Copied ${copiedRows} rows successfully.`);
+    console.log(`\r  ✓ Copied ${copiedRows.toLocaleString()} rows successfully.`);
   }
 
   async replicateTable(tableName) {
