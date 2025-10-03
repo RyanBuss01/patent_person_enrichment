@@ -1351,8 +1351,8 @@
         let step1LastBatchLabel = '';
         let bulkMovedSelections = new Set();
         let step0ManualError = false;
-        const STEP0_XML_BATCH_THRESHOLD = 20 * 1024 * 1024; // 20MB
-        const STEP0_XML_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB chunks
+        const STEP0_XML_BATCH_THRESHOLD = 10 * 1024 * 1024; // 10MB
+        const STEP0_XML_CHUNK_SIZE = 1 * 1024 * 1024; // 1MB chunks
 
         async function parseJsonResponse(response) {
             const text = await response.text();
