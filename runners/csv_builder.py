@@ -67,6 +67,31 @@ def _person_signature_values(first_name: Any, last_name: Any, city: Any, state: 
     return '|'.join(parts)
 
 
+def _load_signatures_from_csv(path: str) -> List[str]:
+    """Read a CSV export from this module and return signatures for each data row."""
+    signatures: List[str] = []
+    if not os.path.exists(path):
+        return signatures
+
+    try:
+        with open(path, newline='') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                sig = _person_signature_values(
+                    row.get('first_name'),
+                    row.get('last_name'),
+                    row.get('city'),
+                    row.get('state'),
+                    row.get('patent_number') or row.get('patent_no')
+                )
+                if sig:
+                    signatures.append(sig)
+    except Exception as exc:
+        logger.debug(f"Failed to read signatures from {path}: {exc}")
+
+    return signatures
+
+
 def _person_signature_from_dict(data: Dict[str, Any]) -> str:
     if not isinstance(data, dict):
         return ''
@@ -1304,6 +1329,18 @@ def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
                 # Fallback to in-memory result when database read returns nothing (e.g., rebuild-only)
                 pdl_items = enrichment_result.get('enriched_data') or []
 
+            pdl_lookup: Dict[str, Dict[str, Any]] = {}
+            for item in pdl_items:
+                sig = _person_signature_values(
+                    item.get('first_name'),
+                    item.get('last_name'),
+                    item.get('city'),
+                    item.get('state'),
+                    item.get('patent_number')
+                )
+                if sig and sig not in pdl_lookup:
+                    pdl_lookup[sig] = item
+
             new_items = enrichment_result.get('newly_enriched_data') or []
 
             if pdl_items:
@@ -1356,6 +1393,72 @@ def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
                     print("  ℹ️ No newly enriched PeopleDataLabs records for this run")
 
         generate_full_csv_exports(config, db_manager, output_dir, files_generated)
+
+        if not use_zaba:
+            # Build formatted CSVs for PeopleDataLabs data post-export
+            new_csv_path = os.path.join(output_dir, 'new_enrichments.csv')
+            new_existing_csv_path = os.path.join(output_dir, 'new_and_existing_enrichments.csv')
+            current_csv_path = os.path.join(output_dir, 'current_enrichments.csv')
+
+            new_formatted_path = os.path.join(output_dir, 'new_enrichments_formatted.csv')
+            new_existing_formatted_path = os.path.join(output_dir, 'new_and_existing_enrichments_formatted.csv')
+            current_formatted_path = os.path.join(output_dir, 'current_enrichments_formatted.csv')
+
+            def _select_records(signatures: List[str]) -> List[Dict[str, Any]]:
+                records: List[Dict[str, Any]] = []
+                seen: Set[str] = set()
+                missing = 0
+                for sig in signatures:
+                    if sig in seen:
+                        continue
+                    item = pdl_lookup.get(sig)
+                    if item:
+                        records.append(item)
+                        seen.add(sig)
+                    else:
+                        missing += 1
+                if missing:
+                    logger.debug(
+                        f"Missing {missing} PDL formatted records out of {len(signatures)} entries for {signatures[:1]}..."
+                    )
+                return records
+
+            new_records = _select_records(_load_signatures_from_csv(new_csv_path))
+            removed_new_formatted = write_formatted_csv(new_formatted_path, new_records, 'pdl')
+            files_generated[new_formatted_path] = {
+                'records_written': len(new_records) - removed_new_formatted,
+                'records_filtered': removed_new_formatted,
+                'data_type': 'new_formatted'
+            }
+            print(f"  📄 {new_formatted_path} ({len(new_records) - removed_new_formatted:,} records)")
+
+            new_existing_records = _select_records(_load_signatures_from_csv(new_existing_csv_path))
+            removed_new_existing_formatted = write_formatted_csv(
+                new_existing_formatted_path,
+                new_existing_records,
+                'pdl'
+            )
+            files_generated[new_existing_formatted_path] = {
+                'records_written': len(new_existing_records) - removed_new_existing_formatted,
+                'records_filtered': removed_new_existing_formatted,
+                'data_type': 'formatted_new_and_existing'
+            }
+            print(
+                f"  📄 {new_existing_formatted_path} "
+                f"({len(new_existing_records) - removed_new_existing_formatted:,} records)"
+            )
+
+            current_records = _select_records(_load_signatures_from_csv(current_csv_path))
+            removed_current_formatted = write_formatted_csv(current_formatted_path, current_records, 'pdl')
+            files_generated[current_formatted_path] = {
+                'records_written': len(current_records) - removed_current_formatted,
+                'records_filtered': removed_current_formatted,
+                'data_type': 'current_formatted'
+            }
+            print(
+                f"  📄 {current_formatted_path} "
+                f"({len(current_records) - removed_current_formatted:,} records)"
+            )
 
         print(f"\n✅ CSV generation completed using {('ZabaSearch' if use_zaba else 'PeopleDataLabs')} data!")
         
