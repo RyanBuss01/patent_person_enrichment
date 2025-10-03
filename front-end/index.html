@@ -1351,6 +1351,18 @@
         let step1LastBatchLabel = '';
         let bulkMovedSelections = new Set();
 
+        async function parseJsonResponse(response) {
+            const text = await response.text();
+            if (!text) {
+                return { data: null, rawText: '', parseError: null };
+            }
+            try {
+                return { data: JSON.parse(text), rawText: text, parseError: null };
+            } catch (err) {
+                return { data: null, rawText: text, parseError: err };
+            }
+        }
+
         function openDocsOverlay() {
             const overlay = document.getElementById('docsOverlay');
             if (overlay) {
@@ -1489,7 +1501,12 @@
             `;
             
             // Update step statuses - don't override running states
-            updateStepStatus('step0', currentStatus.step0?.downloadedPatents?.exists, currentStatus.step0?.running);
+            const step0Info = currentStatus.step0 || {};
+            const step0Error = Boolean(step0Info.lastRunStatus && step0Info.lastRunStatus.success === false && !step0Info.running);
+            const step0HasResults = step0Info.lastRunStatus
+                ? (step0Info.lastRunStatus.success === true && step0Info.downloadedPatents?.exists)
+                : Boolean(step0Info.downloadedPatents?.exists);
+            updateStepStatus('step0', step0HasResults, step0Info.running, step0Error);
             updateStepStatus('step1', currentStatus.step1?.integrationResults?.exists, currentStatus.step1?.running);
             const step2Info = currentStatus.step2 || {};
             const step2Error = Boolean(step2Info.lastRunStatus && step2Info.lastRunStatus.success === false && !step2Info.running);
@@ -1623,7 +1640,31 @@
                     if (!pollingIntervals.has('step0')) {
                         const outEl0 = document.getElementById('step0Output');
                         const alreadyShown0 = outEl0 && !outEl0.classList.contains('hidden') && (outEl0.textContent || '').trim().length > 0;
-                        if (!alreadyShown0) {
+                        let showingOutput = alreadyShown0;
+
+                        if (step0Info.lastRunStatus) {
+                            if (step0Error) {
+                                const parts = [
+                                    step0Info.lastRunStatus.error,
+                                    step0Info.lastRunStatus.stderr,
+                                    step0Info.lastRunStatus.stdoutSnippet,
+                                    step0Info.lastRunStatus.outputSummary
+                                ].filter(part => typeof part === 'string' && part.trim().length > 0);
+                                if (parts.length) {
+                                    showOutput('step0', parts.join('\n\n'));
+                                    showingOutput = true;
+                                }
+                            } else if (!showingOutput && typeof step0Info.lastRunStatus.outputSummary === 'string' && step0Info.lastRunStatus.outputSummary.trim().length > 0) {
+                                showOutput('step0', step0Info.lastRunStatus.outputSummary);
+                                showingOutput = true;
+                            }
+
+                            if (step0Info.lastRunStatus.files) {
+                                showFileInfo('step0', step0Info.lastRunStatus.files);
+                            }
+                        }
+
+                        if (!showingOutput) {
                             fetch('/api/step0/latest-output').then(r => r.json()).then(data => {
                                 if (data && data.success && data.output) {
                                     showOutput('step0', data.output);
@@ -2055,21 +2096,30 @@
                     })
                 });
                 
-                const result = await response.json();
-                
-                if (result.success && (result.status === 'started' || result.processing === true)) {
+                const { data: result, rawText, parseError } = await parseJsonResponse(response);
+
+                if (response.ok && result && result.success && (result.status === 'started' || result.processing === true)) {
                     console.log('Step 0 started, beginning polling...');
                     startPolling('step0');
-                } else if (result.success) {
+                } else if (response.ok && result && result.success) {
                     setStepCompleted('step0', true);
                     showOutput('step0', result.output);
                     if (result.files) showFileInfo('step0', result.files);
                     updateStatus();
                 } else {
                     setStepCompleted('step0', false);
-                    const parts = [`Error: ${result.error || 'Step 0 failed'}`];
-                    if (result.stderr) parts.push(result.stderr);
-                    if (result.stdout) parts.push(result.stdout);
+                    const parts = [
+                        `Error: ${(result && result.error) || (parseError ? `Unexpected response (status ${response.status})` : response.statusText) || 'Step 0 failed'}`
+                    ];
+                    if (result && result.stderr) parts.push(result.stderr);
+                    if (result && result.stdout) parts.push(result.stdout);
+                    if (parseError && rawText) {
+                        const trimmed = rawText.trim();
+                        if (trimmed) {
+                            const short = trimmed.length > 500 ? `${trimmed.slice(0, 500)}…` : trimmed;
+                            parts.push(`Response body:\n${short}`);
+                        }
+                    }
                     const fallbackMsg = parts.filter(Boolean).join('\n\n');
                     await showLatestOutput('step0', fallbackMsg);
                 }
@@ -2125,13 +2175,13 @@
                     body: JSON.stringify(payload)
                 });
                 
-                const result = await response.json();
-                
-                if (result.success && (result.status === 'started' || result.processing === true)) {
+                const { data: result, rawText, parseError } = await parseJsonResponse(response);
+
+                if (response.ok && result && result.success && (result.status === 'started' || result.processing === true)) {
                     console.log('Step 0 configured download started, beginning polling...');
                     startPolling('step0');
                     toggleDownloadConfig(); // Hide config panel
-                } else if (result.success) {
+                } else if (response.ok && result && result.success) {
                     setStepCompleted('step0', true);
                     showOutput('step0', result.output);
                     if (result.files) showFileInfo('step0', result.files);
@@ -2139,9 +2189,18 @@
                     toggleDownloadConfig();
                 } else {
                     setStepCompleted('step0', false);
-                    const parts = [`Error: ${result.error || 'Step 0 failed'}`];
-                    if (result.stderr) parts.push(result.stderr);
-                    if (result.stdout) parts.push(result.stdout);
+                    const parts = [
+                        `Error: ${(result && result.error) || (parseError ? `Unexpected response (status ${response.status})` : response.statusText) || 'Step 0 failed'}`
+                    ];
+                    if (result && result.stderr) parts.push(result.stderr);
+                    if (result && result.stdout) parts.push(result.stdout);
+                    if (parseError && rawText) {
+                        const trimmed = rawText.trim();
+                        if (trimmed) {
+                            const short = trimmed.length > 500 ? `${trimmed.slice(0, 500)}…` : trimmed;
+                            parts.push(`Response body:\n${short}`);
+                        }
+                    }
                     const fallbackMsg = parts.filter(Boolean).join('\n\n');
                     await showLatestOutput('step0', fallbackMsg);
                 }
@@ -2922,10 +2981,32 @@
             
             Object.entries(files).forEach(([key, fileInfo]) => {
                 if (fileInfo.stats && fileInfo.stats.exists) {
+                    const parts = [];
+                    if (typeof fileInfo.count === 'number') {
+                        parts.push(`${fileInfo.count.toLocaleString()} records`);
+                    }
+                    if (typeof fileInfo.stats.sizeKB === 'number' && !Number.isNaN(fileInfo.stats.sizeKB)) {
+                        parts.push(`${fileInfo.stats.sizeKB} KB`);
+                    }
+                    if (typeof fileInfo.stage === 'string' && fileInfo.stage.trim().length > 0) {
+                        parts.push(fileInfo.stage.trim());
+                    }
+                    if (typeof fileInfo.details === 'string' && fileInfo.details.trim().length > 0) {
+                        parts.push(fileInfo.details.trim());
+                    }
+                    if (fileInfo.updatedAt) {
+                        try {
+                            const dt = new Date(fileInfo.updatedAt);
+                            if (!Number.isNaN(dt.getTime())) {
+                                parts.push(`updated ${dt.toLocaleString()}`);
+                            }
+                        } catch (_) { /* ignore */ }
+                    }
+                    const detail = parts.length ? parts.join(' • ') : `${fileInfo.stats.sizeKB || 0} KB`;
                     html += `
                         <div class="file-stat">
                             <span>${key}:</span>
-                            <span>${fileInfo.count || 'N/A'} records (${fileInfo.stats.sizeKB} KB)</span>
+                            <span>${detail}</span>
                         </div>
                     `;
                 }
@@ -3130,15 +3211,26 @@
                             body: text
                         });
                     }
-                    const result = await resp.json();
-                    if (!resp.ok || !result.success) {
+                    const { data: result, rawText, parseError } = await parseJsonResponse(resp);
+                    if (!resp.ok || !result || result.success !== true) {
                         setStepCompleted('step0', false);
-                        const msg = `Error processing file: ${result.error || resp.statusText}` + (result.stderr ? `\n\n${result.stderr}` : '');
+                        const fallback = result && result.error ? result.error : (parseError ? `Unexpected response (status ${resp.status})` : resp.statusText);
+                        let snippet = '';
+                        if (parseError && rawText) {
+                            const trimmed = rawText.trim();
+                            if (trimmed) {
+                                const short = trimmed.length > 500 ? `${trimmed.slice(0, 500)}…` : trimmed;
+                                snippet = `\n\nResponse body:\n${short}`;
+                            }
+                        } else if (result && result.stderr) {
+                            snippet = `\n\n${result.stderr}`;
+                        }
+                        const msg = `Error processing file: ${fallback || 'Unknown error'}` + snippet;
                         showOutput('step0', msg);
                         return;
                     }
                     setStepCompleted('step0', true);
-                    showOutput('step0', result.output || 'File uploaded successfully');
+                    showOutput('step0', result.output || result.message || 'File uploaded successfully');
                     if (result.files) showFileInfo('step0', result.files);
                     updateStatus();
                 } catch (err) {
@@ -3174,15 +3266,26 @@
                         headers: { 'Content-Type': 'application/xml' },
                         body: buf
                     });
-                    const result = await resp.json();
-                    if (!resp.ok || !result.success) {
+                    const { data: result, rawText, parseError } = await parseJsonResponse(resp);
+                    if (!resp.ok || !result || result.success !== true) {
                         setStepCompleted('step0', false);
-                        const msg = `Error processing XML: ${result.error || resp.statusText}` + (result.stderr ? `\n\n${result.stderr}` : '');
+                        const fallback = result && result.error ? result.error : (parseError ? `Unexpected response (status ${resp.status})` : resp.statusText);
+                        let snippet = '';
+                        if (parseError && rawText) {
+                            const trimmed = rawText.trim();
+                            if (trimmed) {
+                                const short = trimmed.length > 500 ? `${trimmed.slice(0, 500)}…` : trimmed;
+                                snippet = `\n\nResponse body:\n${short}`;
+                            }
+                        } else if (result && result.stderr) {
+                            snippet = `\n\n${result.stderr}`;
+                        }
+                        const msg = `Error processing XML: ${fallback || 'Unknown error'}` + snippet;
                         showOutput('step0', msg);
                         return;
                     }
                     setStepCompleted('step0', true);
-                    showOutput('step0', result.output || 'XML uploaded successfully');
+                    showOutput('step0', result.output || result.message || 'XML uploaded successfully');
                     if (result.files) showFileInfo('step0', result.files);
                     updateStatus();
                 } catch (err) {

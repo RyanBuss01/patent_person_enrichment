@@ -450,17 +450,25 @@ app.post('/api/step0', async (req, res) => {
         runPythonScriptAsync('front-end/run_step0_wrapper.py', args, stepId)
             .then((result) => {
                 console.log('Step 0 completed successfully');
-                
+                const completedAt = new Date();
                 // Store completion result for status endpoint
                 try {
                     fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), (result && result.output) ? String(result.output) : '');
                 } catch (e) { console.warn('Could not persist last_step0_output.txt:', e.message); }
+                const files = getStep0Files();
+                writeStepStatus(stepId, {
+                    success: true,
+                    completedAt: completedAt.toISOString(),
+                    files,
+                    outputSummary: truncateText((result && result.output) ? String(result.output) : '', 4000),
+                    stdoutSnippet: truncateText((result && result.output) ? String(result.output) : '', 2000)
+                });
                 runningProcesses.set(stepId + '_completed', {
                     completed: true,
                     success: true,
                     output: result.output,
-                    completedAt: new Date(),
-                    files: getStep0Files()
+                    completedAt,
+                    files
                 });
             })
             .catch((error) => {
@@ -471,13 +479,24 @@ app.post('/api/step0', async (req, res) => {
                     const msg = [error.error || error.message || 'Step 0 failed', error.stderr || '', error.stdout || ''].filter(Boolean).join('\n\n');
                     fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), msg);
                 } catch (e) { /* ignore */ }
+                const completedAt = new Date();
+                const files = getStep0Files();
+                writeStepStatus(stepId, {
+                    success: false,
+                    completedAt: completedAt.toISOString(),
+                    error: error.error || error.message || 'Step 0 failed',
+                    stderr: truncateText(error.stderr || '', 4000),
+                    stdoutSnippet: truncateText(error.stdout || '', 2000),
+                    files
+                });
                 runningProcesses.set(stepId + '_completed', {
                     completed: true,
                     success: false,
                     error: error.error || error.message,
                     stderr: error.stderr,
                     stdout: error.stdout,
-                    completedAt: new Date()
+                    completedAt,
+                    files
                 });
             });
         
@@ -524,18 +543,36 @@ app.post('/api/step0/extract', async (req, res) => {
         const args = ['--days-back', String(daysBack), '--max-results', String(maxResults)];
         runPythonScriptAsync('front-end/run_step0_extract_wrapper.py', args, stepId)
             .then((result) => {
+                const completedAt = new Date();
                 const files = getStep0Files();
                 try {
                     fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), (result && result.output) ? String(result.output) : '');
                 } catch (e) { /* ignore */ }
-                runningProcesses.set(stepId + '_completed', { completed: true, success: true, output: result.output, files });
+                writeStepStatus(stepId, {
+                    success: true,
+                    completedAt: completedAt.toISOString(),
+                    files,
+                    outputSummary: truncateText((result && result.output) ? String(result.output) : '', 4000),
+                    stdoutSnippet: truncateText((result && result.output) ? String(result.output) : '', 2000)
+                });
+                runningProcesses.set(stepId + '_completed', { completed: true, success: true, output: result.output, files, completedAt });
             })
             .catch((error) => {
                 try {
                     const msg = [error.error || error.message || 'Step 0 failed', error.stderr || '', error.stdout || ''].filter(Boolean).join('\n\n');
                     fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), msg);
                 } catch (e) { /* ignore */ }
-                runningProcesses.set(stepId + '_completed', { completed: true, success: false, error: error.error || error.message, stderr: error.stderr, stdout: error.stdout });
+                const completedAt = new Date();
+                const files = getStep0Files();
+                writeStepStatus(stepId, {
+                    success: false,
+                    completedAt: completedAt.toISOString(),
+                    error: error.error || error.message || 'Step 0 failed',
+                    stderr: truncateText(error.stderr || '', 4000),
+                    stdoutSnippet: truncateText(error.stdout || '', 2000),
+                    files
+                });
+                runningProcesses.set(stepId + '_completed', { completed: true, success: false, error: error.error || error.message, stderr: error.stderr, stdout: error.stdout, completedAt, files });
             });
         return res.json({ success: true, status: 'started', processing: true, message: 'Alternate Step 0 started. Use /api/step0/status to check progress.' });
     } catch (error) {
@@ -580,8 +617,37 @@ app.post('/api/step0/upload-csv', express.text({ type: ['text/csv', 'text/plain'
         proc.on('close', (code) => {
             if (code === 0) {
                 const files = getStep0Files();
+                try {
+                    fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), stdout || '');
+                } catch (e) { /* ignore */ }
+                const completedAt = new Date();
+                writeStepStatus('step0', {
+                    success: true,
+                    completedAt: completedAt.toISOString(),
+                    files,
+                    mode: 'upload-csv',
+                    outputSummary: truncateText(stdout || '', 4000),
+                    stdoutSnippet: truncateText(stdout || '', 2000)
+                });
                 return res.json({ success: true, message: 'CSV uploaded and processed', files, output: stdout });
             } else {
+                try {
+                    const msg = [
+                        `Parser exited with code ${code}`,
+                        stderr,
+                        stdout
+                    ].filter(Boolean).join('\n\n');
+                    fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), msg);
+                } catch (e) { /* ignore */ }
+                const completedAt = new Date();
+                writeStepStatus('step0', {
+                    success: false,
+                    completedAt: completedAt.toISOString(),
+                    error: `Parser exited with code ${code}`,
+                    stderr: truncateText(stderr || '', 4000),
+                    stdoutSnippet: truncateText(stdout || '', 2000),
+                    mode: 'upload-csv'
+                });
                 return res.status(500).json({ success: false, error: `Parser exited with code ${code}`, stderr, stdout });
             }
         });
@@ -596,6 +662,16 @@ app.post('/api/step0/upload-csv', express.text({ type: ['text/csv', 'text/plain'
         proc.stdin.end();
     } catch (error) {
         console.error('Upload CSV failed:', error);
+        try {
+            fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), `CSV upload failed: ${error.message}`);
+        } catch (e) { /* ignore */ }
+        const completedAt = new Date();
+        writeStepStatus('step0', {
+            success: false,
+            completedAt: completedAt.toISOString(),
+            error: error.message,
+            mode: 'upload-csv'
+        });
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -634,8 +710,34 @@ app.post('/api/step0/upload-xlsx', express.raw({ type: ['application/vnd.openxml
             if (code === 0) {
                 const files = getStep0Files();
                 try { fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), stdout || ''); } catch (e) { /* ignore */ }
+                const completedAt = new Date();
+                writeStepStatus('step0', {
+                    success: true,
+                    completedAt: completedAt.toISOString(),
+                    files,
+                    mode: 'upload-xlsx',
+                    outputSummary: truncateText(stdout || '', 4000),
+                    stdoutSnippet: truncateText(stdout || '', 2000)
+                });
                 return res.json({ success: true, message: 'XLSX uploaded and processed', files, output: stdout });
             } else {
+                try {
+                    const msg = [
+                        `Parser exited with code ${code}`,
+                        stderr,
+                        stdout
+                    ].filter(Boolean).join('\n\n');
+                    fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), msg);
+                } catch (e) { /* ignore */ }
+                const completedAt = new Date();
+                writeStepStatus('step0', {
+                    success: false,
+                    completedAt: completedAt.toISOString(),
+                    error: `Parser exited with code ${code}`,
+                    stderr: truncateText(stderr || '', 4000),
+                    stdoutSnippet: truncateText(stdout || '', 2000),
+                    mode: 'upload-xlsx'
+                });
                 return res.status(500).json({ success: false, error: `Parser exited with code ${code}`, stderr, stdout });
             }
         });
@@ -643,6 +745,16 @@ app.post('/api/step0/upload-xlsx', express.raw({ type: ['application/vnd.openxml
         proc.stdin.end();
     } catch (error) {
         console.error('Upload XLSX failed:', error);
+        try {
+            fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), `XLSX upload failed: ${error.message}`);
+        } catch (e) { /* ignore */ }
+        const completedAt = new Date();
+        writeStepStatus('step0', {
+            success: false,
+            completedAt: completedAt.toISOString(),
+            error: error.message,
+            mode: 'upload-xlsx'
+        });
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -679,14 +791,50 @@ app.post('/api/step0/upload-xml', express.raw({ type: ['application/xml', 'text/
             if (code === 0) {
                 const files = getStep0Files();
                 try { fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), stdout || ''); } catch (e) { /* ignore */ }
+                const completedAt = new Date();
+                writeStepStatus('step0', {
+                    success: true,
+                    completedAt: completedAt.toISOString(),
+                    files,
+                    mode: 'upload-xml',
+                    outputSummary: truncateText(stdout || '', 4000),
+                    stdoutSnippet: truncateText(stdout || '', 2000)
+                });
                 return res.json({ success: true, message: 'XML uploaded and processed', files, output: stdout });
             }
+            try {
+                const msg = [
+                    `Parser exited with code ${code}`,
+                    stderr,
+                    stdout
+                ].filter(Boolean).join('\n\n');
+                fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), msg);
+            } catch (e) { /* ignore */ }
+            const completedAt = new Date();
+            writeStepStatus('step0', {
+                success: false,
+                completedAt: completedAt.toISOString(),
+                error: `Parser exited with code ${code}`,
+                stderr: truncateText(stderr || '', 4000),
+                stdoutSnippet: truncateText(stdout || '', 2000),
+                mode: 'upload-xml'
+            });
             return res.status(500).json({ success: false, error: `Parser exited with code ${code}`, stderr, stdout });
         });
         proc.stdin.write(buf);
         proc.stdin.end();
     } catch (error) {
         console.error('Upload XML failed:', error);
+        try {
+            fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step0_output.txt'), `XML upload failed: ${error.message}`);
+        } catch (e) { /* ignore */ }
+        const completedAt = new Date();
+        writeStepStatus('step0', {
+            success: false,
+            completedAt: completedAt.toISOString(),
+            error: error.message,
+            mode: 'upload-xml'
+        });
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -702,13 +850,28 @@ app.use((err, req, res, next) => {
 // Helper functions for Step 0 completion data
 function getStep0Files() {
     const downloadedPatents = readJsonFile('output/downloaded_patents.json');
-    
+    const progressSnapshot = readJsonFile('output/step0_download_progress.json');
+
     return {
         downloadedPatents: {
             count: downloadedPatents ? downloadedPatents.length : 0,
             stats: getFileStats('output/downloaded_patents.json')
         },
-        downloadResults: getFileStats('output/download_results.json')
+        downloadResults: {
+            stats: getFileStats('output/download_results.json')
+        },
+        progressLog: {
+            stats: getFileStats('output/step0_download_progress.log')
+        },
+        progressSnapshot: {
+            stats: getFileStats('output/step0_download_progress.json'),
+            stage: progressSnapshot && progressSnapshot.stage,
+            details: progressSnapshot && progressSnapshot.details,
+            updatedAt: progressSnapshot && progressSnapshot.timestamp
+        },
+        lastOutput: {
+            stats: getFileStats('output/last_step0_output.txt')
+        }
     };
 }
 
@@ -2071,12 +2234,14 @@ app.post('/api/step3', async (req, res) => {
 
 // Get current status of all files
 app.get('/api/status', (req, res) => {
+    const step0LastStatus = readStepStatus('step0');
     const status = {
         step0: {
             downloadResults: getFileStats('output/download_results.json'),
             // downloadedPatents metric removed from UI
             downloadedPatents: getFileStats('output/downloaded_patents.json'),
-            running: runningProcesses.has('step0')
+            running: runningProcesses.has('step0'),
+            lastRunStatus: step0LastStatus
         },
         step1: {
             integrationResults: getFileStats('output/integration_results.json'),
@@ -2173,7 +2338,12 @@ app.get('/api/status', (req, res) => {
     };
     // Last run timestamps from file stats
     status.lastRun = {
-        step0: status.step0.downloadResults.modified || null,
+        step0: (() => {
+            if (step0LastStatus && step0LastStatus.completedAt) {
+                return step0LastStatus.completedAt;
+            }
+            return status.step0.downloadResults.modified || null;
+        })(),
         step1: status.step1.integrationResults.modified || null,
         step2: (() => {
             // Hide last run timestamp if this is a reset marker

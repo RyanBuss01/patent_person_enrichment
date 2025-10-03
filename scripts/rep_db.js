@@ -41,11 +41,19 @@ class DatabaseReplicator {
   }
 
   async getTables() {
-    const [rows] = await this.localConn.query('SHOW TABLES');
+    const [rows] = await this.localConn.query('SHOW FULL TABLES WHERE Table_type = "BASE TABLE"');
     const tableKey = Object.keys(rows[0])[0];
     return rows
       .map(row => row[tableKey])
       .filter(table => !EXCLUDED_TABLES.includes(table));
+  }
+
+  async isView(tableName) {
+    const [rows] = await this.localConn.query(
+      `SHOW FULL TABLES WHERE Table_type = 'VIEW' AND Tables_in_${LOCAL_CONFIG.database} = ?`,
+      [tableName]
+    );
+    return rows.length > 0;
   }
 
   async getTableSchema(tableName) {
@@ -169,6 +177,13 @@ class DatabaseReplicator {
     console.log(`\n[${tableName}]`);
     
     try {
+      // Check if it's a view
+      const isView = await this.isView(tableName);
+      if (isView) {
+        console.log(`  ⚠ Skipping - this is a VIEW, not a table`);
+        return;
+      }
+
       // Get row count
       const rowCount = await this.getRowCount(tableName);
       console.log(`  Rows in local: ${rowCount}`);
@@ -212,7 +227,7 @@ class DatabaseReplicator {
       // Get all tables
       console.log('Fetching table list...');
       const tables = await this.getTables();
-      console.log(`Found ${tables.length} tables to replicate (excluding ${EXCLUDED_TABLES.join(', ')})\n`);
+      console.log(`Found ${tables.length} BASE TABLES to replicate (excluding ${EXCLUDED_TABLES.join(', ')}, and views)\n`);
 
       // Disable foreign key checks in cloud
       await this.cloudConn.query('SET FOREIGN_KEY_CHECKS = 0');
