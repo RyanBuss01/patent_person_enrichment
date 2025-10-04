@@ -31,6 +31,8 @@ class BatchSQLQueryIntegrator:
         self.dev_mode = bool(config.get('DEV_MODE'))
         self.dev_issue_cutoff = None
         self.dev_issue_cutoff_raw = config.get('DEV_ISSUE_CUTOFF')
+        self.skip_enriched_filter = bool(config.get('SKIP_ALREADY_ENRICHED_FILTER'))
+        self._enriched_person_signatures: Optional[set] = None
         if self.dev_mode:
             if self.dev_issue_cutoff_raw:
                 self.dev_issue_cutoff = self._parse_issue_date_value(self.dev_issue_cutoff_raw)
@@ -631,6 +633,7 @@ class BatchSQLQueryIntegrator:
         duplicate_patents = 0
         total_xml_people = 0
         processed_people = 0
+        existing_enriched_filtered: List[Dict[str, Any]] = []
         
         # Statistics
         match_statistics = {
@@ -812,17 +815,32 @@ class BatchSQLQueryIntegrator:
             before = len(new_people)
             new_people = self._dedup_new_people(new_people)
             dedup_removed = before - len(new_people)
-        
+
+        if self.skip_enriched_filter:
+            if new_people:
+                logger.info("Skipping already-enriched filter per configuration (integration-only run)")
+                print("PROGRESS: Skipping already-enriched filter (integration-only run)")
+        elif new_people:
+            new_people, existing_enriched_filtered = self._filter_already_enriched_people(new_people)
+            if existing_enriched_filtered:
+                logger.info(
+                    f"Filtered {len(existing_enriched_filtered):,} already-enriched people before Step 2 hand-off"
+                )
+                print(
+                    f"PROGRESS: Removed {len(existing_enriched_filtered):,} already-enriched people prior to Step 2"
+                )
+
         total_elapsed = time.time() - start_time
         logger.info(f"Batch processing complete in {total_elapsed/60:.1f} minutes")
         print(f"PROGRESS: COMPLETE - {len(new_patents):,} new patents, {len(new_people):,} people in {total_elapsed/60:.1f} minutes")
-        
+
         data_source = 'sql_database_batch_queries' if using_sql else 'csv_files'
-        
+
         return {
             'new_patents': new_patents,
             'new_people': new_people,
             'existing_people_found': existing_people_found,
+            'existing_enriched_people_filtered': existing_enriched_filtered,
             'duplicate_patents_count': duplicate_patents,
             'duplicate_people_count': len(existing_people_found),
             'total_original_patents': len(us_patents_only),
@@ -832,7 +850,72 @@ class BatchSQLQueryIntegrator:
             'data_source': data_source,
             'dedup_new_people_removed': dedup_removed
         }
-    
+
+    def _person_signature(self, person: Dict[str, Any]) -> str:
+        """Normalize person fields into a stable signature for enrichment lookups."""
+        first = self._clean_string(person.get('first_name', '')).lower()
+        last = self._clean_string(person.get('last_name', '')).lower()
+        city = self._clean_string(person.get('city', '')).lower()
+        state = self._clean_string(person.get('state', '')).lower()
+        return '|'.join([first, last, city, state])
+
+    def _load_enriched_person_signatures(self) -> set:
+        """Load signatures for people already enriched (cached per run)."""
+        if self._enriched_person_signatures is not None:
+            return self._enriched_person_signatures
+
+        if not self.use_sql:
+            self._enriched_person_signatures = set()
+            return self._enriched_person_signatures
+
+        try:
+            query = (
+                "SELECT LOWER(TRIM(first_name)) AS first_name, "
+                "LOWER(TRIM(last_name)) AS last_name, "
+                "LOWER(TRIM(COALESCE(city,''))) AS city, "
+                "LOWER(TRIM(COALESCE(state,''))) AS state "
+                "FROM enriched_people "
+                "WHERE enrichment_data IS NOT NULL"
+            )
+            rows = self.db_manager.execute_query(query)
+            signatures = set()
+            for row in rows:
+                first = (row.get('first_name') or '').strip()
+                last = (row.get('last_name') or '').strip()
+                city = (row.get('city') or '').strip()
+                state = (row.get('state') or '').strip()
+                sig = '|'.join([first, last, city, state])
+                if sig.strip('|'):
+                    signatures.add(sig)
+            self._enriched_person_signatures = signatures
+            logger.info(f"Loaded {len(signatures):,} already-enriched signatures for Step 1 filtering")
+        except Exception as exc:
+            logger.warning(f"Could not load enriched_people signatures: {exc}")
+            self._enriched_person_signatures = set()
+        return self._enriched_person_signatures
+
+    def _filter_already_enriched_people(self, people: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Split people into enrichment vs already-enriched buckets."""
+        if not people:
+            return [], []
+
+        signatures = self._load_enriched_person_signatures()
+        if not signatures:
+            return people, []
+
+        keep: List[Dict[str, Any]] = []
+        filtered: List[Dict[str, Any]] = []
+        for person in people:
+            sig = self._person_signature(person)
+            if sig and sig in signatures:
+                filtered_person = dict(person)
+                filtered_person.setdefault('match_status', 'already_enriched')
+                filtered_person['skip_reason'] = 'already_enriched'
+                filtered.append(filtered_person)
+            else:
+                keep.append(person)
+        return keep, filtered
+
     def _clean_name_for_matching(self, name: str) -> str:
         """Clean name for matching - remove ALL middle initials/names, keep only first name"""
         if not name:
@@ -1158,7 +1241,15 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
                 json.dump(existing_people_raw, f, indent=2, default=str)
             
             logger.info(f"Saved results to {output_folder}")
-        
+
+        # Persist filtered already-enriched people for downstream steps
+        filtered_enriched_path = Path(output_folder) / 'existing_filtered_enriched_people.json'
+        with open(filtered_enriched_path, 'w') as f:
+            json.dump(filter_result.get('existing_enriched_people_filtered', []), f, indent=2, default=str)
+        logger.info(
+            f"Saved {len(filter_result.get('existing_enriched_people_filtered', [])):,} already-enriched people to {filtered_enriched_path}"
+        )
+
         # Create result
         result = {
             'success': True,
@@ -1172,6 +1263,7 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
             'new_people_count': len(filter_result['new_people']),
             'duplicate_patents_count': filter_result['duplicate_patents_count'],
             'duplicate_people_count': len(filter_result['existing_people_found']),
+            'filtered_existing_enriched_people_count': len(filter_result.get('existing_enriched_people_filtered', [])),
             'total_xml_patents': filter_result['total_original_patents'],
             'total_xml_people': filter_result['total_original_people'],
             'match_statistics': filter_result['match_statistics'],
@@ -1179,6 +1271,7 @@ def run_existing_data_integration(config: Dict[str, Any]) -> Dict[str, Any]:
             'data_source': filter_result['data_source'],
             'us_filter_result': us_filter_result,
             'new_people_data': filter_result['new_people'],
+            'existing_enriched_people_filtered': filter_result.get('existing_enriched_people_filtered', []),
             'dedup_new_people_removed': filter_result.get('dedup_new_people_removed', 0),
             'input_source': input_source
         }
@@ -1227,6 +1320,9 @@ def _log_comprehensive_summary(result: Dict[str, Any]):
     logger.info(f"   New people found: {result['new_people_count']:,}")
     logger.info(f"   Duplicate patents avoided: {result['duplicate_patents_count']:,}")
     logger.info(f"   Duplicate people avoided: {result['duplicate_people_count']:,}")
+    filtered_existing = result.get('filtered_existing_enriched_people_count', 0)
+    if filtered_existing:
+        logger.info(f"   Already-enriched filtered pre-Step 2: {filtered_existing:,}")
     logger.info(f"   Total processing time: {result.get('processing_time_minutes', 0):.1f} minutes")
     
     # Match Statistics

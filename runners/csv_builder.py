@@ -1505,6 +1505,9 @@ def _generate_test_mode_csvs(
     step1_existing_records = _load_json_list(os.path.join(output_dir, 'existing_people_in_db.json'))
     if not step1_existing_records:
         step1_existing_records = _load_json_list(os.path.join(output_dir, 'existing_people_found.json'))
+    filtered_existing_records = _load_json_list(os.path.join(output_dir, 'existing_filtered_enriched_people.json'))
+    if filtered_existing_records:
+        step1_existing_records = (step1_existing_records or []) + filtered_existing_records
 
     formatted_new_records: List[Dict[str, Any]] = []
     formatted_new_existing_records: List[Dict[str, Any]] = []

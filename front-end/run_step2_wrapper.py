@@ -86,6 +86,21 @@ def main():
     config['RUN_STARTED_AT'] = run_started_at.isoformat()
     os.makedirs(config['OUTPUT_DIR'], exist_ok=True)
 
+    # Load already-enriched people filtered during Step 1 so CSVs & progress include them
+    filtered_existing_path = Path(config['OUTPUT_DIR']) / 'existing_filtered_enriched_people.json'
+    already_enriched_people = []
+    if filtered_existing_path.exists():
+        try:
+            with filtered_existing_path.open('r') as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    already_enriched_people = data
+        except Exception as exc:
+            logger.warning(f"Could not load existing filtered enriched people: {exc}")
+    config['already_enriched_people'] = already_enriched_people
+    if already_enriched_people:
+        print(f"STEP 2: Loaded {len(already_enriched_people)} already-enriched people from Step 1")
+
     if rebuild_only:
         try:
             if use_zaba:

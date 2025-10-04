@@ -1093,6 +1093,10 @@ app.post('/api/step1/dev', async (req, res) => {
     const stepId = 'step1';
     const rawCutoff = req.body && req.body.issueDateCutoff;
     const cutoff = (typeof rawCutoff === 'string' ? rawCutoff : (rawCutoff !== undefined ? String(rawCutoff) : '')).trim();
+    const skipFilter = Boolean(
+        (req.body && (req.body.skipEnrichmentFilter || req.body.skip_enrichment_filter)) ||
+        (req.query && (req.query.skipEnrichmentFilter || req.query.skip_enrichment_filter))
+    );
 
     if (!cutoff) {
         return res.status(400).json({
@@ -1111,7 +1115,12 @@ app.post('/api/step1/dev', async (req, res) => {
     try {
         console.log(`Starting Step 1 (Dev Mode) with issue date cutoff ${cutoff}`);
 
-        runPythonScriptAsync('front-end/run_step1_wrapper.py', ['--dev-mode', '--issue-date', cutoff], stepId)
+        const args = ['--dev-mode', '--issue-date', cutoff];
+        if (skipFilter) {
+            args.push('--skip-enrichment-filter');
+        }
+
+        runPythonScriptAsync('front-end/run_step1_wrapper.py', args, stepId)
             .then((result) => {
                 console.log('Step 1 (Dev Mode) completed successfully');
                 try {
@@ -1125,7 +1134,8 @@ app.post('/api/step1/dev', async (req, res) => {
                     files: getStep1Files(),
                     potentialMatches: getStep1PotentialMatches(),
                     devMode: true,
-                    issueDateCutoff: cutoff
+                    issueDateCutoff: cutoff,
+                    skipEnrichmentFilter: skipFilter
                 });
             })
             .catch((error) => {
@@ -1142,7 +1152,8 @@ app.post('/api/step1/dev', async (req, res) => {
                     stdout: error.stdout,
                     completedAt: new Date(),
                     devMode: true,
-                    issueDateCutoff: cutoff
+                    issueDateCutoff: cutoff,
+                    skipEnrichmentFilter: skipFilter
                 });
             });
 
@@ -1640,6 +1651,10 @@ app.get('/api/step2/zaba/files/:filename', (req, res) => {
 
 app.post('/api/step1', async (req, res) => {
     const stepId = 'step1';
+    const skipFilter = Boolean(
+        (req.body && (req.body.skipEnrichmentFilter || req.body.skip_enrichment_filter)) ||
+        (req.query && (req.query.skipEnrichmentFilter || req.query.skip_enrichment_filter))
+    );
     
     // Check if already running
     if (runningProcesses.has(stepId)) {
@@ -1650,10 +1665,15 @@ app.post('/api/step1', async (req, res) => {
     }
     
     try {
-        console.log('Starting Step 1: Integrate Existing Data (Async)');
+        console.log('Starting Step 1: Integrate Existing Data (Async)' + (skipFilter ? ' [skip already-enriched filter]' : ''));
         
         // Start the process asynchronously
-        runPythonScriptAsync('front-end/run_step1_wrapper.py', [], stepId)
+        const args = [];
+        if (skipFilter) {
+            args.push('--skip-enrichment-filter');
+        }
+
+        runPythonScriptAsync('front-end/run_step1_wrapper.py', args, stepId)
             .then((result) => {
                 console.log('Step 1 completed successfully');
                 
@@ -1667,7 +1687,8 @@ app.post('/api/step1', async (req, res) => {
                     output: result.output,
                     completedAt: new Date(),
                     files: getStep1Files(),
-                    potentialMatches: getStep1PotentialMatches()
+                    potentialMatches: getStep1PotentialMatches(),
+                    skipEnrichmentFilter: skipFilter
                 });
             })
             .catch((error) => {
@@ -1684,7 +1705,8 @@ app.post('/api/step1', async (req, res) => {
                     error: error.error || error.message,
                     stderr: error.stderr,
                     stdout: error.stdout,
-                    completedAt: new Date()
+                    completedAt: new Date(),
+                    skipEnrichmentFilter: skipFilter
                 });
             });
         
@@ -3153,7 +3175,19 @@ function getCurrentScopeRecordsForExport() {
   if (!Array.isArray(current)) current = [];
 
   // Step 1 existing people for this run
-  const step1ExistingRaw = readJsonFile('output/existing_people_in_db.json') || readJsonFile('output/existing_people_found.json') || [];
+  let step1ExistingRaw = readJsonFile('output/existing_people_in_db.json');
+  if (!Array.isArray(step1ExistingRaw) || step1ExistingRaw.length === 0) {
+    const fallbackExisting = readJsonFile('output/existing_people_found.json');
+    if (Array.isArray(fallbackExisting)) {
+      step1ExistingRaw = fallbackExisting;
+    }
+  }
+  if (!Array.isArray(step1ExistingRaw)) step1ExistingRaw = [];
+
+  const filteredExisting = readJsonFile('output/existing_filtered_enriched_people.json');
+  if (Array.isArray(filteredExisting) && filteredExisting.length > 0) {
+    step1ExistingRaw = step1ExistingRaw.concat(filteredExisting);
+  }
 
   // Dedupe current by person
   const curSeen = new Set();

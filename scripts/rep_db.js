@@ -18,7 +18,7 @@ const CLOUD_CONFIG = {
   ssl: { rejectUnauthorized: false } // Azure MySQL requires SSL
 };
 
-const BATCH_SIZE = 5000; // Number of rows to insert per batch
+const BATCH_SIZE = 1000; // Number of rows to insert per batch
 const QUICK_TABLES_BATCH_SIZE = 1000; // Larger batch size for specific tables
 const EXCLUDED_TABLES = ['existing_people_new', 'existing_people_old'];
 const QUICK_TABLES = ['existing_people']; // Tables that use larger batch size

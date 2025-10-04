@@ -318,15 +318,41 @@
         }
         
         .file-stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
             font-size: 0.9em;
         }
         
         .file-stat {
             display: flex;
-            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding: 10px 12px;
+            border: 1px solid #e1e9f3;
+            border-radius: 8px;
+            background: #f8fbff;
+        }
+
+        .file-key {
+            font-weight: 600;
+            color: #2c3e50;
+            flex: 1 1 100%;
+        }
+
+        .file-details {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+        }
+
+        .file-chip {
+            background: #ecf5ff;
+            color: #1f4f82;
+            border-radius: 999px;
+            padding: 3px 10px;
+            line-height: 1.4;
         }
         
         .output-section {
@@ -1075,6 +1101,9 @@
                         <button class="btn btn-test" onclick="runStep1DevIntegration()" id="step1DevBtn">
                             🧪 Dev Integration
                         </button>
+                        <button class="btn btn-secondary" onclick="runStep1IntegrationOnly()" id="step1IntegrationOnlyBtn">
+                            🔌 Integration (no enrichments)
+                        </button>
                         <button class="btn btn-success" onclick="runStep1DevEnrichAll()" id="step1DevEnrichAllBtn">
                             ✅ Enrich All
                         </button>
@@ -1351,6 +1380,7 @@
         let step1LastBatchLabel = '';
         let bulkMovedSelections = new Set();
         let step0ManualError = false;
+        let suppressStep0GeneratedFiles = false;
         const STEP0_XML_BATCH_THRESHOLD = 10 * 1024 * 1024; // 10MB
         const STEP0_XML_CHUNK_SIZE = 1 * 1024 * 1024; // 1MB chunks
 
@@ -1364,6 +1394,27 @@
             } catch (err) {
                 return { data: null, rawText: text, parseError: err };
             }
+        }
+
+        function escapeHtml(value) {
+            if (value === null || value === undefined) {
+                return '';
+            }
+            const entities = {
+                "&": "&amp;",
+                "<": "&lt;",
+                ">": "&gt;",
+                "\"": "&quot;",
+                "'": "&#39;"
+            };
+            return String(value).replace(/[&<>"']/g, (char) => entities[char] || char);
+        }
+
+        function clearFileInfo(stepId) {
+            const el = document.getElementById(stepId + 'Files');
+            if (!el) return;
+            el.innerHTML = '';
+            el.classList.add('hidden');
         }
 
         function openDocsOverlay() {
@@ -2087,6 +2138,9 @@
                 quickBtn.disabled = true;
             }
 
+            suppressStep0GeneratedFiles = false;
+            clearFileInfo('step0');
+
             setStepRunning('step0');
             // Immediately reset Step 1 and Step 2 visuals for a new cycle
             try {
@@ -2155,6 +2209,8 @@
         
         // Run Step 0 with configured settings
         async function runStep0Configured() {
+            suppressStep0GeneratedFiles = false;
+            clearFileInfo('step0');
             setStepRunning('step0');
             // Immediately reset Step 1 and Step 2 visuals for a new cycle
             try {
@@ -2276,6 +2332,54 @@
                 setStepCompleted('step1', false);
                 showOutput('step1', `Network error: ${error.message}`);
                 console.error('Step 1 (Dev) error:', error);
+            }
+        }
+
+        async function runStep1IntegrationOnly() {
+            if (!isDevMode) {
+                alert('Integration (no enrichments) is only available on the /dev route.');
+                return;
+            }
+
+            const button = document.getElementById('step1IntegrationOnlyBtn');
+            if (button) {
+                button.disabled = true;
+            }
+
+            setStepRunning('step1');
+
+            try {
+                const response = await fetch('/api/step1', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ skipEnrichmentFilter: true })
+                });
+                const { data: result, rawText, parseError } = await parseJsonResponse(response);
+
+                if (response.ok && result && result.success && (result.status === 'started' || result.processing === true)) {
+                    console.log('Step 1 (Integration Only) started, beginning polling...');
+                    startPolling('step1');
+                } else if (response.ok && result && result.success) {
+                    setStepCompleted('step1', true);
+                    showOutput('step1', result.output);
+                    if (result.files) showFileInfo('step1', result.files);
+                    if (result.potentialMatches && result.potentialMatches.length > 0) {
+                        document.getElementById('step1VerifyBtn').classList.remove('hidden');
+                    }
+                    updateStatus();
+                } else {
+                    const message = (result && result.error) || (parseError ? `Unexpected response (${response.status})` : response.statusText) || 'Step 1 failed';
+                    setStepCompleted('step1', false);
+                    showOutput('step1', `Error: ${message}`);
+                }
+            } catch (error) {
+                setStepCompleted('step1', false);
+                showOutput('step1', `Network error: ${error.message}`);
+                console.error('Step 1 (Integration Only) error:', error);
+            } finally {
+                if (button) {
+                    button.disabled = false;
+                }
             }
         }
 
@@ -2999,44 +3103,75 @@
         // Show file information
         function showFileInfo(stepId, files) {
             const fileInfoEl = document.getElementById(stepId + 'Files');
-            
-            let html = '<h4>📁 Generated Files</h4><div class="file-stats">';
-            
-            Object.entries(files).forEach(([key, fileInfo]) => {
-                if (fileInfo.stats && fileInfo.stats.exists) {
-                    const parts = [];
-                    if (typeof fileInfo.count === 'number') {
-                        parts.push(`${fileInfo.count.toLocaleString()} records`);
-                    }
-                    if (typeof fileInfo.stats.sizeKB === 'number' && !Number.isNaN(fileInfo.stats.sizeKB)) {
-                        parts.push(`${fileInfo.stats.sizeKB} KB`);
-                    }
-                    if (typeof fileInfo.stage === 'string' && fileInfo.stage.trim().length > 0) {
-                        parts.push(fileInfo.stage.trim());
-                    }
-                    if (typeof fileInfo.details === 'string' && fileInfo.details.trim().length > 0) {
-                        parts.push(fileInfo.details.trim());
-                    }
-                    if (fileInfo.updatedAt) {
-                        try {
-                            const dt = new Date(fileInfo.updatedAt);
-                            if (!Number.isNaN(dt.getTime())) {
-                                parts.push(`updated ${dt.toLocaleString()}`);
-                            }
-                        } catch (_) { /* ignore */ }
-                    }
-                    const detail = parts.length ? parts.join(' • ') : `${fileInfo.stats.sizeKB || 0} KB`;
-                    html += `
-                        <div class="file-stat">
-                            <span>${key}:</span>
-                            <span>${detail}</span>
-                        </div>
-                    `;
+            if (!fileInfoEl) return;
+
+            if (stepId === 'step0' && suppressStep0GeneratedFiles) {
+                clearFileInfo(stepId);
+                return;
+            }
+
+            if (!files || typeof files !== 'object') {
+                clearFileInfo(stepId);
+                return;
+            }
+
+            const rows = [];
+
+            const collectRow = (key, fileInfo) => {
+                if (!fileInfo || !fileInfo.stats || !fileInfo.stats.exists) {
+                    return;
                 }
-            });
-            
-            html += '</div>';
-            fileInfoEl.innerHTML = html;
+
+                const parts = [];
+                if (typeof fileInfo.count === 'number') {
+                    parts.push(`${fileInfo.count.toLocaleString()} records`);
+                }
+                const sizeEntry = (fileInfo.stats && typeof fileInfo.stats.sizeKB === 'number' && !Number.isNaN(fileInfo.stats.sizeKB))
+                    ? `${fileInfo.stats.sizeKB} KB`
+                    : null;
+                if (sizeEntry) {
+                    parts.push(sizeEntry);
+                }
+                if (typeof fileInfo.stage === 'string' && fileInfo.stage.trim().length > 0) {
+                    parts.push(fileInfo.stage.trim());
+                }
+                if (typeof fileInfo.details === 'string' && fileInfo.details.trim().length > 0) {
+                    parts.push(fileInfo.details.trim());
+                }
+                if (fileInfo.updatedAt) {
+                    try {
+                        const dt = new Date(fileInfo.updatedAt);
+                        if (!Number.isNaN(dt.getTime())) {
+                            parts.push(`updated ${dt.toLocaleString()}`);
+                        }
+                    } catch (_) { /* ignore invalid dates */ }
+                }
+
+                const chips = parts.length ? parts : [(sizeEntry || `${fileInfo.stats.sizeKB || 0} KB`)];
+                rows.push({ key, chips });
+            };
+
+            if (stepId === 'step0') {
+                ['downloadedPatents', 'progressSnapshot'].forEach((key) => {
+                    if (Object.prototype.hasOwnProperty.call(files, key)) {
+                        collectRow(key, files[key]);
+                    }
+                });
+            } else {
+                Object.entries(files).forEach(([key, fileInfo]) => collectRow(key, fileInfo));
+            }
+
+            if (!rows.length) {
+                clearFileInfo(stepId);
+                return;
+            }
+
+            const rowsHtml = rows.map(({ key, chips }) => {
+                const chipHtml = chips.map((part) => `<span class="file-chip">${escapeHtml(part)}</span>`).join('');
+                return `<div class="file-stat"><div class="file-key">${escapeHtml(key)}:</div><div class="file-details">${chipHtml}</div></div>`;
+            }).join('');
+
+            fileInfoEl.innerHTML = `<h4>📁 Generated Files</h4><div class="file-stats">${rowsHtml}</div>`;
             fileInfoEl.classList.remove('hidden');
         }
         
@@ -3208,6 +3343,8 @@
                 const file = e.target.files && e.target.files[0];
                 if (!file) return;
                 try {
+                    suppressStep0GeneratedFiles = true;
+                    clearFileInfo('step0');
                     setStepRunning('step0');
                     // Immediately reset Step 1 and Step 2 visuals for a new cycle
                     try {
@@ -3356,6 +3493,8 @@
                 const file = e.target.files && e.target.files[0];
                 if (!file) return;
                 try {
+                    suppressStep0GeneratedFiles = true;
+                    clearFileInfo('step0');
                     setStepRunning('step0');
                     // Immediately reset Step 1 and Step 2 visuals for a new cycle
                     try {

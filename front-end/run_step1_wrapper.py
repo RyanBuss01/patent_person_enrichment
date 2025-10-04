@@ -47,6 +47,7 @@ def parse_cli_args():
     parser = argparse.ArgumentParser(description='Run Step 1 integration wrapper')
     parser.add_argument('--dev-mode', action='store_true', help='Enable dev mode filtering by issue date cutoff')
     parser.add_argument('--issue-date', dest='issue_date', help='Issue date cutoff (ISO datetime) for dev mode filtering')
+    parser.add_argument('--skip-enrichment-filter', action='store_true', help='Skip filtering out already enriched people')
     return parser.parse_args()
 
 
@@ -61,6 +62,7 @@ def load_config():
         'MAX_ENRICHMENT_COST': int(os.getenv('MAX_ENRICHMENT_COST', '1000')),
         'OUTPUT_DIR': os.getenv('OUTPUT_DIR', 'output'),
         'DEDUP_NEW_PEOPLE': os.getenv('DEDUP_NEW_PEOPLE', 'true').lower() == 'true',
+        'SKIP_ALREADY_ENRICHED_FILTER': os.getenv('SKIP_ALREADY_ENRICHED_FILTER', 'false').lower() == 'true',
     }
 
 def write_progress_update(stage, details=""):
@@ -291,6 +293,12 @@ def main():
 
     # Load configuration (same as main.py)
     config = load_config()
+
+    if args.skip_enrichment_filter:
+        config['SKIP_ALREADY_ENRICHED_FILTER'] = True
+        print("INTEGRATION ONLY: Skipping already-enriched filter to mirror legacy behavior")
+    else:
+        config['SKIP_ALREADY_ENRICHED_FILTER'] = bool(config.get('SKIP_ALREADY_ENRICHED_FILTER'))
 
     if args.dev_mode:
         config['DEV_MODE'] = True
