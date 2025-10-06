@@ -20,8 +20,8 @@ const CLOUD_CONFIG = {
 
 const BATCH_SIZE = 1000; // Number of rows to insert per batch
 const QUICK_TABLES_BATCH_SIZE = 1000; // Larger batch size for specific tables
-const EXCLUDED_TABLES = ['existing_people_new', 'existing_people_old'];
-const QUICK_TABLES = ['existing_people']; // Tables that use larger batch size
+const EXCLUDED_TABLES = ['existing_people_new', 'existing_people_old', 'existing_people'];
+const QUICK_TABLES = []; // Tables that use larger batch size
 
 class DatabaseReplicator {
   constructor() {
