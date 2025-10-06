@@ -6,6 +6,22 @@ const fs = require('fs');
 // Load environment variables from the frontend .env file
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
+// Ensure SQL_* values from the frontend config are also available as DB_* for Python
+[
+    ['SQL_HOST', 'DB_HOST'],
+    ['SQL_PORT', 'DB_PORT'],
+    ['SQL_DATABASE', 'DB_NAME'],
+    ['SQL_USER', 'DB_USER'],
+    ['SQL_PASSWORD', 'DB_PASSWORD']
+].forEach(([sqlKey, dbKey]) => {
+    if (!process.env[dbKey] && process.env[sqlKey]) {
+        process.env[dbKey] = process.env[sqlKey];
+    }
+});
+if (!process.env.DB_ENGINE && (process.env.SQL_HOST || process.env.DB_HOST)) {
+    process.env.DB_ENGINE = 'mysql';
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 const EXPORT_DEBUG = String(process.env.EXPORT_DEBUG || 'false').toLowerCase() === 'true';
@@ -121,18 +137,31 @@ function runPythonScriptAsync(scriptPath, args = [], stepId) {
         console.log(`Running: ${pythonExec} ${scriptPath} ${args.join(' ')}`);
         
         // Pass frontend environment variables to Python
+        const sqlHost = process.env.SQL_HOST || process.env.DB_HOST || 'localhost';
+        const sqlUser = process.env.SQL_USER || process.env.DB_USER || 'root';
+        const sqlPassword = process.env.SQL_PASSWORD || process.env.DB_PASSWORD || 'password';
+        const sqlDatabase = process.env.SQL_DATABASE || process.env.DB_NAME || 'patent_data';
+        const sqlPort = process.env.SQL_PORT || process.env.DB_PORT || '3306';
+
         const env = {
             ...process.env,
             PYTHONPATH: path.join(__dirname, '..'),
-            
-            // Database credentials - pass from Node.js to Python
-            DB_HOST: process.env.DB_HOST || 'localhost',
-            DB_PORT: process.env.DB_PORT || '3306',
-            DB_NAME: process.env.DB_NAME || 'patent_data',
-            DB_USER: process.env.DB_USER || 'root',
-            DB_PASSWORD: process.env.DB_PASSWORD || 'password',
+
+            // Pass SQL credentials explicitly for Python scripts
+            SQL_HOST: sqlHost,
+            SQL_USER: sqlUser,
+            SQL_PASSWORD: sqlPassword,
+            SQL_DATABASE: sqlDatabase,
+            SQL_PORT: sqlPort,
+
+            // Also provide DB_* aliases used by Python modules
+            DB_HOST: sqlHost,
+            DB_PORT: sqlPort,
+            DB_NAME: sqlDatabase,
+            DB_USER: sqlUser,
+            DB_PASSWORD: sqlPassword,
             DB_ENGINE: process.env.DB_ENGINE || 'mysql',
-            
+
             // API keys
             PEOPLEDATALABS_API_KEY: process.env.PEOPLEDATALABS_API_KEY || 'YOUR_PDL_API_KEY',
             PATENTSVIEW_API_KEY: process.env.PATENTSVIEW_API_KEY || 'oq371zFI.BjeAbayJsdHdvEgbei0vskz5bTK3KM1S',
