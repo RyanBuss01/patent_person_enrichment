@@ -7,7 +7,7 @@ import os
 import json
 import time
 import pandas as pd
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple, Optional, Set
 from pathlib import Path
 from classes.people_data_labs_enricher import PeopleDataLabsEnricher
 from database.db_manager import DatabaseManager, DatabaseConfig
@@ -167,15 +167,8 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
     """Simple, fast enrichment process"""
     
     try:
-        print("STEP 1: Loading existing enriched people from database...")
-        
-        # Load ALL existing enriched people into memory once
-        existing_enriched = load_existing_enriched_people()
-        print(f"Loaded {len(existing_enriched)} existing enriched people")
-        
-        print("STEP 2: Loading people to enrich...")
-        
-        # Load people to enrich
+        print("STEP 1: Loading people to enrich...")
+
         people_to_enrich = load_people_to_enrich(config)
         if not people_to_enrich:
             return {
@@ -186,90 +179,73 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
                 'enriched_data': [],
                 'actual_api_cost': '$0.00'
             }
-        
+
         print(f"Found {len(people_to_enrich)} people to potentially enrich")
-        
-        print("STEP 3: Checking for duplicates...")
-        
-        # Get the 19 already-enriched people from config (set by load_people_for_enrichment)
+
+        print("STEP 2: Preparing existing enrichment lookup...")
+        db_config = DatabaseConfig.from_env()
+        db_manager = DatabaseManager(db_config)
+        lookup = EnrichedPeopleLookup(db_manager)
+
+        # Already enriched people that Step 1 filtered out (we want to carry them forward)
         already_enriched_from_step1 = config.get('already_enriched_people', [])
-        
-        # Convert already-enriched Step 1 people to enriched records by pulling from SQL
-        matched_existing_for_this_run = []
+        lookup.prefetch_people(already_enriched_from_step1)
+        matched_existing_for_this_run: List[Dict[str, Any]] = []
+        matched_signatures: set = set()
         if already_enriched_from_step1:
-            print(f"Processing {len(already_enriched_from_step1)} already-enriched people from Step 1...")
-            db_config = DatabaseConfig.from_env()
-            db_manager = DatabaseManager(db_config)
-            
-            for person in already_enriched_from_step1:
-                first_name = (person.get('first_name') or '').strip()
-                last_name = (person.get('last_name') or '').strip()
-                city = (person.get('city') or '').strip()
-                state = (person.get('state') or '').strip()
-                
-                if not first_name or not last_name:
-                    continue
-                    
-                # Query SQL to get their enriched data
-                query = """
-                SELECT * FROM enriched_people 
-                WHERE LOWER(TRIM(first_name)) = LOWER(%s) 
-                AND LOWER(TRIM(last_name)) = LOWER(%s)
-                AND LOWER(TRIM(IFNULL(city,''))) = LOWER(%s)
-                AND LOWER(TRIM(IFNULL(state,''))) = LOWER(%s)
-                LIMIT 1
-                """
-                
-                rows = db_manager.execute_query(query, (first_name, last_name, city, state))
-                if rows:
-                    # Build enriched record from SQL data
-                    row = rows[0]
-                    try:
-                        ed_raw = row.get('enrichment_data')
-                        ed = json.loads(ed_raw) if ed_raw else {}
-                    except Exception:
-                        ed = {}
-                    
-                    enriched_record = {
-                        'original_name': f"{first_name} {last_name}",
-                        'patent_number': row.get('patent_number', ''),
-                        'patent_title': ed.get('original_person', {}).get('patent_title', ''),
-                        'match_score': ed.get('enrichment_result', {}).get('match_score', 0),
-                        'enriched_data': ed,
-                        'enriched_at': row.get('enriched_at')
-                    }
-                    matched_existing_for_this_run.append(enriched_record)
-        
-        # Filter out already enriched people (FAST in-memory check)
-        new_people_to_enrich = []
+            total_existing = len(already_enriched_from_step1)
+            print(f"Processing {total_existing} already-enriched people from Step 1...")
+            for idx, person in enumerate(already_enriched_from_step1, start=1):
+                match = lookup.find_best_match(person)
+                if match:
+                    sig = _record_signature(match)
+                    if sig not in matched_signatures:
+                        matched_existing_for_this_run.append(match)
+                        matched_signatures.add(sig)
+                if idx % 25 == 0 or idx == total_existing:
+                    print(
+                        f"PROGRESS: Matching Step1 existing {idx}/{total_existing}"
+                    )
+
+        print("STEP 3: Checking for duplicates...")
+
+        new_people_to_enrich: List[Dict[str, Any]] = []
         skipped_count = 0
         skipped_failed_count = 0
         skipped_duplicate_count = 0
-        
-        # Express mode: skip previously failed enrichments
+
         express_mode = bool(config.get('EXPRESS_MODE'))
         failed_set = set()
         if express_mode:
             print("Express mode enabled: loading failed enrichments to skip...")
-            failed_set = _load_failed_signatures(DatabaseConfig.from_env())
+            failed_set = _load_failed_signatures(db_config)
             print(f"Loaded {len(failed_set)} failed signatures to skip in express mode")
-        
-        for person in people_to_enrich:
+
+        lookup.prefetch_people(people_to_enrich)
+
+        total_people_to_enrich = len(people_to_enrich)
+        for idx, person in enumerate(people_to_enrich, start=1):
             if express_mode and _person_signature(person) in failed_set:
                 skipped_failed_count += 1
                 skipped_count += 1
                 continue
-            
-            # Check if this person is already enriched
-            match = find_existing_enriched_match(person, existing_enriched)
+
+            match = lookup.find_best_match(person)
             if match is not None:
                 skipped_duplicate_count += 1
                 skipped_count += 1
-                # Note: We don't add to matched_existing here because these weren't from Step 1
             else:
                 new_people_to_enrich.append(person)
 
-        # Detailed summary of filtering
+            if idx % 50 == 0 or idx == total_people_to_enrich:
+                print(
+                    f"PROGRESS: Duplicate screening {idx}/{total_people_to_enrich}"
+                )
+
+        existing_enriched_records = lookup.get_all_records()
+        print(f"Loaded {len(existing_enriched_records)} existing enriched records for duplicate checks")
+        print(f"PROGRESS: Enrichment cache contains {len(existing_enriched_records)} records")
+
         print(
             "After duplicate check: "
             f"{len(new_people_to_enrich)} new people, "
@@ -277,17 +253,19 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
             f"{skipped_failed_count} skipped (previously failed), "
             f"{skipped_count} total skipped"
         )
-        
-        # Combine all enriched data for return - existing + newly enriched + matched from step 1
-        if existing_enriched and matched_existing_for_this_run:
-            all_enriched_data = existing_enriched + matched_existing_for_this_run
-        elif existing_enriched:
-            all_enriched_data = existing_enriched
-        elif matched_existing_for_this_run:
-            all_enriched_data = matched_existing_for_this_run
-        else:
-            all_enriched_data = []
-        
+
+        all_enriched_data: List[Dict[str, Any]] = []
+        if existing_enriched_records:
+            all_enriched_data.extend(existing_enriched_records)
+        if matched_existing_for_this_run:
+            # Avoid duplicates if records already in all_enriched_data
+            existing_sigs = {_record_signature(rec) for rec in all_enriched_data}
+            for rec in matched_existing_for_this_run:
+                sig = _record_signature(rec)
+                if sig not in existing_sigs:
+                    all_enriched_data.append(rec)
+                    existing_sigs.add(sig)
+
         if not new_people_to_enrich:
             return {
                 'success': True,
@@ -296,7 +274,7 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
                 'enriched_count': 0,
                 'enriched_data': all_enriched_data,
                 'newly_enriched_data': [],
-                'matched_existing': matched_existing_for_this_run,  # The 19 people from Step 1
+                'matched_existing': matched_existing_for_this_run,
                 'actual_api_cost': '$0.00',
                 'api_calls_saved': len(people_to_enrich) + len(already_enriched_from_step1),
                 'already_enriched_count': skipped_duplicate_count,
@@ -309,6 +287,7 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
             print(f"TEST MODE: Limited to {len(new_people_to_enrich)} people")
         
         print(f"STEP 4: Enriching {len(new_people_to_enrich)} people...")
+        print(f"PROGRESS: Enrichment queue ready ({len(new_people_to_enrich)}/{len(people_to_enrich) + len(already_enriched_from_step1)})")
 
         # Initialize simple live progress (works with UI poller)
         progress_path = Path(config.get('OUTPUT_DIR', 'output')) / 'step2_progress.json'
@@ -336,32 +315,25 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
         
         # Note: Each enrichment is now saved to SQL inside the loop
         print(f"STEP 5: Saved {len(newly_enriched)} enrichments during processing")
-        
-        # Combine all enriched data for return - existing + newly enriched + matched from step 1
-        if existing_enriched and newly_enriched and matched_existing_for_this_run:
-            all_enriched_data = existing_enriched + newly_enriched + matched_existing_for_this_run
-        elif existing_enriched and newly_enriched:
-            all_enriched_data = existing_enriched + newly_enriched
-        elif existing_enriched and matched_existing_for_this_run:
-            all_enriched_data = existing_enriched + matched_existing_for_this_run
-        elif newly_enriched and matched_existing_for_this_run:
-            all_enriched_data = newly_enriched + matched_existing_for_this_run
-        elif existing_enriched:
-            all_enriched_data = existing_enriched
-        elif newly_enriched:
-            all_enriched_data = newly_enriched
-        elif matched_existing_for_this_run:
-            all_enriched_data = matched_existing_for_this_run
-        else:
-            all_enriched_data = []
-        
+        if newly_enriched:
+            print(f"PROGRESS: Enrichment saved ({len(newly_enriched)}/{len(new_people_to_enrich)})")
+
+        combined_enriched: List[Dict[str, Any]] = list(all_enriched_data)
+        existing_sigs = {_record_signature(rec) for rec in combined_enriched}
+
+        for rec in newly_enriched:
+            sig = _record_signature(rec)
+            if sig not in existing_sigs:
+                combined_enriched.append(rec)
+                existing_sigs.add(sig)
+
         result = {
             'success': True,
             'total_people': len(people_to_enrich) + len(already_enriched_from_step1),
             'enriched_count': len(newly_enriched),
             'enrichment_rate': len(newly_enriched) / len(new_people_to_enrich) * 100 if new_people_to_enrich else 0,
             # Full snapshot from SQL + this run (for reporting)
-            'enriched_data': all_enriched_data,
+            'enriched_data': combined_enriched,
             # Only records created in this run (for local file append semantics)
             'newly_enriched_data': newly_enriched,
             # Existing matches from this run (the 19 people from Step 1)
@@ -374,7 +346,7 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
         }
         
         print(f"STEP 6: Function completed successfully!")
-        print(f"  Returning {len(all_enriched_data)} total enriched records")
+        print(f"  Returning {len(combined_enriched)} total enriched records")
         print(f"  Newly enriched: {len(newly_enriched)}")
         print(f"  Matched existing from Step 1: {len(matched_existing_for_this_run)}")
         print(f"  Result keys: {list(result.keys())}")
@@ -392,128 +364,271 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
             'actual_api_cost': '$0.00'
         }
     
-def load_existing_enriched_people() -> List[Dict[str, Any]]:
-    """Load all existing enriched people from database in one query.
-    Be tolerant of schema differences (e.g., missing mail_to_add1) by probing columns and building a safe SELECT.
-    """
-    try:
-        db_config = DatabaseConfig.from_env()
-        db_manager = DatabaseManager(db_config)
+def _normalize_value(value: Any) -> str:
+    return (value or '').strip().lower()
 
-        # Discover available columns on existing_people
-        cols = []
+
+def _record_signature(record: Dict[str, Any]) -> str:
+    return '|'.join([
+        _normalize_value(record.get('first_name')),
+        _normalize_value(record.get('last_name')),
+        _normalize_value(record.get('city')),
+        _normalize_value(record.get('state')),
+        (record.get('patent_number') or record.get('patent_no') or '').strip()
+    ])
+
+
+class EnrichedPeopleLookup:
+    """Lazy loader that fetches only necessary enriched_people rows."""
+
+    def __init__(self, db_manager: DatabaseManager):
+        self.db = db_manager
+        self._cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        self._prefetched_last: Set[str] = set()
+        self._all_records: Dict[str, Dict[str, Any]] = {}
+        self._state_limit = 250
+        self._last_name_limit = 750
+        self._select_clause, self._mapping = self._discover_existing_people_columns()
+        self._base_select_sql = (
+            f"SELECT ep.*{(', ' + self._select_clause) if self._select_clause else ''} "
+            "FROM enriched_people ep "
+            "LEFT JOIN existing_people ex ON "
+            "LOWER(TRIM(ep.first_name)) = LOWER(TRIM(ex.first_name)) "
+            "AND LOWER(TRIM(ep.last_name)) = LOWER(TRIM(ex.last_name)) "
+            "AND LOWER(TRIM(IFNULL(ep.city,''))) = LOWER(TRIM(IFNULL(ex.city,''))) "
+            "AND LOWER(TRIM(IFNULL(ep.state,''))) = LOWER(TRIM(IFNULL(ex.state,''))) "
+        )
+        self._query_by_last_and_state = (
+            self._base_select_sql +
+            "WHERE LOWER(TRIM(ep.last_name)) = %s "
+            "AND LOWER(TRIM(IFNULL(ep.state,''))) = %s "
+            "ORDER BY ep.enriched_at DESC LIMIT %s"
+        )
+        self._query_by_last_only = (
+            self._base_select_sql +
+            "WHERE LOWER(TRIM(ep.last_name)) = %s "
+            "ORDER BY ep.enriched_at DESC LIMIT %s"
+        )
+
+    def _discover_existing_people_columns(self) -> Tuple[str, Dict[str, str]]:
+        cols: List[str] = []
         try:
-            col_rows = db_manager.execute_query("SHOW COLUMNS FROM existing_people") or []
-            cols = [r.get('Field') or r.get('COLUMN_NAME') or r.get('field') for r in col_rows if isinstance(r, dict)]
+            col_rows = self.db.execute_query("SHOW COLUMNS FROM existing_people") or []
+            cols = [
+                (row.get('Field') or row.get('COLUMN_NAME') or row.get('field'))
+                for row in col_rows if isinstance(row, dict)
+            ]
         except Exception:
             cols = []
 
-        def _pick(want: str, alts: List[str] = None) -> str:
-            alts = alts or []
-            if want in cols:
-                return want
-            for a in alts:
-                if a in cols:
-                    return a
+        def pick(primary: str, aliases: Optional[List[str]] = None) -> str:
+            aliases = aliases or []
+            if primary in cols:
+                return primary
+            for candidate in aliases:
+                if candidate in cols:
+                    return candidate
             return ''
 
-        # Map to aliases expected by downstream code
         mapping = {
-            'issue_id': _pick('issue_id'),
-            'new_issue_rec_num': _pick('new_issue_rec_num', ['issue_rec_num','rec_num']),
-            'inventor_id': _pick('inventor_id'),
-            'patent_no': _pick('patent_no', ['patent_number','patent_num']),
-            'title': _pick('title', ['patent_title','invention_title']),
-            'issue_date': _pick('issue_date', ['date','patent_date']),
-            'bar_code': _pick('bar_code', ['barcode']),
-            'mod_user': _pick('mod_user', ['modified_by','last_modified_by']),
-            'mail_to_assignee': _pick('mail_to_assignee', ['assignee','assign_name']),
-            'mail_to_name': _pick('mail_to_name'),
-            'mail_to_add1': _pick('mail_to_add1', ['address','addr1','mail_to_add_1'])
+            'issue_id': pick('issue_id'),
+            'new_issue_rec_num': pick('new_issue_rec_num', ['issue_rec_num', 'rec_num']),
+            'inventor_id': pick('inventor_id'),
+            'patent_no': pick('patent_no', ['patent_number', 'patent_num']),
+            'title': pick('title', ['patent_title', 'invention_title']),
+            'issue_date': pick('issue_date', ['date', 'patent_date']),
+            'bar_code': pick('bar_code', ['barcode']),
+            'mod_user': pick('mod_user', ['modified_by', 'last_modified_by']),
+            'mail_to_assignee': pick('mail_to_assignee', ['assignee', 'assign_name']),
+            'mail_to_name': pick('mail_to_name'),
+            'mail_to_add1': pick('mail_to_add1', ['address', 'addr1', 'mail_to_add_1'])
         }
 
         select_parts = []
-        for alias, col in mapping.items():
-            if not col:
+        for alias, column in mapping.items():
+            if not column:
                 continue
-            if col == alias:
-                select_parts.append(f"ex.{col}")
+            if alias == column:
+                select_parts.append(f"ex.{column}")
             else:
-                select_parts.append(f"ex.{col} AS {alias}")
-        select_clause = ', '.join(select_parts) if select_parts else ''
+                select_parts.append(f"ex.{column} AS {alias}")
 
+        return ', '.join(select_parts), mapping
+
+    def _convert_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            enrichment_data = json.loads(row.get('enrichment_data', '{}'))
+        except Exception:
+            enrichment_data = {}
+
+        first_name = row.get('first_name') or ''
+        last_name = row.get('last_name') or ''
+        city = row.get('city') or ''
+        state = row.get('state') or ''
+        patent_number = row.get('patent_number') or row.get('patent_no') or ''
+
+        record = {
+            'original_name': f"{first_name} {last_name}".strip(),
+            'patent_number': patent_number,
+            'patent_title': enrichment_data.get('original_person', {}).get('patent_title', ''),
+            'match_score': enrichment_data.get('enrichment_result', {}).get('match_score', 0),
+            'enriched_data': enrichment_data,
+            'enriched_at': row.get('enriched_at'),
+            'first_name': first_name,
+            'last_name': last_name,
+            'city': city,
+            'state': state,
+        }
+
+        for alias in self._mapping:
+            if alias in row and alias not in record:
+                record[alias] = row.get(alias)
+
+        if 'mail_to_add1' not in record:
+            record['mail_to_add1'] = row.get('address')
+
+        return record
+
+    def _store_records(self, records: List[Dict[str, Any]]) -> None:
+        for rec in records:
+            sig = _record_signature(rec)
+            if sig not in self._all_records:
+                self._all_records[sig] = rec
+
+    def prefetch_people(self, people: List[Dict[str, Any]]) -> None:
+        if not people:
+            return
+        unique_last: List[str] = []
+        seen: Set[str] = set()
+        for person in people:
+            last = _normalize_value(person.get('last_name'))
+            if last and last not in seen:
+                seen.add(last)
+                unique_last.append(last)
+        if not unique_last:
+            return
+
+        chunk_size =50
+        total = len(unique_last)
+        for idx in range(0, total, chunk_size):
+            chunk = unique_last[idx:idx + chunk_size]
+            self._prefetch_last_names(chunk)
+            print(
+                f"PROGRESS: Prefetching existing enrichments {min(idx + len(chunk), total)}/{total}"
+            )
+
+    def _prefetch_last_names(self, last_names: List[str]) -> None:
+        names = [ln for ln in last_names if ln and ln not in self._prefetched_last]
+        if not names:
+            return
+
+        placeholders = ', '.join(['%s'] * len(names))
+        limit = self._last_name_limit * max(1, len(names))
         query = (
-            f"SELECT ep.*{(', ' + select_clause) if select_clause else ''} "
-            "FROM enriched_people ep "
-            "LEFT JOIN existing_people ex ON ep.first_name = ex.first_name AND ep.last_name = ex.last_name "
-            "AND IFNULL(ep.city,'') = IFNULL(ex.city,'') AND IFNULL(ep.state,'') = IFNULL(ex.state,'') "
-            "ORDER BY ep.enriched_at DESC"
+            self._base_select_sql +
+            f"WHERE LOWER(TRIM(ep.last_name)) IN ({placeholders}) "
+            "ORDER BY ep.enriched_at DESC LIMIT %s"
         )
-        results = db_manager.execute_query(query)
-        
-        enriched_data = []
-        parse_errors: List[Tuple[Any, str]] = []
-        for row in results:
-            try:
-                # Parse JSON data
-                enrichment_data = json.loads(row.get('enrichment_data', '{}'))
-                
-                # Convert to standard format
-                enriched_record = {
-                    'original_name': f"{row.get('first_name', '')} {row.get('last_name', '')}".strip(),
-                    'patent_number': row.get('patent_number', ''),
-                    'patent_title': enrichment_data.get('original_person', {}).get('patent_title', ''),
-                    'match_score': enrichment_data.get('enrichment_result', {}).get('match_score', 0),
-                    'enriched_data': enrichment_data,
-                    'enriched_at': row.get('enriched_at'),
-                    # propagate selected existing_people fields when available
-                    'issue_id': row.get('issue_id'),
-                    'new_issue_rec_num': row.get('new_issue_rec_num'),
-                    'inventor_id': row.get('inventor_id'),
-                    'patent_no': row.get('patent_no'),
-                    'title': row.get('title'),
-                    'issue_date': row.get('issue_date'),
-                    'bar_code': row.get('bar_code'),
-                    'mod_user': row.get('mod_user'),
-                    'mail_to_assignee': row.get('mail_to_assignee'),
-                    'mail_to_name': row.get('mail_to_name'),
-                    'mail_to_add1': row.get('mail_to_add1') or row.get('address')
-                }
-                enriched_data.append(enriched_record)
-                
-            except Exception as e:
-                parse_errors.append((row.get('id'), str(e)))
+        params: List[Any] = list(names)
+        params.append(limit)
+        try:
+            rows = self.db.execute_query(query, tuple(params)) or []
+        except Exception as exc:
+            logger.warning(
+                f"Error prefetching enriched_people for last names {names[:5]}...: {exc}"
+            )
+            rows = []
+
+        grouped: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        for row in rows:
+            record = self._convert_row(row)
+            last = _normalize_value(record.get('last_name'))
+            state = _normalize_value(record.get('state'))
+            grouped.setdefault(last, {}).setdefault(state, []).append(record)
+
+        for last, state_map in grouped.items():
+            all_records: List[Dict[str, Any]] = []
+            for state, records in state_map.items():
+                key = (last, state)
+                self._cache[key] = list(records)
+                all_records.extend(records)
+            self._cache[(last, '')] = list(all_records)
+            self._store_records(all_records)
+            self._prefetched_last.add(last)
+
+    def _fetch_candidates(self, last_name: str, state: Optional[str]) -> List[Dict[str, Any]]:
+        normalized_last = _normalize_value(last_name)
+        normalized_state = _normalize_value(state)
+        cache_key = (normalized_last, normalized_state)
+
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        if not normalized_last:
+            self._cache[cache_key] = []
+            return []
+
+        if normalized_last not in self._prefetched_last:
+            self._prefetch_last_names([normalized_last])
+
+        if cache_key not in self._cache:
+            aggregated = self._cache.get((normalized_last, ''))
+            if aggregated and normalized_state:
+                filtered = [
+                    record for record in aggregated
+                    if _normalize_value(record.get('state')) == normalized_state
+                ]
+                self._cache[cache_key] = filtered
+            else:
+                self._cache[cache_key] = aggregated[:] if aggregated else []
+
+        return self._cache.get(cache_key, [])
+
+    def find_best_match(self, person: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        last_name = _normalize_value(person.get('last_name'))
+        if not last_name:
+            return None
+
+        state = _normalize_value(person.get('state'))
+        candidates = self._fetch_candidates(last_name, state)
+        if state and not candidates:
+            candidates = self._fetch_candidates(last_name, None)
+        if not candidates:
+            return None
+
+        first = _normalize_value(person.get('first_name'))
+        city = _normalize_value(person.get('city'))
+
+        state_match: Optional[Dict[str, Any]] = None
+        initial_match: Optional[Dict[str, Any]] = None
+
+        for candidate in candidates:
+            existing_data = candidate.get('enriched_data', {}).get('original_person', {}) or {}
+            cand_first = _normalize_value(existing_data.get('first_name') or candidate.get('first_name'))
+            cand_last = _normalize_value(existing_data.get('last_name') or candidate.get('last_name'))
+            cand_city = _normalize_value(existing_data.get('city') or candidate.get('city'))
+            cand_state = _normalize_value(existing_data.get('state') or candidate.get('state'))
+
+            if first and last_name and city and state and (
+                cand_first == first and cand_last == last_name and cand_city == city and cand_state == state
+            ):
+                return candidate
+
+            if first and last_name and state and (
+                cand_first == first and cand_last == last_name and cand_state == state
+            ) and state_match is None:
+                state_match = candidate
                 continue
 
-        if parse_errors:
-            total_errors = len(parse_errors)
-            unique_rows = len({row_id for row_id, _ in parse_errors})
-            sample_row, sample_error = parse_errors[0]
-            logger.warning(
-                "Encountered %d parse errors across %d rows while loading enrichment data; "
-                "first example row %s: %s",
-                total_errors,
-                unique_rows,
-                sample_row,
-                sample_error,
-            )
-        
-        # Fallback: if DB has no enriched rows, try local snapshot to preserve duplicate protection
-        if not enriched_data:
-            try:
-                snap_path = Path('output') / 'enriched_patents.json'
-                if snap_path.exists() and snap_path.stat().st_size > 0:
-                    with open(snap_path, 'r') as f:
-                        local_data = json.load(f)
-                    if isinstance(local_data, list):
-                        return local_data
-            except Exception:
-                pass
-        return enriched_data
-        
-    except Exception as e:
-        logger.warning(f"Error loading existing enriched people: {e}")
-        return []
+            if first and last_name and state and cand_first and (
+                cand_first[:1] == first[:1] and cand_last == last_name and cand_state == state
+            ) and initial_match is None:
+                initial_match = candidate
+
+        return state_match or initial_match
+
+    def get_all_records(self) -> List[Dict[str, Any]]:
+        return list(self._all_records.values())
 
 
 def load_people_to_enrich(config: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -534,76 +649,6 @@ def load_people_to_enrich(config: Dict[str, Any]) -> List[Dict[str, Any]]:
         print(f"Loaded {len(people)} people from file")
     
     return people
-
-
-def is_already_enriched(person: Dict[str, Any], existing_enriched: List[Dict[str, Any]]) -> bool:
-    """Check if person is already enriched - FAST in-memory lookup"""
-    
-    first_name = (person.get('first_name') or '').strip().lower()
-    last_name = (person.get('last_name') or '').strip().lower() 
-    city = (person.get('city') or '').strip().lower()
-    state = (person.get('state') or '').strip().lower()
-    
-    if not first_name and not last_name:
-        return False
-    
-    # Check against existing enriched data
-    for existing in existing_enriched:
-        existing_data = existing.get('enriched_data', {}).get('original_person', {})
-        
-        existing_first = (existing_data.get('first_name') or '').strip().lower()
-        existing_last = (existing_data.get('last_name') or '').strip().lower()
-        existing_city = (existing_data.get('city') or '').strip().lower()
-        existing_state = (existing_data.get('state') or '').strip().lower()
-        
-        # Exact match (highest confidence)
-        if (first_name and last_name and city and state and
-            first_name == existing_first and last_name == existing_last and
-            city == existing_city and state == existing_state):
-            return True
-        
-        # State match (medium confidence)
-        if (first_name and last_name and state and
-            first_name == existing_first and last_name == existing_last and
-            state == existing_state):
-            return True
-        
-        # First initial match (lower confidence)
-        if (first_name and last_name and state and existing_first and
-            first_name[0] == existing_first[0] and last_name == existing_last and
-            state == existing_state):
-            return True
-    
-    return False
-
-
-def find_existing_enriched_match(person: Dict[str, Any], existing_enriched: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Return the existing enriched record if already enriched, else None."""
-    first_name = (person.get('first_name') or '').strip().lower()
-    last_name = (person.get('last_name') or '').strip().lower()
-    city = (person.get('city') or '').strip().lower()
-    state = (person.get('state') or '').strip().lower()
-    if not first_name and not last_name:
-        return None
-    for existing in existing_enriched:
-        existing_data = existing.get('enriched_data', {}).get('original_person', {})
-        existing_first = (existing_data.get('first_name') or '').strip().lower()
-        existing_last = (existing_data.get('last_name') or '').strip().lower()
-        existing_city = (existing_data.get('city') or '').strip().lower()
-        existing_state = (existing_data.get('state') or '').strip().lower()
-        if (first_name and last_name and city and state and
-            first_name == existing_first and last_name == existing_last and
-            city == existing_city and state == existing_state):
-            return existing
-        if (first_name and last_name and state and
-            first_name == existing_first and last_name == existing_last and
-            state == existing_state):
-            return existing
-        if (first_name and last_name and state and existing_first and
-            first_name[0] == existing_first[0] and last_name == existing_last and
-            state == existing_state):
-            return existing
-    return None
 
 
 def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any], progress: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
@@ -674,6 +719,7 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any], pr
         person_name = f"{person.get('first_name', '')} {person.get('last_name', '')}"
         
         print(f"ENRICHING {progress}/{total}: {person_name}")
+        print(f"PROGRESS: Enriching {progress}/{total}")
         print(f"  Person data: first_name='{person.get('first_name')}', last_name='{person.get('last_name')}', city='{person.get('city')}', state='{person.get('state')}'")
         
         try:

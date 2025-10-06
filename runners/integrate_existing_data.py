@@ -32,7 +32,8 @@ class BatchSQLQueryIntegrator:
         self.dev_issue_cutoff = None
         self.dev_issue_cutoff_raw = config.get('DEV_ISSUE_CUTOFF')
         self.skip_enriched_filter = bool(config.get('SKIP_ALREADY_ENRICHED_FILTER'))
-        self._enriched_person_signatures: Optional[set] = None
+        self._enriched_signature_cache: Dict[str, Dict[str, Any]] = {}
+        self._enriched_signatures_full_cache: Optional[set] = None
         if self.dev_mode:
             if self.dev_issue_cutoff_raw:
                 self.dev_issue_cutoff = self._parse_issue_date_value(self.dev_issue_cutoff_raw)
@@ -859,14 +860,16 @@ class BatchSQLQueryIntegrator:
         state = self._clean_string(person.get('state', '')).lower()
         return '|'.join([first, last, city, state])
 
-    def _load_enriched_person_signatures(self) -> set:
-        """Load signatures for people already enriched (cached per run)."""
-        if self._enriched_person_signatures is not None:
-            return self._enriched_person_signatures
-
+    def _load_enriched_person_signatures(self, people: Optional[List[Dict[str, Any]]] = None) -> set:
+        """Load signatures for already-enriched people. Limit to relevant rows when possible."""
         if not self.use_sql:
-            self._enriched_person_signatures = set()
-            return self._enriched_person_signatures
+            return set()
+
+        if people:
+            return self._load_signatures_for_people(people)
+
+        if self._enriched_signatures_full_cache is not None:
+            return self._enriched_signatures_full_cache
 
         try:
             query = (
@@ -887,19 +890,82 @@ class BatchSQLQueryIntegrator:
                 sig = '|'.join([first, last, city, state])
                 if sig.strip('|'):
                     signatures.add(sig)
-            self._enriched_person_signatures = signatures
+            self._enriched_signatures_full_cache = signatures
             logger.info(f"Loaded {len(signatures):,} already-enriched signatures for Step 1 filtering")
+            return signatures
         except Exception as exc:
             logger.warning(f"Could not load enriched_people signatures: {exc}")
-            self._enriched_person_signatures = set()
-        return self._enriched_person_signatures
+            self._enriched_signatures_full_cache = set()
+            return set()
+
+    def _load_signatures_for_people(self, people: List[Dict[str, Any]]) -> set:
+        if not people:
+            return set()
+
+        last_state_map: Dict[str, set] = {}
+        for person in people:
+            last = self._clean_string(person.get('last_name', '')).lower()
+            if not last:
+                continue
+            state = self._clean_string(person.get('state', '')).lower()
+            state_set = last_state_map.setdefault(last, set())
+            state_set.add(state)
+            state_set.add('')  # Always include blank state matches
+
+        signatures: set = set()
+
+        for last, states in last_state_map.items():
+            cache_entry = self._enriched_signature_cache.get(last)
+            if cache_entry is None:
+                cache_entry = {'states': set(), 'signatures': set()}
+                self._enriched_signature_cache[last] = cache_entry
+
+            needed_states = states - cache_entry['states']
+            if needed_states:
+                placeholders = ', '.join(['%s'] * len(needed_states))
+                query = (
+                    "SELECT LOWER(TRIM(first_name)) AS first_name, "
+                    "LOWER(TRIM(last_name)) AS last_name, "
+                    "LOWER(TRIM(COALESCE(city,''))) AS city, "
+                    "LOWER(TRIM(COALESCE(state,''))) AS state "
+                    "FROM enriched_people "
+                    "WHERE LOWER(TRIM(last_name)) = %s "
+                    f"AND LOWER(TRIM(IFNULL(state,''))) IN ({placeholders}) "
+                    "AND enrichment_data IS NOT NULL"
+                )
+                params: List[Any] = [last]
+                params.extend(list(needed_states))
+                try:
+                    rows = self.db_manager.execute_query(query, tuple(params)) or []
+                except Exception as exc:
+                    logger.warning(
+                        f"Could not load enriched signatures for last='{last}' states={needed_states}: {exc}"
+                    )
+                    rows = []
+
+                new_signatures: set = set()
+                for row in rows:
+                    first = (row.get('first_name') or '').strip()
+                    last_name = (row.get('last_name') or '').strip()
+                    city = (row.get('city') or '').strip()
+                    state_val = (row.get('state') or '').strip()
+                    sig = '|'.join([first, last_name, city, state_val])
+                    if sig.strip('|'):
+                        new_signatures.add(sig)
+
+                cache_entry['states'].update(needed_states)
+                cache_entry['signatures'].update(new_signatures)
+
+            signatures.update(cache_entry['signatures'])
+
+        return signatures
 
     def _filter_already_enriched_people(self, people: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Split people into enrichment vs already-enriched buckets."""
         if not people:
             return [], []
 
-        signatures = self._load_enriched_person_signatures()
+        signatures = self._load_enriched_person_signatures(people)
         if not signatures:
             return people, []
 

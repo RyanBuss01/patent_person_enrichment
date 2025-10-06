@@ -8,7 +8,7 @@ import os
 import json
 import csv
 import shutil
-from typing import Dict, Any, List, Tuple, Set
+from typing import Dict, Any, List, Tuple, Set, Optional
 from pathlib import Path
 from datetime import datetime
 from decimal import Decimal
@@ -218,6 +218,52 @@ def _write_rows_to_csv(path: str, rows: List[Dict[str, Any]], preferred_order: L
         writer.writeheader()
         for row in rows:
             writer.writerow({h: row.get(h, '') for h in headers})
+
+
+def _compose_fieldnames(preferred: List[str], table_columns: List[str]) -> List[str]:
+    ordered: List[str] = []
+    seen: Set[str] = set()
+
+    for col in preferred or []:
+        if col and col not in seen:
+            ordered.append(col)
+            seen.add(col)
+
+    for col in table_columns:
+        if col and col not in seen:
+            ordered.append(col)
+            seen.add(col)
+
+    return ordered
+
+
+def _get_table_columns(db_manager: DatabaseManager, table_name: str) -> List[str]:
+    try:
+        rows = db_manager.execute_query(f"SHOW COLUMNS FROM {table_name}") or []
+        columns = [row.get('Field') or row.get('field') or row.get('COLUMN_NAME') for row in rows]
+        return [col for col in columns if col]
+    except Exception:
+        return []
+
+
+def _open_csv_writer(path: str, fieldnames: List[str]):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    handle = open(path, 'w', newline='')
+    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+    writer.writeheader()
+    return handle, writer
+
+
+def _stream_table(db_manager: DatabaseManager, query: str, params: Optional[tuple] = None, batch_size: int = 5000):
+    with db_manager.get_connection() as conn:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(query, params or ())
+        while True:
+            rows = cursor.fetchmany(batch_size)
+            if not rows:
+                break
+            for row in rows:
+                yield row
 
 
 def _normalize_pdl_item(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -801,19 +847,6 @@ def write_simple_zaba_csv(path: str, records: List[dict]) -> None:
 
 def generate_full_csv_exports(config: Dict[str, Any], db_manager: DatabaseManager, output_dir: str, files_generated: Dict[str, Dict[str, Any]]) -> None:
     """Generate the full CSV exports (current/new/new+existing/all) directly from SQL tables."""
-    try:
-        enriched_rows = db_manager.execute_query(
-            "SELECT * FROM enriched_people ORDER BY enriched_at DESC"
-        ) or []
-    except Exception as exc:
-        logger.warning(f"Unable to read enriched_people table for full exports: {exc}")
-        return
-
-    try:
-        existing_people_rows = db_manager.execute_query("SELECT * FROM existing_people") or []
-    except Exception:
-        existing_people_rows = []
-
     run_started_at = _parse_timestamp(config.get('RUN_STARTED_AT'))
     enrichment_result = config.get('enrichment_result') or {}
 
@@ -829,111 +862,142 @@ def generate_full_csv_exports(config: Dict[str, Any], db_manager: DatabaseManage
                 scope_signatures.add(sig)
     scope_signatures.update(_extract_signatures_from_enriched_items(enrichment_result.get('matched_existing')))
 
-    enriched_items: List[Tuple[Dict[str, Any], str, datetime]] = []
-    enriched_scope_signatures: Set[str] = set()
-    all_enriched_signatures: Set[str] = set()
-
-    for row in enriched_rows:
-        sig = _person_signature_values(
-            row.get('first_name'),
-            row.get('last_name'),
-            row.get('city'),
-            row.get('state'),
-            row.get('patent_number') or row.get('patent_no')
-        )
-        ts = _parse_timestamp(row.get('enriched_at')) or _parse_timestamp(row.get('created_at')) or _parse_timestamp(row.get('updated_at'))
-        enriched_items.append((row, sig, ts))
-        all_enriched_signatures.add(sig)
-
-    if not new_signatures and run_started_at:
-        for _, sig, ts in enriched_items:
-            if ts and ts >= run_started_at:
-                new_signatures.add(sig)
-
-    existing_items: List[Tuple[Dict[str, Any], str]] = []
-    for row in existing_people_rows:
-        sig = _person_signature_values(
-            row.get('first_name'),
-            row.get('last_name'),
-            row.get('city'),
-            row.get('state'),
-            row.get('patent_no') or row.get('patent_number')
-        )
-        existing_items.append((row, sig))
-
-    if not scope_signatures:
-        scope_signatures = set(all_enriched_signatures)
-
     preferred_columns = ['record_scope', 'source_table', 'id', 'first_name', 'last_name', 'city', 'state', 'patent_number']
-
-    # NEW rows
-    new_rows_prepared: List[Dict[str, Any]] = []
-    for row, sig, _ in enriched_items:
-        if sig and sig in new_signatures:
-            new_rows_prepared.append(_normalize_sql_row(row, {'source_table': 'enriched_people', 'record_scope': 'new'}))
+    enriched_columns = _get_table_columns(db_manager, 'enriched_people')
+    existing_columns = _get_table_columns(db_manager, 'existing_people')
+    enriched_fieldnames = _compose_fieldnames(preferred_columns, enriched_columns)
+    current_fieldnames = _compose_fieldnames(preferred_columns, enriched_columns + existing_columns)
 
     new_path = os.path.join(output_dir, 'new_enrichments.csv')
-    _write_rows_to_csv(new_path, new_rows_prepared, preferred_columns)
-    files_generated[new_path] = {
-        'records_written': len(new_rows_prepared),
-        'records_filtered': 0,
-        'data_type': 'full_new'
-    }
-    print(f"  📄 {new_path} ({len(new_rows_prepared):,} records)")
-
-    # NEW & EXISTING scope rows (limited to scope signatures when provided)
-    new_and_existing_rows: List[Dict[str, Any]] = []
-    for row, sig, _ in enriched_items:
-        if not sig:
-            continue
-        if scope_signatures and sig not in scope_signatures:
-            continue
-        record_scope = 'new' if sig in new_signatures else 'existing'
-        prepared = _normalize_sql_row(row, {'source_table': 'enriched_people', 'record_scope': record_scope})
-        new_and_existing_rows.append(prepared)
-        enriched_scope_signatures.add(sig)
-
     new_existing_path = os.path.join(output_dir, 'new_and_existing_enrichments.csv')
-    _write_rows_to_csv(new_existing_path, new_and_existing_rows, preferred_columns)
-    files_generated[new_existing_path] = {
-        'records_written': len(new_and_existing_rows),
-        'records_filtered': 0,
-        'data_type': 'full_new_and_existing'
-    }
-    print(f"  📄 {new_existing_path} ({len(new_and_existing_rows):,} records)")
-
-    # CURRENT rows = new & existing scope rows + existing_people rows that were filtered out
-    current_rows: List[Dict[str, Any]] = list(new_and_existing_rows)
-    if scope_signatures:
-        for row, sig in existing_items:
-            if not sig or sig not in scope_signatures:
-                continue
-            prepared = _normalize_sql_row(row, {'source_table': 'existing_people', 'record_scope': 'existing_table'})
-            current_rows.append(prepared)
-
     current_path = os.path.join(output_dir, 'current_enrichments.csv')
-    _write_rows_to_csv(current_path, current_rows, preferred_columns)
-    files_generated[current_path] = {
-        'records_written': len(current_rows),
-        'records_filtered': 0,
-        'data_type': 'full_current'
-    }
-    print(f"  📄 {current_path} ({len(current_rows):,} records)")
-
-    # ALL rows = full enriched_people table
-    all_rows_prepared: List[Dict[str, Any]] = []
-    for row, sig, _ in enriched_items:
-        record_scope = 'new' if sig in new_signatures else 'existing'
-        all_rows_prepared.append(_normalize_sql_row(row, {'source_table': 'enriched_people', 'record_scope': record_scope}))
-
     all_path = os.path.join(output_dir, 'all_enrichments.csv')
-    _write_rows_to_csv(all_path, all_rows_prepared, preferred_columns)
-    files_generated[all_path] = {
-        'records_written': len(all_rows_prepared),
-        'records_filtered': 0,
-        'data_type': 'full_all'
-    }
-    print(f"  📄 {all_path} ({len(all_rows_prepared):,} records)")
+
+    print("PROGRESS: CSV building (1/3) - exporting enriched_people base tables")
+
+    auto_detect_new = not new_signatures and run_started_at is not None
+    all_enriched_signatures: Set[str] = set()
+
+    new_count = new_existing_count = current_count = all_count = 0
+    processed = 0
+
+    new_file = new_writer = new_existing_file = new_existing_writer = all_file = all_writer = current_file = current_writer = None
+
+    try:
+        new_file, new_writer = _open_csv_writer(new_path, enriched_fieldnames)
+        new_existing_file, new_existing_writer = _open_csv_writer(new_existing_path, enriched_fieldnames)
+        all_file, all_writer = _open_csv_writer(all_path, enriched_fieldnames)
+        current_file, current_writer = _open_csv_writer(current_path, current_fieldnames)
+
+        for row in _stream_table(db_manager, "SELECT * FROM enriched_people ORDER BY enriched_at DESC"):
+            processed += 1
+            sig = _person_signature_values(
+                row.get('first_name'),
+                row.get('last_name'),
+                row.get('city'),
+                row.get('state'),
+                row.get('patent_number') or row.get('patent_no')
+            )
+            if sig:
+                all_enriched_signatures.add(sig)
+
+            ts = _parse_timestamp(row.get('enriched_at')) or _parse_timestamp(row.get('created_at')) or _parse_timestamp(row.get('updated_at'))
+            if auto_detect_new and sig and ts and run_started_at and ts >= run_started_at:
+                new_signatures.add(sig)
+
+            is_new = bool(sig and sig in new_signatures)
+            record_scope_value = 'new' if is_new else 'existing'
+
+            if is_new:
+                new_writer.writerow(_normalize_sql_row(row, {
+                    'source_table': 'enriched_people',
+                    'record_scope': 'new'
+                }))
+                new_count += 1
+
+            include_in_scope = (not scope_signatures) or (sig and sig in scope_signatures)
+            if include_in_scope:
+                normalized = _normalize_sql_row(row, {
+                    'source_table': 'enriched_people',
+                    'record_scope': record_scope_value
+                })
+                new_existing_writer.writerow(normalized)
+                current_writer.writerow(normalized)
+                new_existing_count += 1
+                current_count += 1
+
+            all_writer.writerow(_normalize_sql_row(row, {
+                'source_table': 'enriched_people',
+                'record_scope': record_scope_value
+            }))
+            all_count += 1
+
+            if processed % 5000 == 0:
+                print(f"PROGRESS: CSV building base export {processed:,} rows processed")
+
+        print(f"PROGRESS: CSV building base export {processed:,} rows processed")
+
+        if not scope_signatures:
+            scope_signatures = set(all_enriched_signatures)
+
+        existing_added = 0
+        if scope_signatures:
+            print("PROGRESS: CSV building (1/3) - merging existing_people rows")
+            for row in _stream_table(db_manager, "SELECT * FROM existing_people"):
+                sig = _person_signature_values(
+                    row.get('first_name'),
+                    row.get('last_name'),
+                    row.get('city'),
+                    row.get('state'),
+                    row.get('patent_no') or row.get('patent_number')
+                )
+                if not sig or sig not in scope_signatures:
+                    continue
+                current_writer.writerow(_normalize_sql_row(row, {
+                    'source_table': 'existing_people',
+                    'record_scope': 'existing_table'
+                }))
+                current_count += 1
+                existing_added += 1
+
+                if existing_added % 5000 == 0:
+                    print(f"PROGRESS: CSV building existing scope {existing_added:,} rows processed")
+
+        files_generated[new_path] = {
+            'records_written': new_count,
+            'records_filtered': 0,
+            'data_type': 'full_new'
+        }
+        print(f"  📄 {new_path} ({new_count:,} records)")
+
+        files_generated[new_existing_path] = {
+            'records_written': new_existing_count,
+            'records_filtered': 0,
+            'data_type': 'full_new_and_existing'
+        }
+        print(f"  📄 {new_existing_path} ({new_existing_count:,} records)")
+
+        files_generated[current_path] = {
+            'records_written': current_count,
+            'records_filtered': 0,
+            'data_type': 'full_current'
+        }
+        print(f"  📄 {current_path} ({current_count:,} records)")
+
+        files_generated[all_path] = {
+            'records_written': all_count,
+            'records_filtered': 0,
+            'data_type': 'full_all'
+        }
+        print(f"  📄 {all_path} ({all_count:,} records)")
+
+    finally:
+        for handle in (new_file, new_existing_file, all_file, current_file):
+            if handle:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
 
 def write_formatted_csv(path: str, records: List[dict], data_type: str) -> int:
     """Write formatted CSV file"""
@@ -1394,6 +1458,8 @@ def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
 
         generate_full_csv_exports(config, db_manager, output_dir, files_generated)
 
+        print("PROGRESS: CSV building (2/3) - preparing formatted and contact exports")
+
         if not use_zaba:
             # Build formatted CSVs for PeopleDataLabs data post-export
             new_csv_path = os.path.join(output_dir, 'new_enrichments.csv')
@@ -1459,6 +1525,8 @@ def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
                 f"  📄 {current_formatted_path} "
                 f"({len(current_records) - removed_current_formatted:,} records)"
             )
+
+        print("PROGRESS: CSV building (3/3) - finalizing output summaries")
 
         print(f"\n✅ CSV generation completed using {('ZabaSearch' if use_zaba else 'PeopleDataLabs')} data!")
         
