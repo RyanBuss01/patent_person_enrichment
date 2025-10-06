@@ -388,6 +388,7 @@ class EnrichedPeopleLookup:
         self._all_records: Dict[str, Dict[str, Any]] = {}
         self._state_limit = 250
         self._last_name_limit = 750
+        self._known_last_variants: Dict[str, Set[str]] = {}
         self._select_clause, self._mapping = self._discover_existing_people_columns()
         self._base_select_sql = (
             f"SELECT ep.*{(', ' + self._select_clause) if self._select_clause else ''} "
@@ -498,44 +499,67 @@ class EnrichedPeopleLookup:
     def prefetch_people(self, people: List[Dict[str, Any]]) -> None:
         if not people:
             return
-        unique_last: List[str] = []
-        seen: Set[str] = set()
+
+        variants_by_normalized: Dict[str, Set[str]] = {}
         for person in people:
-            last = _normalize_value(person.get('last_name'))
-            if last and last not in seen:
-                seen.add(last)
-                unique_last.append(last)
-        if not unique_last:
+            raw_last = (person.get('last_name') or '').strip()
+            normalized = _normalize_value(raw_last)
+            if not normalized:
+                continue
+            variants_by_normalized.setdefault(normalized, set()).add(raw_last or normalized)
+
+        if not variants_by_normalized:
             return
 
-        chunk_size =50
-        total = len(unique_last)
+        for normalized, variants in variants_by_normalized.items():
+            existing = self._known_last_variants.setdefault(normalized, set())
+            existing.update(filter(None, variants))
+
+        unique_normalized: List[str] = list(variants_by_normalized.keys())
+
+        chunk_size = 50
+        total = len(unique_normalized)
         for idx in range(0, total, chunk_size):
-            chunk = unique_last[idx:idx + chunk_size]
-            self._prefetch_last_names(chunk)
+            chunk_keys = unique_normalized[idx:idx + chunk_size]
+            chunk_variants: Set[str] = set()
+            for key in chunk_keys:
+                chunk_variants.update(self._known_last_variants.get(key, set()))
+            self._prefetch_last_names(chunk_keys, list(chunk_variants))
             print(
-                f"PROGRESS: Prefetching existing enrichments {min(idx + len(chunk), total)}/{total}"
+                f"PROGRESS: Prefetching existing enrichments {min(idx + len(chunk_keys), total)}/{total}"
             )
 
-    def _prefetch_last_names(self, last_names: List[str]) -> None:
-        names = [ln for ln in last_names if ln and ln not in self._prefetched_last]
-        if not names:
+    def _prefetch_last_names(self, normalized_targets: List[str], raw_names: List[str]) -> None:
+        filtered: List[str] = []
+        seen: Set[str] = set()
+        for name in raw_names:
+            trimmed = (name or '').strip()
+            if not trimmed:
+                continue
+            if trimmed in seen:
+                continue
+            seen.add(trimmed)
+            filtered.append(trimmed)
+
+        to_query = [ln for ln in filtered if _normalize_value(ln) not in self._prefetched_last]
+        if not to_query:
+            self._prefetched_last.update(normalized_targets)
             return
 
-        placeholders = ', '.join(['%s'] * len(names))
-        limit = self._last_name_limit * max(1, len(names))
+        placeholders = ', '.join(['%s'] * len(to_query))
+        limit = self._last_name_limit * max(1, len(to_query))
         query = (
             self._base_select_sql +
-            f"WHERE LOWER(TRIM(ep.last_name)) IN ({placeholders}) "
+            f"WHERE ep.last_name IN ({placeholders}) "
             "ORDER BY ep.enriched_at DESC LIMIT %s"
         )
-        params: List[Any] = list(names)
+        params: List[Any] = list(to_query)
         params.append(limit)
         try:
             rows = self.db.execute_query(query, tuple(params)) or []
         except Exception as exc:
             logger.warning(
-                f"Error prefetching enriched_people for last names {names[:5]}...: {exc}"
+                f"Error prefetching enriched_people for last names {to_query[:5]}...: {exc}"
             )
             rows = []
 
@@ -556,7 +580,10 @@ class EnrichedPeopleLookup:
             self._store_records(all_records)
             self._prefetched_last.add(last)
 
-    def _fetch_candidates(self, last_name: str, state: Optional[str]) -> List[Dict[str, Any]]:
+        for normalized in normalized_targets:
+            self._prefetched_last.add(normalized)
+
+    def _fetch_candidates(self, last_name: str, state: Optional[str], raw_hint: Optional[str] = None) -> List[Dict[str, Any]]:
         normalized_last = _normalize_value(last_name)
         normalized_state = _normalize_value(state)
         cache_key = (normalized_last, normalized_state)
@@ -569,7 +596,13 @@ class EnrichedPeopleLookup:
             return []
 
         if normalized_last not in self._prefetched_last:
-            self._prefetch_last_names([normalized_last])
+            hint_variants = set(self._known_last_variants.get(normalized_last, set()))
+            if raw_hint:
+                hint_variants.add(raw_hint)
+            if not hint_variants:
+                hint_variants.add(last_name)
+            self._known_last_variants.setdefault(normalized_last, set()).update(hint_variants)
+            self._prefetch_last_names([normalized_last], list(hint_variants))
 
         if cache_key not in self._cache:
             aggregated = self._cache.get((normalized_last, ''))
@@ -589,10 +622,11 @@ class EnrichedPeopleLookup:
         if not last_name:
             return None
 
+        raw_last = (person.get('last_name') or '').strip()
         state = _normalize_value(person.get('state'))
-        candidates = self._fetch_candidates(last_name, state)
+        candidates = self._fetch_candidates(last_name, state, raw_hint=raw_last)
         if state and not candidates:
-            candidates = self._fetch_candidates(last_name, None)
+            candidates = self._fetch_candidates(last_name, None, raw_hint=raw_last)
         if not candidates:
             return None
 

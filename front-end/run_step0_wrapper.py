@@ -42,12 +42,13 @@ def load_config():
         'DAYS_BACK': int(os.getenv('DAYS_BACK', '7'))
     }
 
-def write_progress_update(stage, details=""):
+def write_progress_update(stage, details="", status="running"):
     """Write progress updates that the server can read"""
     progress_info = {
         'timestamp': datetime.now().isoformat(),
         'stage': stage,
-        'details': details
+        'details': details,
+        'status': status
     }
     
     # Print for immediate server capture
@@ -107,7 +108,7 @@ def main():
         if args.mode == 'manual' and (not args.start_date or not args.end_date):
             error_msg = "Manual mode requires --start-date and --end-date parameters"
             logger.error(error_msg)
-            write_progress_update("Configuration error", error_msg)
+            write_progress_update("Configuration error", error_msg, status="error")
             print(f"\n❌ STEP 0 FAILED: {error_msg}")
             return 1
         
@@ -197,7 +198,7 @@ def main():
                 logger.warning(f"Could not read sample patents: {e}")
         
         # Stage 7: Cost analysis and file info
-        write_progress_update("Computing costs", "Calculating API usage and cost estimates")
+        write_progress_update("Computing costs", "Calculating API usage and cost estimates", status="finalizing")
         api_requests = result.get('api_requests_made', 0)
         patents_count = result.get('patents_downloaded', 0)
         
@@ -216,14 +217,16 @@ def main():
         print(f"   📊 Download results: {config['OUTPUT_DIR']}/download_results.json")
         
         # Final completion message
-        write_progress_update("Complete", f"Successfully downloaded {patents_count} patents in {elapsed_time/60:.1f} minutes")
+        completion_details = f"Successfully downloaded {patents_count} patents in {elapsed_time/60:.1f} minutes"
         print(f"\n🎉 STEP 0 DOWNLOAD COMPLETE!")
         logger.info("Step 0 wrapper completed successfully")
-        
+        sys.stdout.flush()
+        write_progress_update("Complete", completion_details, status="completed")
+
     except Exception as e:
         error_msg = f"Step 0 failed with error: {e}"
         logger.error(error_msg)
-        write_progress_update("Error", error_msg)
+        write_progress_update("Error", error_msg, status="error")
         print(f"\n❌ STEP 0 FAILED: {e}")
         return 1
     
