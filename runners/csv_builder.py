@@ -530,6 +530,7 @@ def get_pdl_enriched_data():
                     'patent_number': row.get('patent_number'),
                     'enrichment_result': enrichment_data.get('enrichment_result', {}),
                     'original_person': enrichment_data.get('original_person', {}),
+                    'existing_record': enrichment_data.get('existing_record', {}),
                     'enriched_at': row.get('enriched_at'),
                     'api_cost': row.get('api_cost', 0.0)
                 }
@@ -615,8 +616,9 @@ def build_pdl_formatted_row(item: dict) -> dict:
     enrichment_result = item.get('enrichment_result', {})
     enriched_data = enrichment_result.get('enriched_data', {})
     original = item.get('original_person', {})
+    existing_record = item.get('existing_record', {}) or {}
     pdl_data = enriched_data.get('pdl_data', {})
-    
+
     # Extract key fields
     first = _first_non_empty(original.get('first_name'), item.get('first_name'))
     last = _first_non_empty(original.get('last_name'), item.get('last_name'))
@@ -636,9 +638,58 @@ def build_pdl_formatted_row(item: dict) -> dict:
     except Exception:
         pass
     
-    # Extract address from PDL data
-    street = _first_non_empty(pdl_data.get('job_company_location_street_address'))
-    zip_code = _first_non_empty(pdl_data.get('job_company_location_postal_code'))
+    def _pdl_location_street(data: dict) -> str:
+        if not isinstance(data, dict):
+            return ''
+        candidate = data.get('location_street_address')
+        if candidate and str(candidate).strip():
+            return str(candidate).strip()
+        try:
+            addresses = data.get('street_addresses') or []
+            if isinstance(addresses, list):
+                for entry in addresses:
+                    if not isinstance(entry, dict):
+                        continue
+                    value = entry.get('street_address') or entry.get('formatted_address')
+                    if value and str(value).strip():
+                        return str(value).strip()
+        except Exception:
+            pass
+        return ''
+
+    def _pdl_location_zip(data: dict) -> str:
+        if not isinstance(data, dict):
+            return ''
+        candidate = data.get('location_postal_code')
+        if candidate and str(candidate).strip():
+            return str(candidate).strip()
+        try:
+            addresses = data.get('street_addresses') or []
+            if isinstance(addresses, list):
+                for entry in addresses:
+                    if not isinstance(entry, dict):
+                        continue
+                    value = entry.get('postal_code')
+                    if value and str(value).strip():
+                        return str(value).strip()
+        except Exception:
+            pass
+        return ''
+
+    street = _first_non_empty(
+        existing_record.get('mail_to_add1'),
+        existing_record.get('mail_to_address'),
+        existing_record.get('mail_to_add_1'),
+        original.get('mail_to_add1'),
+        original.get('mail_to_address'),
+        original.get('mail_to_add_1'),
+        _pdl_location_street(pdl_data)
+    )
+    zip_code = _first_non_empty(
+        existing_record.get('mail_to_zip'),
+        original.get('mail_to_zip'),
+        _pdl_location_zip(pdl_data)
+    )
     
     formatted = {
         'issue_id': '',

@@ -1568,7 +1568,13 @@
             updateStepStatus('step1', currentStatus.step1?.integrationResults?.exists, currentStatus.step1?.running);
             const step2Info = currentStatus.step2 || {};
             const step2Error = Boolean(step2Info.lastRunStatus && step2Info.lastRunStatus.success === false && !step2Info.running);
-            updateStepStatus('step2', step2Info.enrichedData?.exists, step2Info.running, step2Error);
+            const step2HasResults = (
+                step2Info.enrichedData?.exists === true ||
+                step2Info.enrichedCsv?.exists === true ||
+                step2Info.enrichmentResults?.exists === true ||
+                (step2Info.lastRunStatus && step2Info.lastRunStatus.success === true)
+            );
+            updateStepStatus('step2', step2HasResults, step2Info.running, step2Error);
             const step2StatusEl = document.getElementById('step2Status');
             if (step2StatusEl) {
                 step2StatusEl.title = step2Error ? (step2Info.lastRunStatus?.error || '') : '';

@@ -990,95 +990,16 @@ def _save_single_enrichment(cursor, result: Dict[str, Any]):
         # Non-fatal: enrichment proceeds even if backfill fails
         existing_record = {}
 
-    # Derive mail_to_add1 and mail_to_zip from PDL when available
-    def _pick_pdl_street(pdl: Dict[str, Any]) -> str:
-        if not isinstance(pdl, dict):
-            return ''
-        vals = [
-            pdl.get('job_company_location_street_address'),
-            pdl.get('location_street_address')
-        ]
-        for v in vals:
-            if v and str(v).strip():
-                return str(v).strip()
-        try:
-            sa = (pdl.get('street_addresses') or [])
-            if isinstance(sa, list) and sa:
-                first = sa[0] or {}
-                v = first.get('street_address') or first.get('formatted_address')
-                if v and str(v).strip():
-                    return str(v).strip()
-        except Exception:
-            pass
-        # Try company experience location
-        try:
-            exp = pdl.get('experience')
-            if isinstance(exp, list) and exp:
-                # Prefer primary, then scan all experiences for any street_address
-                primary = next((e for e in exp if e and e.get('is_primary')), None)
-                if primary:
-                    loc = ((primary.get('company') or {}).get('location') or {})
-                    v = loc.get('street_address') or loc.get('address_line_2')
-                    if v and str(v).strip():
-                        return str(v).strip()
-                # Scan all entries for the first with a street_address
-                for e in exp:
-                    try:
-                        loc = ((e.get('company') or {}).get('location') or {})
-                        v = loc.get('street_address') or loc.get('address_line_2')
-                        if v and str(v).strip():
-                            return str(v).strip()
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-        return ''
-
-    def _pick_pdl_zip(pdl: Dict[str, Any]) -> str:
-        if not isinstance(pdl, dict):
-            return ''
-        vals = [
-            pdl.get('job_company_location_postal_code'),
-            pdl.get('location_postal_code')
-        ]
-        for v in vals:
-            if v and str(v).strip():
-                return str(v).strip()
-        try:
-            sa = (pdl.get('street_addresses') or [])
-            if isinstance(sa, list) and sa:
-                first = sa[0] or {}
-                v = first.get('postal_code')
-                if v and str(v).strip():
-                    return str(v).strip()
-        except Exception:
-            pass
-        # Try company experience location
-        try:
-            exp = pdl.get('experience')
-            if isinstance(exp, list) and exp:
-                # Prefer primary, then scan all experiences for any postal_code
-                primary = next((e for e in exp if e and e.get('is_primary')), None)
-                if primary:
-                    loc = ((primary.get('company') or {}).get('location') or {})
-                    v = loc.get('postal_code')
-                    if v and str(v).strip():
-                        return str(v).strip()
-                for e in exp:
-                    try:
-                        loc = ((e.get('company') or {}).get('location') or {})
-                        v = loc.get('postal_code')
-                        if v and str(v).strip():
-                            return str(v).strip()
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-        return ''
-
-    pdl_data = (result.get('enriched_data') or {}).get('pdl_data') or {}
-    pdl_street = _pick_pdl_street(pdl_data)
-    pdl_zip = _pick_pdl_zip(pdl_data)
+    snapshot_existing = dict(existing_record or {})
+    street_fallback = (original_data.get('mail_to_add1')
+                       or original_data.get('mail_to_address')
+                       or original_data.get('mail_to_add_1')
+                       or '')
+    zip_fallback = (original_data.get('mail_to_zip') or '')
+    if not snapshot_existing.get('mail_to_add1') and street_fallback:
+        snapshot_existing['mail_to_add1'] = street_fallback.strip()
+    if not snapshot_existing.get('mail_to_zip') and zip_fallback:
+        snapshot_existing['mail_to_zip'] = zip_fallback.strip()
 
     enrichment_data = {
         "original_person": original_data,
@@ -1088,12 +1009,7 @@ def _save_single_enrichment(cursor, result: Dict[str, Any]):
             "api_cost": 0.03
         },
         # Persist selected existing_people fields for reliable formatted exports later
-        "existing_record": {
-            **(existing_record or {}),
-            # Fill address fields from PDL where not already present
-            "mail_to_add1": (existing_record or {}).get('mail_to_add1') or pdl_street or '',
-            "mail_to_zip": (existing_record or {}).get('mail_to_zip') or pdl_zip or ''
-        }
+        "existing_record": snapshot_existing
     }
     insert_query = """
         INSERT INTO enriched_people (
