@@ -1068,7 +1068,12 @@ def generate_full_csv_exports(
                     pass
 
 def write_formatted_csv(path: str, records: List[dict], data_type: str) -> int:
-    """Write formatted CSV file"""
+    """Write formatted CSV file.
+
+    Do not drop rows for missing address/zip or boolean-like artifacts.
+    Instead, sanitize those fields to blanks so counts match the base sets.
+    Returns the number of dropped rows (should remain 0 except for unknown types).
+    """
     if data_type == 'pdl':
         rows_all = [build_pdl_formatted_row(r) for r in records]
     elif data_type == 'zaba':
@@ -1076,26 +1081,24 @@ def write_formatted_csv(path: str, records: List[dict], data_type: str) -> int:
     else:
         logger.error(f"Unknown data type: {data_type}")
         return 0
-    
-    # Filter out rows with boolean address/zip issues
-    rows = []
+
+    rows: List[dict] = []
     removed = 0
     for row in rows_all:
-        addr = (row.get('mail_to_add1') or '').strip().lower()
-        zip_code = (row.get('mail_to_zip') or '').strip().lower()
-        
-        # Skip if boolean values
-        if addr in {'true', 'false'} or zip_code in {'true', 'false'}:
-            removed += 1
-            continue
-        
-        # Skip if missing both address and zip
-        if not addr and not zip_code:
-            removed += 1
-            continue
-            
+        # Sanitize address/zip if boolean-like
+        addr_raw = row.get('mail_to_add1')
+        zip_raw = row.get('mail_to_zip')
+        addr = str(addr_raw).strip().lower() if addr_raw is not None else ''
+        zip_code = str(zip_raw).strip().lower() if zip_raw is not None else ''
+
+        if addr in {'true', 'false', 'nan', 'null', 'none'}:
+            row['mail_to_add1'] = ''
+        if zip_code in {'true', 'false', 'nan', 'null', 'none'}:
+            row['mail_to_zip'] = ''
+
+        # Keep the row regardless of address/zip presence
         rows.append(row)
-    
+
     # Write CSV
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w', newline='') as f:
@@ -1103,7 +1106,7 @@ def write_formatted_csv(path: str, records: List[dict], data_type: str) -> int:
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
-    
+
     logger.info(f"Wrote {len(rows)} {data_type.upper()} formatted records to {path} (filtered {removed})")
     return removed
 
