@@ -781,7 +781,14 @@ def build_contact_row(item: dict, data_type: str) -> dict:
         normalized = _normalize_pdl_item(item)
         pdl_data = _extract_pdl_payload(normalized)
         emails_with_labels = _collect_pdl_emails(pdl_data)
+        # Use the same mapping as formatted CSVs
+        original = (normalized.get('original_person') or
+                    (normalized.get('enriched_data') or {}).get('original_person') or {})
+        patent_no = _first_non_empty(original.get('patent_number'), normalized.get('patent_number'))
+        title = _first_non_empty(original.get('patent_title'))
         return {
+            'patent_no': patent_no,
+            'title': title,
             'first_name': normalized.get('first_name', ''),
             'last_name': normalized.get('last_name', ''),
             'city': normalized.get('city', ''),
@@ -799,6 +806,8 @@ def build_contact_row(item: dict, data_type: str) -> dict:
         except Exception:
             pass
         return {
+            'patent_no': _sanitize_for_csv(item.get('patent_number')),
+            'title': '',
             'first_name': _first_non_empty(item.get('first_name'), params.get('first_name')),
             'last_name': _first_non_empty(item.get('last_name'), params.get('last_name')),
             'city': _first_non_empty(item.get('city'), params.get('city')),
@@ -821,7 +830,13 @@ def build_address_row(item: dict, data_type: str) -> dict:
     if data_type == 'pdl':
         normalized = _normalize_pdl_item(item)
         personal, work = _collect_pdl_addresses(normalized)
+        original = (normalized.get('original_person') or
+                    (normalized.get('enriched_data') or {}).get('original_person') or {})
+        patent_no = _first_non_empty(original.get('patent_number'), normalized.get('patent_number'))
+        title = _first_non_empty(original.get('patent_title'))
         return {
+            'patent_no': patent_no,
+            'title': title,
             'first_name': normalized.get('first_name', ''),
             'last_name': normalized.get('last_name', ''),
             'city': normalized.get('city', ''),
@@ -850,6 +865,8 @@ def build_address_row(item: dict, data_type: str) -> dict:
         personal_addresses = _unique_preserve_order(personal_addresses)
 
         return {
+            'patent_no': _sanitize_for_csv(item.get('patent_number')),
+            'title': '',
             'first_name': _first_non_empty(item.get('first_name'), params.get('first_name')),
             'last_name': _first_non_empty(item.get('last_name'), params.get('last_name')),
             'city': _first_non_empty(item.get('city'), params.get('city')),
@@ -1142,6 +1159,8 @@ def write_contact_csv(path: str, records: List[dict], data_type: str) -> int:
         email_entries = _unique_preserve_order(email_entries)
         max_emails = max(max_emails, len(email_entries))
         output_rows.append({
+            'patent_no': _sanitize_for_csv(row.get('patent_no')),
+            'title': _sanitize_for_csv(row.get('title')),
             'first_name': first_name,
             'last_name': last_name,
             'city': _sanitize_for_csv(row.get('city')),
@@ -1153,7 +1172,7 @@ def write_contact_csv(path: str, records: List[dict], data_type: str) -> int:
         max_emails = 1
 
     email_headers = [f'email_{i + 1}' for i in range(max_emails)]
-    headers = ['first_name', 'last_name', 'city', 'state'] + email_headers
+    headers = ['patent_no', 'title', 'first_name', 'last_name', 'city', 'state'] + email_headers
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w', newline='') as f:
@@ -1161,6 +1180,8 @@ def write_contact_csv(path: str, records: List[dict], data_type: str) -> int:
         writer.writeheader()
         for row in output_rows:
             output_row = {
+                'patent_no': row['patent_no'],
+                'title': row['title'],
                 'first_name': row['first_name'],
                 'last_name': row['last_name'],
                 'city': row['city'],
@@ -1205,6 +1226,8 @@ def write_address_csv(path: str, records: List[dict], data_type: str) -> int:
         max_work = max(max_work, len(work))
 
         output_rows.append({
+            'patent_no': _sanitize_for_csv(row.get('patent_no')),
+            'title': _sanitize_for_csv(row.get('title')),
             'first_name': first_name,
             'last_name': last_name,
             'city': _sanitize_for_csv(row.get('city')),
@@ -1216,7 +1239,7 @@ def write_address_csv(path: str, records: List[dict], data_type: str) -> int:
     personal_headers = [f'personal_address_{i + 1}' for i in range(max_personal)]
     work_headers = [f'work_address_{i + 1}' for i in range(max_work)]
 
-    headers = ['first_name', 'last_name', 'city', 'state']
+    headers = ['patent_no', 'title', 'first_name', 'last_name', 'city', 'state']
     headers.extend(personal_headers)
     headers.extend(work_headers)
 
