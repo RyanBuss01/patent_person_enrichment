@@ -830,6 +830,11 @@ def build_address_row(item: dict, data_type: str) -> dict:
     if data_type == 'pdl':
         normalized = _normalize_pdl_item(item)
         personal, work = _collect_pdl_addresses(normalized)
+        # Inject a simple 'address' field from upstream JSON as personal_address_1 when present
+        simple_address = _sanitize_for_csv(item.get('address') or normalized.get('address'))
+        if simple_address:
+            # Prepend to prefer this as personal_address_1
+            personal = [simple_address] + personal
         original = (normalized.get('original_person') or
                     (normalized.get('enriched_data') or {}).get('original_person') or {})
         patent_no = _first_non_empty(original.get('patent_number'), normalized.get('patent_number'))
@@ -861,6 +866,11 @@ def build_address_row(item: dict, data_type: str) -> dict:
                     personal_addresses.append(clean)
         except Exception:
             pass
+
+        # Inject a simple 'address' field from upstream JSON as personal_address_1 when present
+        simple_address = _sanitize_for_csv(item.get('address'))
+        if simple_address:
+            personal_addresses = [simple_address] + personal_addresses
 
         personal_addresses = _unique_preserve_order(personal_addresses)
 
@@ -1820,7 +1830,8 @@ def generate_all_and_current_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
         print("📊 Generating 'all' and 'current' base CSVs from database...")
         print("⚠️  This may take several minutes for large datasets...")
 
-        # Generate ONLY all and current base CSVs
+        # Generate ONLY all and current base CSVs (we will overwrite 'current' below
+        # to follow the desired logic: current = (new & existing) + step1 existing JSON)
         _generate_all_and_current_base_csvs(config, db_manager, output_dir, files_generated)
 
         # Load all enriched data from database
@@ -1844,58 +1855,131 @@ def generate_all_and_current_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
             }
             print(f"  📄 {all_formatted_path} ({len(all_items) - removed_all_formatted:,} records)")
 
-            # Generate current_enrichments_formatted.csv
+            # Build CURRENT = (new & existing) + Step 1 existing people JSON
+            new_existing_path = os.path.join(output_dir, 'new_and_existing_enrichments.csv')
             current_csv_path = os.path.join(output_dir, 'current_enrichments.csv')
             current_formatted_path = os.path.join(output_dir, 'current_enrichments_formatted.csv')
 
-            if os.path.exists(current_csv_path):
-                # Build lookup for current records
-                current_lookup: Dict[str, Dict[str, Any]] = {}
-                for item in all_items:
-                    sig = _person_signature_values(
-                        item.get('first_name'),
-                        item.get('last_name'),
-                        item.get('city'),
-                        item.get('state'),
-                        item.get('patent_number')
-                    )
-                    if sig and sig not in current_lookup:
-                        current_lookup[sig] = item
+            # Build a lookup of enriched items by signature
+            item_lookup: Dict[str, Dict[str, Any]] = {}
+            for item in all_items:
+                sig = _person_signature_values(
+                    item.get('first_name'),
+                    item.get('last_name'),
+                    item.get('city'),
+                    item.get('state'),
+                    item.get('patent_number')
+                )
+                if sig and sig not in item_lookup:
+                    item_lookup[sig] = item
 
-                current_signatures = _load_signatures_from_csv(current_csv_path)
-                current_records = []
-                for sig in current_signatures:
-                    item = current_lookup.get(sig)
-                    if item:
-                        current_records.append(item)
+            # Start from the 'new & existing' base if available; else fall back to prior current
+            base_sigs = _load_signatures_from_csv(new_existing_path)
+            if not base_sigs and os.path.exists(current_csv_path):
+                base_sigs = _load_signatures_from_csv(current_csv_path)
 
-                removed_current_formatted = write_formatted_csv(current_formatted_path, current_records, data_type)
-                files_generated[current_formatted_path] = {
-                    'records_written': len(current_records) - removed_current_formatted,
-                    'records_filtered': removed_current_formatted,
-                    'data_type': 'current_formatted'
-                }
-                print(f"  📄 {current_formatted_path} ({len(current_records) - removed_current_formatted:,} records)")
+            current_records: List[Dict[str, Any]] = []
+            seen_sigs: Set[str] = set()
+            for sig in base_sigs:
+                item = item_lookup.get(sig)
+                if item and sig not in seen_sigs:
+                    current_records.append(item)
+                    seen_sigs.add(sig)
 
-                # Generate contacts_current.csv
-                contacts_current_path = os.path.join(output_dir, 'contacts_current.csv')
-                removed_contacts_current = write_contact_csv(contacts_current_path, current_records, data_type)
-                files_generated[contacts_current_path] = {
-                    'records_written': len(current_records) - removed_contacts_current,
-                    'records_filtered': removed_contacts_current,
-                    'data_type': 'contacts_current'
-                }
-                print(f"  📄 {contacts_current_path} ({len(current_records) - removed_contacts_current:,} records)")
+            # Merge Step 1 existing JSON sets
+            def _load_json_list(path: str) -> List[dict]:
+                try:
+                    if os.path.exists(path):
+                        with open(path, 'r') as f:
+                            data = json.load(f)
+                            return data if isinstance(data, list) else []
+                except Exception:
+                    return []
+                return []
 
-                # Generate addresses_current.csv
-                addresses_current_path = os.path.join(output_dir, 'addresses_current.csv')
-                removed_addresses_current = write_address_csv(addresses_current_path, current_records, data_type)
-                files_generated[addresses_current_path] = {
-                    'records_written': len(current_records) - removed_addresses_current,
-                    'records_filtered': removed_addresses_current,
-                    'data_type': 'addresses_current'
-                }
-                print(f"  📄 {addresses_current_path} ({len(current_records) - removed_addresses_current:,} records)")
+            step1_existing_records: List[dict] = []
+            step1_existing_records += _load_json_list(os.path.join(output_dir, 'existing_people_in_db.json'))
+            if not step1_existing_records:
+                step1_existing_records += _load_json_list(os.path.join(output_dir, 'existing_people_found.json'))
+            step1_existing_records += _load_json_list(os.path.join(output_dir, 'existing_filtered_enriched_people.json'))
+
+            for rec in step1_existing_records:
+                sig = _person_signature_values(
+                    rec.get('first_name'),
+                    rec.get('last_name'),
+                    rec.get('city'),
+                    rec.get('state'),
+                    rec.get('patent_number') or rec.get('patent_no')
+                )
+                if not sig or sig in seen_sigs:
+                    continue
+                # Use enriched item if present; otherwise build a minimal record
+                item = item_lookup.get(sig)
+                if not item:
+                    item = {
+                        'first_name': rec.get('first_name'),
+                        'last_name': rec.get('last_name'),
+                        'city': rec.get('city'),
+                        'state': rec.get('state'),
+                        'patent_number': rec.get('patent_number') or rec.get('patent_no')
+                    }
+                # Carry over simple address so address CSV can map it to personal_address_1
+                if rec.get('address') and not item.get('address'):
+                    item['address'] = rec.get('address')
+                current_records.append(item)
+                seen_sigs.add(sig)
+
+            # Overwrite current_enrichments.csv to reflect the new union
+            preferred_columns = ['record_scope', 'source_table', 'id', 'first_name', 'last_name', 'city', 'state', 'patent_number']
+            current_rows_for_csv: List[Dict[str, Any]] = []
+            for item in current_records:
+                current_rows_for_csv.append({
+                    'record_scope': 'current',
+                    'source_table': 'composed',
+                    'id': '',
+                    'first_name': item.get('first_name'),
+                    'last_name': item.get('last_name'),
+                    'city': item.get('city'),
+                    'state': item.get('state'),
+                    'patent_number': item.get('patent_number') or item.get('patent_no')
+                })
+
+            _write_rows_to_csv(current_csv_path, current_rows_for_csv, preferred_columns)
+            files_generated[current_csv_path] = {
+                'records_written': len(current_rows_for_csv),
+                'records_filtered': 0,
+                'data_type': 'full_current'
+            }
+            print(f"  📄 {current_csv_path} ({len(current_rows_for_csv):,} records)")
+
+            # Generate current formatted/contacts/addresses from the composed list
+            removed_current_formatted = write_formatted_csv(current_formatted_path, current_records, data_type)
+            files_generated[current_formatted_path] = {
+                'records_written': len(current_records) - removed_current_formatted,
+                'records_filtered': removed_current_formatted,
+                'data_type': 'current_formatted'
+            }
+            print(f"  📄 {current_formatted_path} ({len(current_records) - removed_current_formatted:,} records)")
+
+            # Generate contacts_current.csv
+            contacts_current_path = os.path.join(output_dir, 'contacts_current.csv')
+            removed_contacts_current = write_contact_csv(contacts_current_path, current_records, data_type)
+            files_generated[contacts_current_path] = {
+                'records_written': len(current_records) - removed_contacts_current,
+                'records_filtered': removed_contacts_current,
+                'data_type': 'contacts_current'
+            }
+            print(f"  📄 {contacts_current_path} ({len(current_records) - removed_contacts_current:,} records)")
+
+            # Generate addresses_current.csv
+            addresses_current_path = os.path.join(output_dir, 'addresses_current.csv')
+            removed_addresses_current = write_address_csv(addresses_current_path, current_records, data_type)
+            files_generated[addresses_current_path] = {
+                'records_written': len(current_records) - removed_addresses_current,
+                'records_filtered': removed_addresses_current,
+                'data_type': 'addresses_current'
+            }
+            print(f"  📄 {addresses_current_path} ({len(current_records) - removed_addresses_current:,} records)")
 
         print(f"\n✅ 'All' and 'Current' CSV generation completed!")
 

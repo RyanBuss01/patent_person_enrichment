@@ -741,6 +741,26 @@ class BatchSQLQueryIntegrator:
                     matches = batch_matches.get(person_key, [])
                     best_score = matches[0][1] if matches else 0
                     processed_people += 1
+
+                    # Choose an address from matched DB records: prefer the one with the most recent issue_date
+                    def _select_address_from_matches(match_list):
+                        if not match_list:
+                            return person.get('address')
+                        best_addr = None
+                        best_date = None
+                        for db_person, _score in match_list:
+                            addr = (db_person or {}).get('address')
+                            if not addr or not str(addr).strip():
+                                continue
+                            issue_val = (db_person or {}).get('issue_date')
+                            dt = self._parse_issue_date_value(issue_val)
+                            if best_date is None:
+                                best_addr, best_date = addr, dt
+                            else:
+                                # Treat None as older than any real date
+                                if (dt is not None and (best_date is None or dt > best_date)):
+                                    best_addr, best_date = addr, dt
+                        return best_addr or person.get('address')
                     
                     # Update statistics
                     self._update_match_statistics(match_statistics, best_score)
@@ -750,6 +770,7 @@ class BatchSQLQueryIntegrator:
                     if best_score >= AUTO_MATCH_THRESHOLD:
                         match_statistics['auto_matched'] += 1
                         decisions_made['existing'] += 1
+                        selected_address = _select_address_from_matches(matches)
                         existing_people_found.append({
                             **person,
                             'match_score': best_score,
@@ -758,7 +779,7 @@ class BatchSQLQueryIntegrator:
                             'person_type': metadata['person_type'],
                             'patent_title': metadata['patent_title'],
                             # Ensure these fields are always present, even if null
-                            'address': person.get('address'),
+                            'address': selected_address,
                             'email': person.get('email'), 
                             'issue_id': person.get('issue_id'),
                             'inventor_id': person.get('inventor_id'),

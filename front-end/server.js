@@ -3520,12 +3520,16 @@ app.get('/api/export/all-enrichments-formatted', (req, res) => {
 // Contact CSV Exports (pre-formatted contact CSVs)
 app.get('/api/export/contact-current', (req, res) => {
   try {
-    const outPath = path.join(__dirname, '..', 'output', 'contact_current.csv');
+    // Prefer new pluralized file naming; fall back to legacy underscore version
+    const preferred = path.join(__dirname, '..', 'output', 'contacts_current.csv');
+    const legacy = path.join(__dirname, '..', 'output', 'contact_current.csv');
+    let outPath = fs.existsSync(preferred) ? preferred : legacy;
     if (!fs.existsSync(outPath)) {
-      return res.status(404).json({ error: 'contact_current.csv not found. Run Step 2 first.' });
+      return res.status(404).json({ error: 'contacts_current.csv not found. Run Step 2 first.' });
     }
+    const downloadName = path.basename(outPath);
     res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', 'attachment; filename="contact_current.csv"');
+    res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
     fs.createReadStream(outPath).pipe(res);
   } catch (e) {
     console.error('Export contact current failed:', e);
@@ -3535,12 +3539,16 @@ app.get('/api/export/contact-current', (req, res) => {
 
 app.get('/api/export/contact-current-addresses', (req, res) => {
   try {
-    const outPath = path.join(__dirname, '..', 'output', 'contact_current_addresses.csv');
+    // Prefer new pluralized file naming; fall back to legacy underscore version
+    const preferred = path.join(__dirname, '..', 'output', 'addresses_current.csv');
+    const legacy = path.join(__dirname, '..', 'output', 'contact_current_addresses.csv');
+    let outPath = fs.existsSync(preferred) ? preferred : legacy;
     if (!fs.existsSync(outPath)) {
-      return res.status(404).json({ error: 'contact_current_addresses.csv not found. Run Step 2 first.' });
+      return res.status(404).json({ error: 'addresses_current.csv not found. Run Step 2 first.' });
     }
+    const downloadName = path.basename(outPath);
     res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', 'attachment; filename="contact_current_addresses.csv"');
+    res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
     fs.createReadStream(outPath).pipe(res);
   } catch (e) {
     console.error('Export contact current addresses failed:', e);
