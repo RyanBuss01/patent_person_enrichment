@@ -1633,6 +1633,8 @@ app.get('/api/step2/zaba/files/:filename', (req, res) => {
         'contacts_zaba.csv',
         'contact_new.csv',
         'contact_new_addresses.csv',
+        'contacts_new_and_existing.csv',
+        'addresses_new_and_existing.csv',
         'new_enrichments.csv',
         'new_and_existing_enrichments.csv',
         'enriched_patents.csv',
@@ -3484,7 +3486,15 @@ app.get('/api/export/new-and-existing-enrichments-formatted', (req, res) => {
 
 app.get('/api/export/all-enrichments-formatted', (req, res) => {
   try {
-    // Use local snapshot for "all" formatted export
+    // Prefer streaming the generated CSV if it exists
+    const csvPath = path.join(__dirname, '..', 'output', 'all_enrichments_formatted.csv');
+    if (fs.existsSync(csvPath)) {
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename="all_enrichments_formatted.csv"');
+      return fs.createReadStream(csvPath).pipe(res);
+    }
+
+    // Fallback: build from JSON snapshot if available
     const data = readJsonFile('output/enriched_patents.json');
     if (!data || !Array.isArray(data) || data.length === 0) {
       return res.status(404).json({ error: 'No enriched data snapshot found.' });
@@ -3560,6 +3570,37 @@ app.get('/api/export/contact-new-addresses', (req, res) => {
     fs.createReadStream(outPath).pipe(res);
   } catch (e) {
     console.error('Export contact new addresses failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// New + Existing contact exports (aggregate)
+app.get('/api/export/contact-new-and-existing', (req, res) => {
+  try {
+    const outPath = path.join(__dirname, '..', 'output', 'contacts_new_and_existing.csv');
+    if (!fs.existsSync(outPath)) {
+      return res.status(404).json({ error: 'contacts_new_and_existing.csv not found. Run Step 2 first.' });
+    }
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="contacts_new_and_existing.csv"');
+    fs.createReadStream(outPath).pipe(res);
+  } catch (e) {
+    console.error('Export contact new+existing failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/export/contact-new-and-existing-addresses', (req, res) => {
+  try {
+    const outPath = path.join(__dirname, '..', 'output', 'addresses_new_and_existing.csv');
+    if (!fs.existsSync(outPath)) {
+      return res.status(404).json({ error: 'addresses_new_and_existing.csv not found. Run Step 2 first.' });
+    }
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="addresses_new_and_existing.csv"');
+    fs.createReadStream(outPath).pipe(res);
+  } catch (e) {
+    console.error('Export contact new+existing addresses failed:', e);
     res.status(500).json({ error: e.message });
   }
 });
