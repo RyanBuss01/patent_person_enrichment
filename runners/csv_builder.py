@@ -1108,10 +1108,15 @@ def write_formatted_csv(path: str, records: List[dict], data_type: str) -> int:
     return removed
 
 def write_contact_csv(path: str, records: List[dict], data_type: str) -> int:
-    """Write contact CSV file"""
+    """Write contact CSV file.
+
+    Keep rows even if they lack emails (leave blanks). Only drop
+    rows that have neither first nor last name. Always include at
+    least one email column in the header.
+    """
     contact_structs = [build_contact_row(r, data_type) for r in records]
 
-    filtered_rows = []
+    output_rows = []
     removed = 0
     max_emails = 0
 
@@ -1132,12 +1137,8 @@ def write_contact_csv(path: str, records: List[dict], data_type: str) -> int:
                 email_entries.append(candidate)
 
         email_entries = _unique_preserve_order(email_entries)
-        if not email_entries:
-            removed += 1
-            continue
-
         max_emails = max(max_emails, len(email_entries))
-        filtered_rows.append({
+        output_rows.append({
             'first_name': first_name,
             'last_name': last_name,
             'city': _sanitize_for_csv(row.get('city')),
@@ -1155,7 +1156,7 @@ def write_contact_csv(path: str, records: List[dict], data_type: str) -> int:
     with open(path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writeheader()
-        for row in filtered_rows:
+        for row in output_rows:
             output_row = {
                 'first_name': row['first_name'],
                 'last_name': row['last_name'],
@@ -1167,17 +1168,22 @@ def write_contact_csv(path: str, records: List[dict], data_type: str) -> int:
             writer.writerow(output_row)
 
     logger.info(
-        f"Wrote {len(filtered_rows)} {data_type.upper()} contact records to {path} "
+        f"Wrote {len(output_rows)} {data_type.upper()} contact records to {path} "
         f"(filtered {removed}, max_emails={max_emails})"
     )
     return removed
 
 
 def write_address_csv(path: str, records: List[dict], data_type: str) -> int:
-    """Write address CSV file with personal/work columns."""
+    """Write address CSV file with personal/work columns.
+
+    Keep rows even if they lack any addresses (leave blanks). Only
+    drop rows that have neither first nor last name. Always include
+    at least one personal address column in the header.
+    """
     address_structs = [build_address_row(r, data_type) for r in records]
 
-    filtered_rows = []
+    output_rows = []
     removed = 0
     max_personal = 0
     max_work = 0
@@ -1192,14 +1198,10 @@ def write_address_csv(path: str, records: List[dict], data_type: str) -> int:
         personal = _unique_preserve_order(row.get('personal_addresses') or [])
         work = _unique_preserve_order(row.get('work_addresses') or [])
 
-        if not personal and not work:
-            removed += 1
-            continue
-
         max_personal = max(max_personal, len(personal))
         max_work = max(max_work, len(work))
 
-        filtered_rows.append({
+        output_rows.append({
             'first_name': first_name,
             'last_name': last_name,
             'city': _sanitize_for_csv(row.get('city')),
@@ -1222,7 +1224,7 @@ def write_address_csv(path: str, records: List[dict], data_type: str) -> int:
     with open(path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writeheader()
-        for row in filtered_rows:
+        for row in output_rows:
             output_row = {
                 'first_name': row['first_name'],
                 'last_name': row['last_name'],
@@ -1239,7 +1241,7 @@ def write_address_csv(path: str, records: List[dict], data_type: str) -> int:
             writer.writerow(output_row)
 
     logger.info(
-        f"Wrote {len(filtered_rows)} {data_type.upper()} address records to {path} "
+        f"Wrote {len(output_rows)} {data_type.upper()} address records to {path} "
         f"(filtered {removed}, max_personal={max_personal}, max_work={max_work})"
     )
     return removed
@@ -1429,36 +1431,36 @@ def generate_all_csvs(config: Dict[str, Any], skip_all_current: bool = True) -> 
                 f"({len(new_items) - removed_addresses_new:,} records)"
             )
 
-            if new_existing_zaba_items:
-                new_existing_formatted_path = os.path.join(output_dir, 'new_and_existing_enrichments_formatted.csv')
-                removed_new_existing_formatted = write_formatted_csv(new_existing_formatted_path, new_existing_zaba_items, 'zaba')
-                files_generated[new_existing_formatted_path] = {
-                    'records_written': len(new_existing_zaba_items) - removed_new_existing_formatted,
-                    'records_filtered': removed_new_existing_formatted,
-                    'data_type': 'formatted_new_and_existing'
-                }
-                print(f"  📄 {new_existing_formatted_path} ({len(new_existing_zaba_items) - removed_new_existing_formatted:,} records)")
+            # Always generate formatted + contact/address for new & existing (header-only if empty)
+            new_existing_formatted_path = os.path.join(output_dir, 'new_and_existing_enrichments_formatted.csv')
+            removed_new_existing_formatted = write_formatted_csv(new_existing_formatted_path, new_existing_zaba_items, 'zaba')
+            files_generated[new_existing_formatted_path] = {
+                'records_written': len(new_existing_zaba_items) - removed_new_existing_formatted,
+                'records_filtered': removed_new_existing_formatted,
+                'data_type': 'formatted_new_and_existing'
+            }
+            print(f"  📄 {new_existing_formatted_path} ({len(new_existing_zaba_items) - removed_new_existing_formatted:,} records)")
 
-                contacts_new_and_existing_path = os.path.join(output_dir, 'contacts_new_and_existing.csv')
-                removed_contacts_new_and_existing = write_contact_csv(contacts_new_and_existing_path, new_existing_zaba_items, 'zaba')
-                files_generated[contacts_new_and_existing_path] = {
-                    'records_written': len(new_existing_zaba_items) - removed_contacts_new_and_existing,
-                    'records_filtered': removed_contacts_new_and_existing,
-                    'data_type': 'contacts_new_and_existing'
-                }
-                print(f"  📄 {contacts_new_and_existing_path} ({len(new_existing_zaba_items) - removed_contacts_new_and_existing:,} records)")
+            contacts_new_and_existing_path = os.path.join(output_dir, 'contacts_new_and_existing.csv')
+            removed_contacts_new_and_existing = write_contact_csv(contacts_new_and_existing_path, new_existing_zaba_items, 'zaba')
+            files_generated[contacts_new_and_existing_path] = {
+                'records_written': len(new_existing_zaba_items) - removed_contacts_new_and_existing,
+                'records_filtered': removed_contacts_new_and_existing,
+                'data_type': 'contacts_new_and_existing'
+            }
+            print(f"  📄 {contacts_new_and_existing_path} ({len(new_existing_zaba_items) - removed_contacts_new_and_existing:,} records)")
 
-                addresses_new_and_existing_path = os.path.join(output_dir, 'addresses_new_and_existing.csv')
-                removed_addresses_new_and_existing = write_address_csv(addresses_new_and_existing_path, new_existing_zaba_items, 'zaba')
-                files_generated[addresses_new_and_existing_path] = {
-                    'records_written': len(new_existing_zaba_items) - removed_addresses_new_and_existing,
-                    'records_filtered': removed_addresses_new_and_existing,
-                    'data_type': 'addresses_new_and_existing'
-                }
-                print(
-                    f"  📄 {addresses_new_and_existing_path} "
-                    f"({len(new_existing_zaba_items) - removed_addresses_new_and_existing:,} records)"
-                )
+            addresses_new_and_existing_path = os.path.join(output_dir, 'addresses_new_and_existing.csv')
+            removed_addresses_new_and_existing = write_address_csv(addresses_new_and_existing_path, new_existing_zaba_items, 'zaba')
+            files_generated[addresses_new_and_existing_path] = {
+                'records_written': len(new_existing_zaba_items) - removed_addresses_new_and_existing,
+                'records_filtered': removed_addresses_new_and_existing,
+                'data_type': 'addresses_new_and_existing'
+            }
+            print(
+                f"  📄 {addresses_new_and_existing_path} "
+                f"({len(new_existing_zaba_items) - removed_addresses_new_and_existing:,} records)"
+            )
 
             legacy_new_formatted = os.path.join(output_dir, 'new_enrichments_formatted_zaba.csv')
             try:
@@ -1515,52 +1517,49 @@ def generate_all_csvs(config: Dict[str, Any], skip_all_current: bool = True) -> 
                     if sig and sig in new_existing_sigs:
                         new_existing_items.append(item)
 
-            if new_items:
-                contacts_new_path = os.path.join(output_dir, 'contacts_new.csv')
-                removed_contacts_new = write_contact_csv(contacts_new_path, new_items, 'pdl')
-                files_generated[contacts_new_path] = {
-                    'records_written': len(new_items) - removed_contacts_new,
-                    'records_filtered': removed_contacts_new,
-                    'data_type': 'contacts_new'
-                }
-                print(f"  📄 {contacts_new_path} ({len(new_items) - removed_contacts_new:,} records)")
+            # Always generate 'new' contact/address CSVs (header-only if empty)
+            contacts_new_path = os.path.join(output_dir, 'contacts_new.csv')
+            removed_contacts_new = write_contact_csv(contacts_new_path, new_items, 'pdl')
+            files_generated[contacts_new_path] = {
+                'records_written': len(new_items) - removed_contacts_new,
+                'records_filtered': removed_contacts_new,
+                'data_type': 'contacts_new'
+            }
+            print(f"  📄 {contacts_new_path} ({len(new_items) - removed_contacts_new:,} records)")
 
-                addresses_new_path = os.path.join(output_dir, 'addresses_new.csv')
-                removed_addresses_new = write_address_csv(addresses_new_path, new_items, 'pdl')
-                files_generated[addresses_new_path] = {
-                    'records_written': len(new_items) - removed_addresses_new,
-                    'records_filtered': removed_addresses_new,
-                    'data_type': 'addresses_new'
-                }
-                print(
-                    f"  📄 {addresses_new_path} "
-                    f"({len(new_items) - removed_addresses_new:,} records)"
-                )
-            else:
-                if pdl_items:
-                    print("  ℹ️ No newly enriched PeopleDataLabs records for this run")
+            addresses_new_path = os.path.join(output_dir, 'addresses_new.csv')
+            removed_addresses_new = write_address_csv(addresses_new_path, new_items, 'pdl')
+            files_generated[addresses_new_path] = {
+                'records_written': len(new_items) - removed_addresses_new,
+                'records_filtered': removed_addresses_new,
+                'data_type': 'addresses_new'
+            }
+            print(
+                f"  📄 {addresses_new_path} "
+                f"({len(new_items) - removed_addresses_new:,} records)"
+            )
 
-            if new_existing_items:
-                contacts_new_and_existing_path = os.path.join(output_dir, 'contacts_new_and_existing.csv')
-                removed_contacts_new_and_existing = write_contact_csv(contacts_new_and_existing_path, new_existing_items, 'pdl')
-                files_generated[contacts_new_and_existing_path] = {
-                    'records_written': len(new_existing_items) - removed_contacts_new_and_existing,
-                    'records_filtered': removed_contacts_new_and_existing,
-                    'data_type': 'contacts_new_and_existing'
-                }
-                print(f"  📄 {contacts_new_and_existing_path} ({len(new_existing_items) - removed_contacts_new_and_existing:,} records)")
+            # Always generate 'new & existing' contact/address CSVs (header-only if empty)
+            contacts_new_and_existing_path = os.path.join(output_dir, 'contacts_new_and_existing.csv')
+            removed_contacts_new_and_existing = write_contact_csv(contacts_new_and_existing_path, new_existing_items, 'pdl')
+            files_generated[contacts_new_and_existing_path] = {
+                'records_written': len(new_existing_items) - removed_contacts_new_and_existing,
+                'records_filtered': removed_contacts_new_and_existing,
+                'data_type': 'contacts_new_and_existing'
+            }
+            print(f"  📄 {contacts_new_and_existing_path} ({len(new_existing_items) - removed_contacts_new_and_existing:,} records)")
 
-                addresses_new_and_existing_path = os.path.join(output_dir, 'addresses_new_and_existing.csv')
-                removed_addresses_new_and_existing = write_address_csv(addresses_new_and_existing_path, new_existing_items, 'pdl')
-                files_generated[addresses_new_and_existing_path] = {
-                    'records_written': len(new_existing_items) - removed_addresses_new_and_existing,
-                    'records_filtered': removed_addresses_new_and_existing,
-                    'data_type': 'addresses_new_and_existing'
-                }
-                print(
-                    f"  📄 {addresses_new_and_existing_path} "
-                    f"({len(new_existing_items) - removed_addresses_new_and_existing:,} records)"
-                )
+            addresses_new_and_existing_path = os.path.join(output_dir, 'addresses_new_and_existing.csv')
+            removed_addresses_new_and_existing = write_address_csv(addresses_new_and_existing_path, new_existing_items, 'pdl')
+            files_generated[addresses_new_and_existing_path] = {
+                'records_written': len(new_existing_items) - removed_addresses_new_and_existing,
+                'records_filtered': removed_addresses_new_and_existing,
+                'data_type': 'addresses_new_and_existing'
+            }
+            print(
+                f"  📄 {addresses_new_and_existing_path} "
+                f"({len(new_existing_items) - removed_addresses_new_and_existing:,} records)"
+            )
 
         generate_full_csv_exports(
             config,
@@ -1624,6 +1623,31 @@ def generate_all_csvs(config: Dict[str, Any], skip_all_current: bool = True) -> 
             print(
                 f"  📄 {new_existing_formatted_path} "
                 f"({len(new_existing_records) - removed_new_existing_formatted:,} records)"
+            )
+
+            # Ensure contacts/addresses New & Existing CSVs match the base set (works for rebuilds)
+            contacts_new_and_existing_path = os.path.join(output_dir, 'contacts_new_and_existing.csv')
+            removed_contacts_new_and_existing = write_contact_csv(contacts_new_and_existing_path, new_existing_records, 'pdl')
+            files_generated[contacts_new_and_existing_path] = {
+                'records_written': len(new_existing_records) - removed_contacts_new_and_existing,
+                'records_filtered': removed_contacts_new_and_existing,
+                'data_type': 'contacts_new_and_existing'
+            }
+            print(
+                f"  📄 {contacts_new_and_existing_path} "
+                f"({len(new_existing_records) - removed_contacts_new_and_existing:,} records)"
+            )
+
+            addresses_new_and_existing_path = os.path.join(output_dir, 'addresses_new_and_existing.csv')
+            removed_addresses_new_and_existing = write_address_csv(addresses_new_and_existing_path, new_existing_records, 'pdl')
+            files_generated[addresses_new_and_existing_path] = {
+                'records_written': len(new_existing_records) - removed_addresses_new_and_existing,
+                'records_filtered': removed_addresses_new_and_existing,
+                'data_type': 'addresses_new_and_existing'
+            }
+            print(
+                f"  📄 {addresses_new_and_existing_path} "
+                f"({len(new_existing_records) - removed_addresses_new_and_existing:,} records)"
             )
 
             # Only generate current_enrichments_formatted if we generated the base current CSV
