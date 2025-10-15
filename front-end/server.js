@@ -2312,7 +2312,11 @@ app.post('/api/step2/rebuild-csvs', async (req, res) => {
           currentCsv: getFileStats('output/current_enrichments.csv'),
           combinedCsv: getFileStats('output/new_and_existing_enrichments.csv'),
           contactCurrent: getFileStats('output/contact_current.csv'),
-          contactNew: getFileStats('output/contact_new.csv')
+          contactCurrentAddresses: getFileStats('output/contact_current_addresses.csv'),
+          contactNew: getFileStats('output/contact_new.csv'),
+          contactNewAddresses: getFileStats('output/contact_new_addresses.csv'),
+          contactsNewAndExisting: getFileStats('output/contacts_new_and_existing.csv'),
+          addressesNewAndExisting: getFileStats('output/addresses_new_and_existing.csv')
         };
 
         runningProcesses.set(stepId + '_completed', {
