@@ -16,7 +16,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from runners.run_pdl_enrich import run_pdl_enrichment
 from runners.run_zaba_enrich import run_zaba_enrichment
-from runners.csv_builder import generate_all_csvs
+from runners.csv_builder import generate_all_csvs, generate_all_and_current_csvs
 
 # Load environment variables
 load_dotenv()
@@ -71,16 +71,18 @@ def main():
     express_mode = os.getenv('STEP2_EXPRESS_MODE', '').lower() == 'true' or ('--express' in sys.argv)
     rebuild_only = ('--rebuild' in sys.argv)
     use_zaba = ('--zaba' in sys.argv)
-    
+    generate_all_current_only = ('--generate-all-current' in sys.argv)
+
     method_name = "ZabaSearch Web Scraping" if use_zaba else "PeopleDataLabs API"
-    
-    print("🚀 STARTING STEP 2: DATA ENRICHMENT" + 
-          f" ({method_name})" + 
-          (" (TEST MODE)" if test_mode else "") + 
+
+    print("🚀 STARTING STEP 2: DATA ENRICHMENT" +
+          f" ({method_name})" +
+          (" (TEST MODE)" if test_mode else "") +
           (" [EXPRESS]" if express_mode else "") +
-          (" [REBUILD ONLY]" if rebuild_only else ""))
+          (" [REBUILD ONLY]" if rebuild_only else "") +
+          (" [ALL & CURRENT ONLY]" if generate_all_current_only else ""))
     print("=" * 60)
-    
+
     config = load_config(test_mode, express_mode, use_zaba)
     run_started_at = datetime.utcnow()
     config['RUN_STARTED_AT'] = run_started_at.isoformat()
@@ -100,6 +102,30 @@ def main():
     config['already_enriched_people'] = already_enriched_people
     if already_enriched_people:
         print(f"STEP 2: Loaded {len(already_enriched_people)} already-enriched people from Step 1")
+
+    if generate_all_current_only:
+        try:
+            print("🔄 Generating 'all' and 'current' base CSVs only (this may take several minutes)...")
+            csv_result = generate_all_and_current_csvs(config)
+
+            if csv_result.get('success'):
+                print(f"\n✅ ALL & CURRENT CSV GENERATION COMPLETED SUCCESSFULLY!")
+                print("=" * 60)
+                print("📁 OUTPUT FILES:")
+                for file_path, stats in csv_result.get('files_generated', {}).items():
+                    if os.path.exists(file_path):
+                        file_size = os.path.getsize(file_path) / 1024
+                        records = stats.get('records_written', 0)
+                        print(f"   📄 {file_path} ({file_size:.1f} KB, {records:,} records)")
+                return 0
+            else:
+                print(f"\n❌ ALL & CURRENT CSV GENERATION FAILED: {csv_result.get('error')}")
+                return 1
+
+        except Exception as e:
+            logger.error(f"All & Current CSV generation failed: {e}")
+            print(f"\n❌ ALL & CURRENT CSV GENERATION FAILED: {e}")
+            return 1
 
     if rebuild_only:
         try:

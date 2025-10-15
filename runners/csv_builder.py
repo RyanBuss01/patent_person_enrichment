@@ -896,8 +896,14 @@ def write_simple_zaba_csv(path: str, records: List[dict]) -> None:
     logger.info(f"Wrote {len(records)} ZabaSearch simplified rows to {path}")
 
 
-def generate_full_csv_exports(config: Dict[str, Any], db_manager: DatabaseManager, output_dir: str, files_generated: Dict[str, Dict[str, Any]]) -> None:
-    """Generate the full CSV exports (current/new/new+existing/all) directly from SQL tables."""
+def generate_full_csv_exports(
+    config: Dict[str, Any],
+    db_manager: DatabaseManager,
+    output_dir: str,
+    files_generated: Dict[str, Dict[str, Any]],
+    include_all_current: bool = True
+) -> None:
+    """Generate the base CSV exports (new/new+existing and optionally current/all) directly from SQL tables."""
     run_started_at = _parse_timestamp(config.get('RUN_STARTED_AT'))
     enrichment_result = config.get('enrichment_result') or {}
 
@@ -917,7 +923,9 @@ def generate_full_csv_exports(config: Dict[str, Any], db_manager: DatabaseManage
     enriched_columns = _get_table_columns(db_manager, 'enriched_people')
     existing_columns = _get_table_columns(db_manager, 'existing_people')
     enriched_fieldnames = _compose_fieldnames(preferred_columns, enriched_columns)
-    current_fieldnames = _compose_fieldnames(preferred_columns, enriched_columns + existing_columns)
+    current_fieldnames: List[str] = []
+    if include_all_current:
+        current_fieldnames = _compose_fieldnames(preferred_columns, enriched_columns + existing_columns)
 
     new_path = os.path.join(output_dir, 'new_enrichments.csv')
     new_existing_path = os.path.join(output_dir, 'new_and_existing_enrichments.csv')
@@ -932,13 +940,15 @@ def generate_full_csv_exports(config: Dict[str, Any], db_manager: DatabaseManage
     new_count = new_existing_count = current_count = all_count = 0
     processed = 0
 
-    new_file = new_writer = new_existing_file = new_existing_writer = all_file = all_writer = current_file = current_writer = None
+    new_file = new_writer = new_existing_file = new_existing_writer = None
+    all_file = all_writer = current_file = current_writer = None
 
     try:
         new_file, new_writer = _open_csv_writer(new_path, enriched_fieldnames)
         new_existing_file, new_existing_writer = _open_csv_writer(new_existing_path, enriched_fieldnames)
-        all_file, all_writer = _open_csv_writer(all_path, enriched_fieldnames)
-        current_file, current_writer = _open_csv_writer(current_path, current_fieldnames)
+        if include_all_current:
+            all_file, all_writer = _open_csv_writer(all_path, enriched_fieldnames)
+            current_file, current_writer = _open_csv_writer(current_path, current_fieldnames)
 
         for row in _stream_table(db_manager, "SELECT * FROM enriched_people ORDER BY enriched_at DESC"):
             processed += 1
@@ -973,15 +983,17 @@ def generate_full_csv_exports(config: Dict[str, Any], db_manager: DatabaseManage
                     'record_scope': record_scope_value
                 })
                 new_existing_writer.writerow(normalized)
-                current_writer.writerow(normalized)
                 new_existing_count += 1
-                current_count += 1
+                if current_writer:
+                    current_writer.writerow(normalized)
+                    current_count += 1
 
-            all_writer.writerow(_normalize_sql_row(row, {
-                'source_table': 'enriched_people',
-                'record_scope': record_scope_value
-            }))
-            all_count += 1
+            if all_writer:
+                all_writer.writerow(_normalize_sql_row(row, {
+                    'source_table': 'enriched_people',
+                    'record_scope': record_scope_value
+                }))
+                all_count += 1
 
             if processed % 5000 == 0:
                 print(f"PROGRESS: CSV building base export {processed:,} rows processed")
@@ -992,7 +1004,7 @@ def generate_full_csv_exports(config: Dict[str, Any], db_manager: DatabaseManage
             scope_signatures = set(all_enriched_signatures)
 
         existing_added = 0
-        if scope_signatures:
+        if scope_signatures and current_writer:
             print("PROGRESS: CSV building (1/3) - merging existing_people rows")
             for row in _stream_table(db_manager, "SELECT * FROM existing_people"):
                 sig = _person_signature_values(
@@ -1004,12 +1016,13 @@ def generate_full_csv_exports(config: Dict[str, Any], db_manager: DatabaseManage
                 )
                 if not sig or sig not in scope_signatures:
                     continue
-                current_writer.writerow(_normalize_sql_row(row, {
-                    'source_table': 'existing_people',
-                    'record_scope': 'existing_table'
-                }))
-                current_count += 1
-                existing_added += 1
+                if current_writer:
+                    current_writer.writerow(_normalize_sql_row(row, {
+                        'source_table': 'existing_people',
+                        'record_scope': 'existing_table'
+                    }))
+                    current_count += 1
+                    existing_added += 1
 
                 if existing_added % 5000 == 0:
                     print(f"PROGRESS: CSV building existing scope {existing_added:,} rows processed")
@@ -1028,19 +1041,23 @@ def generate_full_csv_exports(config: Dict[str, Any], db_manager: DatabaseManage
         }
         print(f"  📄 {new_existing_path} ({new_existing_count:,} records)")
 
-        files_generated[current_path] = {
-            'records_written': current_count,
-            'records_filtered': 0,
-            'data_type': 'full_current'
-        }
-        print(f"  📄 {current_path} ({current_count:,} records)")
+        if current_writer:
+            files_generated[current_path] = {
+                'records_written': current_count,
+                'records_filtered': 0,
+                'data_type': 'full_current'
+            }
+            print(f"  📄 {current_path} ({current_count:,} records)")
 
-        files_generated[all_path] = {
-            'records_written': all_count,
-            'records_filtered': 0,
-            'data_type': 'full_all'
-        }
-        print(f"  📄 {all_path} ({all_count:,} records)")
+        if all_writer:
+            files_generated[all_path] = {
+                'records_written': all_count,
+                'records_filtered': 0,
+                'data_type': 'full_all'
+            }
+            print(f"  📄 {all_path} ({all_count:,} records)")
+        elif not include_all_current:
+            print("  ℹ️ Skipped generating all/current CSVs (disabled by configuration)")
 
     finally:
         for handle in (new_file, new_existing_file, all_file, current_file):
@@ -1235,8 +1252,13 @@ def write_combined_json(path: str, records: List[dict]) -> None:
     
     logger.info(f"Wrote {len(records)} records to {path}")
 
-def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate all CSV files from database data"""
+def generate_all_csvs(config: Dict[str, Any], skip_all_current: bool = True) -> Dict[str, Any]:
+    """Generate all CSV files from database data
+
+    Args:
+        config: Configuration dictionary
+        skip_all_current: If True, skips generating 'all' and 'current' base CSVs (default: True)
+    """
     try:
         output_dir = config.get('OUTPUT_DIR', 'output')
         use_zaba = config.get('USE_ZABA', False)
@@ -1316,37 +1338,46 @@ def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
                         new_items.append(row)
                         seen_new.add(sig)
 
-            if zaba_items:
-                current_formatted_path = os.path.join(output_dir, 'current_enrichments_formatted.csv')
-                removed_current = write_formatted_csv(current_formatted_path, zaba_items, 'zaba')
-                files_generated[current_formatted_path] = {
-                    'records_written': len(zaba_items) - removed_current,
-                    'records_filtered': removed_current,
-                    'data_type': 'current_formatted'
-                }
-                print(f"  📄 {current_formatted_path} ({len(zaba_items) - removed_current:,} records)")
-
-                contact_current_path = os.path.join(output_dir, 'contact_current.csv')
-                removed_contact_current = write_contact_csv(contact_current_path, zaba_items, 'zaba')
-                files_generated[contact_current_path] = {
-                    'records_written': len(zaba_items) - removed_contact_current,
-                    'records_filtered': removed_contact_current,
-                    'data_type': 'contact_current'
-                }
-                print(f"  📄 {contact_current_path} ({len(zaba_items) - removed_contact_current:,} records)")
-
-                contact_current_addresses_path = os.path.join(output_dir, 'contact_current_addresses.csv')
-                removed_contact_current_addresses = write_address_csv(contact_current_addresses_path, zaba_items, 'zaba')
-                files_generated[contact_current_addresses_path] = {
-                    'records_written': len(zaba_items) - removed_contact_current_addresses,
-                    'records_filtered': removed_contact_current_addresses,
-                    'data_type': 'contact_current_addresses'
-                }
-                print(
-                    f"  📄 {contact_current_addresses_path} "
-                    f"({len(zaba_items) - removed_contact_current_addresses:,} records)"
+            # Determine new & existing items for ZabaSearch (matching formatted CSV logic)
+            new_existing_zaba_sigs = set()
+            for item in new_items:
+                sig = _zaba_signature(
+                    item.get('first_name'),
+                    item.get('last_name'),
+                    item.get('city'),
+                    item.get('state'),
+                    item.get('patent_number')
                 )
+                if sig:
+                    new_existing_zaba_sigs.add(sig)
 
+            for item in enrichment_result.get('matched_existing') or []:
+                zaba_data = item.get('zaba_data') or {}
+                params = zaba_data.get('search_parameters') or {}
+                sig = _zaba_signature(
+                    params.get('first_name'),
+                    params.get('last_name'),
+                    params.get('city'),
+                    params.get('state'),
+                    item.get('patent_number')
+                )
+                if sig:
+                    new_existing_zaba_sigs.add(sig)
+
+            new_existing_zaba_items = []
+            if new_existing_zaba_sigs and zaba_items:
+                for item in zaba_items:
+                    sig = _zaba_signature(
+                        item.get('first_name'),
+                        item.get('last_name'),
+                        item.get('city'),
+                        item.get('state'),
+                        item.get('patent_number')
+                    )
+                    if sig and sig in new_existing_zaba_sigs:
+                        new_existing_zaba_items.append(item)
+
+            if zaba_items:
                 enriched_json_path = config.get('OUTPUT_JSON', os.path.join(output_dir, 'enriched_patents.json'))
                 write_combined_json(enriched_json_path, zaba_items)
                 files_generated[enriched_json_path] = {
@@ -1365,30 +1396,6 @@ def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
                 }
                 print(f"  📄 {enriched_csv_path} ({len(zaba_items):,} records)")
 
-                legacy_formatted = os.path.join(output_dir, 'enrichments_formatted_zaba.csv')
-                try:
-                    shutil.copyfile(current_formatted_path, legacy_formatted)
-                    files_generated[legacy_formatted] = {
-                        'records_written': len(zaba_items) - removed_current,
-                        'records_filtered': removed_current,
-                        'data_type': 'zaba_formatted_alias',
-                        'alias_of': current_formatted_path
-                    }
-                except Exception:
-                    logger.debug("Could not create legacy Zaba formatted CSV alias")
-
-                legacy_contact = os.path.join(output_dir, 'contacts_zaba.csv')
-                try:
-                    shutil.copyfile(contact_current_path, legacy_contact)
-                    files_generated[legacy_contact] = {
-                        'records_written': len(zaba_items) - removed_contact_current,
-                        'records_filtered': removed_contact_current,
-                        'data_type': 'zaba_contact_alias',
-                        'alias_of': contact_current_path
-                    }
-                except Exception:
-                    logger.debug("Could not create legacy Zaba contact CSV alias")
-
             else:
                 print("  ⚠️ No ZabaSearch data found in database")
 
@@ -1401,26 +1408,57 @@ def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
             }
             print(f"  📄 {new_formatted_path} ({len(new_items) - removed_new_formatted:,} records)")
 
-            contact_new_path = os.path.join(output_dir, 'contact_new.csv')
-            removed_contact_new = write_contact_csv(contact_new_path, new_items, 'zaba')
-            files_generated[contact_new_path] = {
-                'records_written': len(new_items) - removed_contact_new,
-                'records_filtered': removed_contact_new,
-                'data_type': 'contact_new'
+            contacts_new_path = os.path.join(output_dir, 'contacts_new.csv')
+            removed_contacts_new = write_contact_csv(contacts_new_path, new_items, 'zaba')
+            files_generated[contacts_new_path] = {
+                'records_written': len(new_items) - removed_contacts_new,
+                'records_filtered': removed_contacts_new,
+                'data_type': 'contacts_new'
             }
-            print(f"  📄 {contact_new_path} ({len(new_items) - removed_contact_new:,} records)")
+            print(f"  📄 {contacts_new_path} ({len(new_items) - removed_contacts_new:,} records)")
 
-            contact_new_addresses_path = os.path.join(output_dir, 'contact_new_addresses.csv')
-            removed_contact_new_addresses = write_address_csv(contact_new_addresses_path, new_items, 'zaba')
-            files_generated[contact_new_addresses_path] = {
-                'records_written': len(new_items) - removed_contact_new_addresses,
-                'records_filtered': removed_contact_new_addresses,
-                'data_type': 'contact_new_addresses'
+            addresses_new_path = os.path.join(output_dir, 'addresses_new.csv')
+            removed_addresses_new = write_address_csv(addresses_new_path, new_items, 'zaba')
+            files_generated[addresses_new_path] = {
+                'records_written': len(new_items) - removed_addresses_new,
+                'records_filtered': removed_addresses_new,
+                'data_type': 'addresses_new'
             }
             print(
-                f"  📄 {contact_new_addresses_path} "
-                f"({len(new_items) - removed_contact_new_addresses:,} records)"
+                f"  📄 {addresses_new_path} "
+                f"({len(new_items) - removed_addresses_new:,} records)"
             )
+
+            if new_existing_zaba_items:
+                new_existing_formatted_path = os.path.join(output_dir, 'new_and_existing_enrichments_formatted.csv')
+                removed_new_existing_formatted = write_formatted_csv(new_existing_formatted_path, new_existing_zaba_items, 'zaba')
+                files_generated[new_existing_formatted_path] = {
+                    'records_written': len(new_existing_zaba_items) - removed_new_existing_formatted,
+                    'records_filtered': removed_new_existing_formatted,
+                    'data_type': 'formatted_new_and_existing'
+                }
+                print(f"  📄 {new_existing_formatted_path} ({len(new_existing_zaba_items) - removed_new_existing_formatted:,} records)")
+
+                contacts_new_and_existing_path = os.path.join(output_dir, 'contacts_new_and_existing.csv')
+                removed_contacts_new_and_existing = write_contact_csv(contacts_new_and_existing_path, new_existing_zaba_items, 'zaba')
+                files_generated[contacts_new_and_existing_path] = {
+                    'records_written': len(new_existing_zaba_items) - removed_contacts_new_and_existing,
+                    'records_filtered': removed_contacts_new_and_existing,
+                    'data_type': 'contacts_new_and_existing'
+                }
+                print(f"  📄 {contacts_new_and_existing_path} ({len(new_existing_zaba_items) - removed_contacts_new_and_existing:,} records)")
+
+                addresses_new_and_existing_path = os.path.join(output_dir, 'addresses_new_and_existing.csv')
+                removed_addresses_new_and_existing = write_address_csv(addresses_new_and_existing_path, new_existing_zaba_items, 'zaba')
+                files_generated[addresses_new_and_existing_path] = {
+                    'records_written': len(new_existing_zaba_items) - removed_addresses_new_and_existing,
+                    'records_filtered': removed_addresses_new_and_existing,
+                    'data_type': 'addresses_new_and_existing'
+                }
+                print(
+                    f"  📄 {addresses_new_and_existing_path} "
+                    f"({len(new_existing_zaba_items) - removed_addresses_new_and_existing:,} records)"
+                )
 
             legacy_new_formatted = os.path.join(output_dir, 'new_enrichments_formatted_zaba.csv')
             try:
@@ -1458,56 +1496,79 @@ def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
 
             new_items = enrichment_result.get('newly_enriched_data') or []
 
-            if pdl_items:
-                contact_current_path = os.path.join(output_dir, 'contact_current.csv')
-                removed_contact_current = write_contact_csv(contact_current_path, pdl_items, 'pdl')
-                files_generated[contact_current_path] = {
-                    'records_written': len(pdl_items) - removed_contact_current,
-                    'records_filtered': removed_contact_current,
-                    'data_type': 'contact_current'
-                }
-                print(f"  📄 {contact_current_path} ({len(pdl_items) - removed_contact_current:,} records)")
+            # Determine new & existing items (matching formatted CSV logic)
+            new_existing_sigs = _extract_signatures_from_enriched_items(new_items)
+            new_existing_sigs.update(_extract_signatures_from_enriched_items(
+                enrichment_result.get('matched_existing') or []
+            ))
 
-                contact_current_addresses_path = os.path.join(output_dir, 'contact_current_addresses.csv')
-                removed_contact_current_addresses = write_address_csv(contact_current_addresses_path, pdl_items, 'pdl')
-                files_generated[contact_current_addresses_path] = {
-                    'records_written': len(pdl_items) - removed_contact_current_addresses,
-                    'records_filtered': removed_contact_current_addresses,
-                    'data_type': 'contact_current_addresses'
-                }
-                print(
-                    f"  📄 {contact_current_addresses_path} "
-                    f"({len(pdl_items) - removed_contact_current_addresses:,} records)"
-                )
-            else:
-                print("  ⚠️ No PeopleDataLabs data found in database")
+            new_existing_items = []
+            if new_existing_sigs and pdl_items:
+                for item in pdl_items:
+                    sig = _person_signature_values(
+                        item.get('first_name'),
+                        item.get('last_name'),
+                        item.get('city'),
+                        item.get('state'),
+                        item.get('patent_number')
+                    )
+                    if sig and sig in new_existing_sigs:
+                        new_existing_items.append(item)
 
             if new_items:
-                contact_new_path = os.path.join(output_dir, 'contact_new.csv')
-                removed_contact_new = write_contact_csv(contact_new_path, new_items, 'pdl')
-                files_generated[contact_new_path] = {
-                    'records_written': len(new_items) - removed_contact_new,
-                    'records_filtered': removed_contact_new,
-                    'data_type': 'contact_new'
+                contacts_new_path = os.path.join(output_dir, 'contacts_new.csv')
+                removed_contacts_new = write_contact_csv(contacts_new_path, new_items, 'pdl')
+                files_generated[contacts_new_path] = {
+                    'records_written': len(new_items) - removed_contacts_new,
+                    'records_filtered': removed_contacts_new,
+                    'data_type': 'contacts_new'
                 }
-                print(f"  📄 {contact_new_path} ({len(new_items) - removed_contact_new:,} records)")
+                print(f"  📄 {contacts_new_path} ({len(new_items) - removed_contacts_new:,} records)")
 
-                contact_new_addresses_path = os.path.join(output_dir, 'contact_new_addresses.csv')
-                removed_contact_new_addresses = write_address_csv(contact_new_addresses_path, new_items, 'pdl')
-                files_generated[contact_new_addresses_path] = {
-                    'records_written': len(new_items) - removed_contact_new_addresses,
-                    'records_filtered': removed_contact_new_addresses,
-                    'data_type': 'contact_new_addresses'
+                addresses_new_path = os.path.join(output_dir, 'addresses_new.csv')
+                removed_addresses_new = write_address_csv(addresses_new_path, new_items, 'pdl')
+                files_generated[addresses_new_path] = {
+                    'records_written': len(new_items) - removed_addresses_new,
+                    'records_filtered': removed_addresses_new,
+                    'data_type': 'addresses_new'
                 }
                 print(
-                    f"  📄 {contact_new_addresses_path} "
-                    f"({len(new_items) - removed_contact_new_addresses:,} records)"
+                    f"  📄 {addresses_new_path} "
+                    f"({len(new_items) - removed_addresses_new:,} records)"
                 )
             else:
                 if pdl_items:
                     print("  ℹ️ No newly enriched PeopleDataLabs records for this run")
 
-        generate_full_csv_exports(config, db_manager, output_dir, files_generated)
+            if new_existing_items:
+                contacts_new_and_existing_path = os.path.join(output_dir, 'contacts_new_and_existing.csv')
+                removed_contacts_new_and_existing = write_contact_csv(contacts_new_and_existing_path, new_existing_items, 'pdl')
+                files_generated[contacts_new_and_existing_path] = {
+                    'records_written': len(new_existing_items) - removed_contacts_new_and_existing,
+                    'records_filtered': removed_contacts_new_and_existing,
+                    'data_type': 'contacts_new_and_existing'
+                }
+                print(f"  📄 {contacts_new_and_existing_path} ({len(new_existing_items) - removed_contacts_new_and_existing:,} records)")
+
+                addresses_new_and_existing_path = os.path.join(output_dir, 'addresses_new_and_existing.csv')
+                removed_addresses_new_and_existing = write_address_csv(addresses_new_and_existing_path, new_existing_items, 'pdl')
+                files_generated[addresses_new_and_existing_path] = {
+                    'records_written': len(new_existing_items) - removed_addresses_new_and_existing,
+                    'records_filtered': removed_addresses_new_and_existing,
+                    'data_type': 'addresses_new_and_existing'
+                }
+                print(
+                    f"  📄 {addresses_new_and_existing_path} "
+                    f"({len(new_existing_items) - removed_addresses_new_and_existing:,} records)"
+                )
+
+        generate_full_csv_exports(
+            config,
+            db_manager,
+            output_dir,
+            files_generated,
+            include_all_current=not skip_all_current
+        )
 
         print("PROGRESS: CSV building (2/3) - preparing formatted and contact exports")
 
@@ -1565,17 +1626,19 @@ def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
                 f"({len(new_existing_records) - removed_new_existing_formatted:,} records)"
             )
 
-            current_records = _select_records(_load_signatures_from_csv(current_csv_path))
-            removed_current_formatted = write_formatted_csv(current_formatted_path, current_records, 'pdl')
-            files_generated[current_formatted_path] = {
-                'records_written': len(current_records) - removed_current_formatted,
-                'records_filtered': removed_current_formatted,
-                'data_type': 'current_formatted'
-            }
-            print(
-                f"  📄 {current_formatted_path} "
-                f"({len(current_records) - removed_current_formatted:,} records)"
-            )
+            # Only generate current_enrichments_formatted if we generated the base current CSV
+            if not skip_all_current and os.path.exists(current_csv_path):
+                current_records = _select_records(_load_signatures_from_csv(current_csv_path))
+                removed_current_formatted = write_formatted_csv(current_formatted_path, current_records, 'pdl')
+                files_generated[current_formatted_path] = {
+                    'records_written': len(current_records) - removed_current_formatted,
+                    'records_filtered': removed_current_formatted,
+                    'data_type': 'current_formatted'
+                }
+                print(
+                    f"  📄 {current_formatted_path} "
+                    f"({len(current_records) - removed_current_formatted:,} records)"
+                )
 
         print("PROGRESS: CSV building (3/3) - finalizing output summaries")
 
@@ -1587,6 +1650,210 @@ def generate_all_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
             'method': 'zabasearch' if use_zaba else 'peopledatalabs'
         }
         
+    except Exception as e:
+        logger.error(f"CSV generation failed: {e}")
+        return {
+            'success': False,
+            'error': str(e),
+            'files_generated': {}
+        }
+
+
+def _generate_all_and_current_base_csvs(config: Dict[str, Any], db_manager: DatabaseManager, output_dir: str, files_generated: Dict[str, Dict[str, Any]]) -> None:
+    """Generate ONLY 'all' and 'current' base CSVs (not new or new_existing)"""
+    preferred_columns = ['record_scope', 'source_table', 'id', 'first_name', 'last_name', 'city', 'state', 'patent_number']
+    enriched_columns = _get_table_columns(db_manager, 'enriched_people')
+    existing_columns = _get_table_columns(db_manager, 'existing_people')
+    enriched_fieldnames = _compose_fieldnames(preferred_columns, enriched_columns)
+    current_fieldnames = _compose_fieldnames(preferred_columns, enriched_columns + existing_columns)
+
+    current_path = os.path.join(output_dir, 'current_enrichments.csv')
+    all_path = os.path.join(output_dir, 'all_enrichments.csv')
+
+    print("PROGRESS: Exporting 'all' and 'current' base tables")
+
+    current_count = all_count = 0
+    processed = 0
+    all_enriched_signatures: Set[str] = set()
+    all_file = all_writer = current_file = current_writer = None
+
+    try:
+        all_file, all_writer = _open_csv_writer(all_path, enriched_fieldnames)
+        current_file, current_writer = _open_csv_writer(current_path, current_fieldnames)
+
+        # Process enriched_people table and collect signatures
+        for row in _stream_table(db_manager, "SELECT * FROM enriched_people ORDER BY enriched_at DESC"):
+            processed += 1
+            sig = _person_signature_values(
+                row.get('first_name'),
+                row.get('last_name'),
+                row.get('city'),
+                row.get('state'),
+                row.get('patent_number') or row.get('patent_no')
+            )
+            if sig:
+                all_enriched_signatures.add(sig)
+
+            normalized = _normalize_sql_row(row, {
+                'source_table': 'enriched_people',
+                'record_scope': 'enriched'
+            })
+
+            all_writer.writerow(normalized)
+            current_writer.writerow(normalized)
+            all_count += 1
+            current_count += 1
+
+        print(f"  ✓ Processed {processed:,} enriched records")
+
+        # Add ONLY matching existing_people to current (those with enriched signatures)
+        existing_added = 0
+        for row in _stream_table(db_manager, "SELECT * FROM existing_people"):
+            sig = _person_signature_values(
+                row.get('first_name'),
+                row.get('last_name'),
+                row.get('city'),
+                row.get('state'),
+                row.get('patent_no') or row.get('patent_number')
+            )
+            # Only include if signature exists in enriched_people
+            if sig and sig in all_enriched_signatures:
+                current_writer.writerow(_normalize_sql_row(row, {
+                    'source_table': 'existing_people',
+                    'record_scope': 'existing_table'
+                }))
+                current_count += 1
+                existing_added += 1
+
+        print(f"  ✓ Added {existing_added:,} existing records to current (matched from enriched)")
+
+        files_generated[all_path] = {
+            'records_written': all_count,
+            'records_filtered': 0,
+            'data_type': 'full_all'
+        }
+        print(f"  📄 {all_path} ({all_count:,} records)")
+
+        files_generated[current_path] = {
+            'records_written': current_count,
+            'records_filtered': 0,
+            'data_type': 'full_current'
+        }
+        print(f"  📄 {current_path} ({current_count:,} records)")
+
+    finally:
+        for handle in (all_file, current_file):
+            if handle:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+
+
+def generate_all_and_current_csvs(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Generate 'all' and 'current' CSVs with formatted, contacts, and addresses versions
+
+    Args:
+        config: Configuration dictionary
+
+    Returns:
+        Dictionary with success status and files generated
+    """
+    try:
+        output_dir = config.get('OUTPUT_DIR', 'output')
+        use_zaba = config.get('USE_ZABA', False)
+        files_generated = {}
+
+        db_config = DatabaseConfig.from_env()
+        db_manager = DatabaseManager(db_config)
+
+        print("📊 Generating 'all' and 'current' base CSVs from database...")
+        print("⚠️  This may take several minutes for large datasets...")
+
+        # Generate ONLY all and current base CSVs
+        _generate_all_and_current_base_csvs(config, db_manager, output_dir, files_generated)
+
+        # Load all enriched data from database
+        if use_zaba:
+            all_items = get_zaba_enriched_data()
+            data_type = 'zaba'
+        else:
+            all_items = get_pdl_enriched_data()
+            data_type = 'pdl'
+
+        if all_items:
+            print(f"📊 Generating formatted, contacts, and addresses CSVs for 'all' and 'current'...")
+
+            # Generate all_enrichments_formatted.csv
+            all_formatted_path = os.path.join(output_dir, 'all_enrichments_formatted.csv')
+            removed_all_formatted = write_formatted_csv(all_formatted_path, all_items, data_type)
+            files_generated[all_formatted_path] = {
+                'records_written': len(all_items) - removed_all_formatted,
+                'records_filtered': removed_all_formatted,
+                'data_type': 'all_formatted'
+            }
+            print(f"  📄 {all_formatted_path} ({len(all_items) - removed_all_formatted:,} records)")
+
+            # Generate current_enrichments_formatted.csv
+            current_csv_path = os.path.join(output_dir, 'current_enrichments.csv')
+            current_formatted_path = os.path.join(output_dir, 'current_enrichments_formatted.csv')
+
+            if os.path.exists(current_csv_path):
+                # Build lookup for current records
+                current_lookup: Dict[str, Dict[str, Any]] = {}
+                for item in all_items:
+                    sig = _person_signature_values(
+                        item.get('first_name'),
+                        item.get('last_name'),
+                        item.get('city'),
+                        item.get('state'),
+                        item.get('patent_number')
+                    )
+                    if sig and sig not in current_lookup:
+                        current_lookup[sig] = item
+
+                current_signatures = _load_signatures_from_csv(current_csv_path)
+                current_records = []
+                for sig in current_signatures:
+                    item = current_lookup.get(sig)
+                    if item:
+                        current_records.append(item)
+
+                removed_current_formatted = write_formatted_csv(current_formatted_path, current_records, data_type)
+                files_generated[current_formatted_path] = {
+                    'records_written': len(current_records) - removed_current_formatted,
+                    'records_filtered': removed_current_formatted,
+                    'data_type': 'current_formatted'
+                }
+                print(f"  📄 {current_formatted_path} ({len(current_records) - removed_current_formatted:,} records)")
+
+                # Generate contacts_current.csv
+                contacts_current_path = os.path.join(output_dir, 'contacts_current.csv')
+                removed_contacts_current = write_contact_csv(contacts_current_path, current_records, data_type)
+                files_generated[contacts_current_path] = {
+                    'records_written': len(current_records) - removed_contacts_current,
+                    'records_filtered': removed_contacts_current,
+                    'data_type': 'contacts_current'
+                }
+                print(f"  📄 {contacts_current_path} ({len(current_records) - removed_contacts_current:,} records)")
+
+                # Generate addresses_current.csv
+                addresses_current_path = os.path.join(output_dir, 'addresses_current.csv')
+                removed_addresses_current = write_address_csv(addresses_current_path, current_records, data_type)
+                files_generated[addresses_current_path] = {
+                    'records_written': len(current_records) - removed_addresses_current,
+                    'records_filtered': removed_addresses_current,
+                    'data_type': 'addresses_current'
+                }
+                print(f"  📄 {addresses_current_path} ({len(current_records) - removed_addresses_current:,} records)")
+
+        print(f"\n✅ 'All' and 'Current' CSV generation completed!")
+
+        return {
+            'success': True,
+            'files_generated': files_generated
+        }
+
     except Exception as e:
         logger.error(f"CSV generation failed: {e}")
         return {

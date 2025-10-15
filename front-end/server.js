@@ -41,6 +41,7 @@ try {
 // Middleware
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
+app.use('/output', express.static(path.join(__dirname, '..', 'output')));
 // Route-specific body parsers will be used for uploads
 
 // Global process error logging
@@ -2342,6 +2343,99 @@ app.post('/api/step2/rebuild-csvs', async (req, res) => {
   }
 });
 
+// Step 2: Generate All & Current CSVs (slower operation)
+app.post('/api/step2/generate-all-current', async (req, res) => {
+    try {
+        const stepId = 'step2-all-current';
+        if (runningProcesses.has(stepId)) {
+            return res.json({
+                success: false,
+                error: 'All & Current CSV generation is already running'
+            });
+        }
+
+        // Clear any stale completion marker so UI can use fresh status
+        runningProcesses.delete(stepId + '_completed');
+
+        const args = ['--generate-all-current'];
+        console.log('Starting Step 2: Generate All & Current CSVs');
+        runPythonScriptAsync('front-end/run_step2_wrapper.py', args, stepId)
+            .then((result) => {
+                const msg = result && result.output ? String(result.output) : '';
+                try {
+                    fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_all_current_output.txt'), msg);
+                } catch (writeErr) {
+                    console.warn('Could not persist last_step2_all_current_output.txt:', writeErr.message);
+                }
+
+                const files = {
+                    allCsv: getFileStats('output/all_enrichments.csv'),
+                    currentCsv: getFileStats('output/current_enrichments.csv'),
+                    allFormatted: getFileStats('output/all_enrichments_formatted.csv'),
+                    currentFormatted: getFileStats('output/current_enrichments_formatted.csv'),
+                    contactsCurrent: getFileStats('output/contacts_current.csv'),
+                    addressesCurrent: getFileStats('output/addresses_current.csv')
+                };
+                const completedAt = new Date();
+
+                writeStepStatus(stepId, {
+                    success: true,
+                    completedAt: completedAt.toISOString(),
+                    files,
+                    outputSummary: truncateText(msg, 4000)
+                });
+
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: true,
+                    output: msg,
+                    files,
+                    completedAt
+                });
+            })
+            .catch((err) => {
+                const msgParts = [
+                    err && err.message ? err.message : 'Step 2 All & Current generation failed',
+                    err && err.stderr ? err.stderr : '',
+                    err && err.stdout ? err.stdout : ''
+                ].filter(Boolean);
+                const msg = msgParts.join('\n\n');
+                try {
+                    fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_all_current_output.txt'), msg);
+                } catch (writeErr) {
+                    console.warn('Could not persist last_step2_all_current_output.txt:', writeErr.message);
+                }
+
+                const completedAt = new Date();
+                writeStepStatus(stepId, {
+                    success: false,
+                    completedAt: completedAt.toISOString(),
+                    error: err && err.message ? err.message : 'Step 2 All & Current generation failed',
+                    stderr: truncateText(err && err.stderr ? err.stderr : '', 4000),
+                    stdoutSnippet: truncateText(err && err.stdout ? err.stdout : '', 2000)
+                });
+
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: false,
+                    error: err && err.message ? err.message : 'Step 2 All & Current generation failed',
+                    stderr: err && err.stderr,
+                    stdout: err && err.stdout,
+                    completedAt
+                });
+            });
+        res.json({
+            success: true,
+            status: 'started',
+            processing: true,
+            message: 'All & Current CSV generation started. This may take several minutes.'
+        });
+    } catch (e) {
+        console.error('Failed to start All & Current CSV generation:', e);
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
 app.post('/api/step2/rebuild-zaba-csvs', async (req, res) => {
   try {
     const stepId = `step2-zaba-rebuild-${Date.now()}`;
@@ -2357,11 +2451,11 @@ app.post('/api/step2/rebuild-zaba-csvs', async (req, res) => {
         const msg = `Step 2 ZabaSearch Rebuild failed: ${err && err.message ? err.message : String(err)}`;
         fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_zaba_output.txt'), msg);
       });
-    res.json({ 
-      success: true, 
-      status: 'started', 
-      processing: true, 
-      message: 'ZabaSearch CSV rebuild started. Use /api/step2/status to check progress.' 
+    res.json({
+      success: true,
+      status: 'started',
+      processing: true,
+      message: 'ZabaSearch CSV rebuild started. Use /api/step2/status to check progress.'
     });
   } catch (e) {
     console.error('Failed to start Step 2 ZabaSearch rebuild:', e);
@@ -2577,7 +2671,11 @@ app.get('/api/status', (req, res) => {
             ).length : 0
         };
     }
-    
+
+    status.runningProcesses = Array.from(runningProcesses.entries())
+        .filter(([, info]) => info && info.process)
+        .map(([key]) => key);
+
     // Step 2 now represents enrichment; no extraction status
     
     res.json(status);

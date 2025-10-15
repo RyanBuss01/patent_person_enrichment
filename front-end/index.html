@@ -119,6 +119,14 @@
             display: grid;
             gap: 25px;
         }
+
+        .pipeline-link {
+            display: flex;
+            justify-content: flex-start;
+            margin-bottom: 20px;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
         
         .step {
             background: #f8f9fa;
@@ -911,21 +919,54 @@
             align-items: center;
             gap: 8px;
         }
-        .export-actions {
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
-            align-items: center;
+        .export-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .export-table th,
+        .export-table td {
+            border: 1px solid #e5e7eb;
+            padding: 10px 12px;
+            text-align: center;
+        }
+
+        .export-table thead th {
+            background: #f8f9fb;
+            font-weight: 600;
+            color: #2c3e50;
+        }
+
+        .export-table tbody th {
+            text-align: left;
+            background: #f8fafc;
+            font-weight: 600;
+            width: 180px;
+        }
+
+        .export-table .export-cell {
+            min-width: 150px;
+        }
+
+        .export-btn {
+            width: 100%;
+            display: inline-flex;
             justify-content: center;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.95em;
+            padding: 10px 14px;
+        }
+
+        .export-cell .btn:disabled {
+            background: #e9ecef;
+            color: #a0a4a8;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <div class="header-actions">
-                <button class="btn btn-info" onclick="openDocsOverlay()">📄 View Documentation</button>
-            </div>
             <h1>🔬 Patent Processing Pipeline</h1>
             <p>Download, process, and enrich patent data through automated pipeline steps</p>
             <!-- Moved CSV export buttons to bottom widget
@@ -954,6 +995,12 @@
             
             <!-- Pipeline Steps -->
             <div class="pipeline-steps">
+                <div class="pipeline-link">
+                    <button class="btn btn-info" onclick="openDocsOverlay()">📄 View Documentation</button>
+                    <a class="btn btn-info" id="xmlDownloadLink" target="_blank" rel="noopener noreferrer">
+                        Link to xml download
+                    </a>
+                </div>
                 <!-- NEW Step 0: Download/Extract Patents -->
                 <div class="step" id="step0">
                     <div class="step-header">
@@ -1219,7 +1266,29 @@
                     <div class="output-section hidden" id="step2Output"></div>
                     <div class="sample-data hidden" id="step2SampleData"></div>
                 </div>
-                
+
+                <!-- Generate All & Current CSVs -->
+                <div id="allCurrentWidget" style="margin: 16px 24px; padding: 16px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #6c757d;">
+                    <h4 style="margin: 0 0 8px 0; color: #495057;">📊 Generate Complete Database Exports</h4>
+                    <p style="margin: 0 0 12px 0; color: #6c757d; font-size: 14px;">
+                        Generate 'all' and 'current' base CSV files. These files include all enriched data from the database and take longer to process.
+                    </p>
+                    <button class="btn btn-secondary" onclick="generateAllCurrentCsvs()" id="generateAllCurrentBtn">
+                        🗂️ Generate All & Current CSVs
+                    </button>
+
+                    <!-- Progress display for All & Current generation -->
+                    <div class="progress-info hidden" id="allCurrentProgress" style="margin-top: 12px;">
+                        <div class="progress-message" id="allCurrentProgressMessage">Generating...</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="width: 0%" id="allCurrentProgressBar"></div>
+                        </div>
+                        <div class="elapsed-time" id="allCurrentElapsedTime">Elapsed: 0s</div>
+                    </div>
+
+                    <div class="output-section hidden" id="allCurrentOutput" style="margin-top: 12px;"></div>
+                </div>
+
                 <!-- HIDE START: Steps 3-5 commented out -->
                 <!-- Step 3: Integration with Microsoft Dynamics CRM -->
                 <div class="step step-coming-soon" id="step3">
@@ -1291,27 +1360,112 @@
 
         <!-- CSV Export Widget (Bottom) -->
         <div class="export-widget">
-            <h3>🧾 Formatted CSV Exports</h3>
-            <div class="export-actions" style="margin-bottom: 8px;">
-                <button class="btn btn-success" onclick="exportNewEnrichmentsFormatted()">New (Formatted)</button>
-                <button class="btn btn-success" onclick="exportNewAndExistingEnrichmentsFormatted()">New &amp; Existing (Formatted)</button>
-                <button class="btn btn-success" onclick="exportCurrentEnrichmentsFormatted()">Current (Formatted)</button>
-                <button class="btn btn-success" onclick="exportAllEnrichmentsFormatted()">All (Formatted)</button>
-            </div>
-            <h3>📇 Contact CSV Exports</h3>
-            <div class="export-actions" style="margin-bottom: 8px;">
-                <button class="btn btn-primary" onclick="exportContactCurrent()">Current Contacts</button>
-                <button class="btn btn-primary" onclick="exportContactNew()">New Contacts</button>
-                <button class="btn btn-danger" onclick="exportContactCurrentAddresses()">Current Addresses</button>
-                <button class="btn btn-danger" onclick="exportContactNewAddresses()">New Addresses</button>
-            </div>
-            <h3>⬇️ Full CSV Exports</h3>
-            <div class="export-actions">
-                <button class="btn btn-secondary" onclick="exportNewEnrichments()">New Enrichments</button>
-                <button class="btn btn-secondary" onclick="exportNewAndExistingEnrichments()">New &amp; Existing Enrichments</button>
-                <button class="btn btn-secondary" onclick="exportCurrentEnrichments()">Current Enrichments</button>
-                <button class="btn btn-secondary" onclick="exportAllEnrichments()">All Enrichments</button>
-            </div>
+            <h3>⬇️ CSV Export Matrix</h3>
+            <table class="export-table">
+                <thead>
+                    <tr>
+                        <th scope="col">Dataset</th>
+                        <th scope="col">New</th>
+                        <th scope="col">New &amp; Existing</th>
+                        <th scope="col">Current</th>
+                        <th scope="col">All</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <th scope="row">Formatted</th>
+                        <td class="export-cell">
+                            <button class="btn btn-success export-btn" onclick="exportNewEnrichmentsFormatted()">
+                                ⬇️ Download
+                            </button>
+                        </td>
+                        <td class="export-cell">
+                            <button class="btn btn-success export-btn" onclick="exportNewAndExistingEnrichmentsFormatted()">
+                                ⬇️ Download
+                            </button>
+                        </td>
+                        <td class="export-cell">
+                            <button class="btn btn-success export-btn" onclick="exportCurrentEnrichmentsFormatted()">
+                                ⬇️ Download
+                            </button>
+                        </td>
+                        <td class="export-cell">
+                            <button class="btn btn-success export-btn" onclick="exportAllEnrichmentsFormatted()">
+                                ⬇️ Download
+                            </button>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Contacts</th>
+                        <td class="export-cell">
+                            <button class="btn btn-primary export-btn" onclick="exportContactNew()">
+                                ⬇️ Download
+                            </button>
+                        </td>
+                        <td class="export-cell">
+                            <button class="btn btn-primary export-btn" onclick="exportContactNewAndExisting()">
+                                ⬇️ Download
+                            </button>
+                        </td>
+                        <td class="export-cell">
+                            <button class="btn btn-primary export-btn" onclick="exportContactCurrent()">
+                                ⬇️ Download
+                            </button>
+                        </td>
+                        <td class="export-cell">
+                            <button class="btn export-btn" type="button" disabled>
+                                N/A
+                            </button>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Addresses</th>
+                        <td class="export-cell">
+                            <button class="btn btn-danger export-btn" onclick="exportContactNewAddresses()">
+                                ⬇️ Download
+                            </button>
+                        </td>
+                        <td class="export-cell">
+                            <button class="btn btn-danger export-btn" onclick="exportContactNewAndExistingAddresses()">
+                                ⬇️ Download
+                            </button>
+                        </td>
+                        <td class="export-cell">
+                            <button class="btn btn-danger export-btn" onclick="exportContactCurrentAddresses()">
+                                ⬇️ Download
+                            </button>
+                        </td>
+                        <td class="export-cell">
+                            <button class="btn export-btn" type="button" disabled>
+                                N/A
+                            </button>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Raw (Full)</th>
+                        <td class="export-cell">
+                            <button class="btn btn-secondary export-btn" onclick="exportNewEnrichments()">
+                                ⬇️ Download
+                            </button>
+                        </td>
+                        <td class="export-cell">
+                            <button class="btn btn-secondary export-btn" onclick="exportNewAndExistingEnrichments()">
+                                ⬇️ Download
+                            </button>
+                        </td>
+                        <td class="export-cell">
+                            <button class="btn btn-secondary export-btn" onclick="exportCurrentEnrichments()">
+                                ⬇️ Download
+                            </button>
+                        </td>
+                        <td class="export-cell">
+                            <button class="btn btn-secondary export-btn" onclick="exportAllEnrichments()">
+                                ⬇️ Download
+                            </button>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
         </div>
     </div>
 
@@ -1439,6 +1593,22 @@
             ].join('T');
         }
 
+        function formatDateOnlyUTC(date) {
+            const pad = (value) => String(value).padStart(2, '0');
+            return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
+        }
+
+        // Returns a Date one month prior to the provided value, clamped to the last valid day.
+        function getOneMonthAgo(date) {
+            const utcBase = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+            const expectedMonth = (utcBase.getUTCMonth() + 11) % 12;
+            utcBase.setUTCMonth(utcBase.getUTCMonth() - 1);
+            if (utcBase.getUTCMonth() !== expectedMonth) {
+                return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 0));
+            }
+            return utcBase;
+        }
+
         function updateDevCutoffLabel(rawValue) {
             const label = document.getElementById('devBannerCutoff');
             if (!label) return;
@@ -1491,10 +1661,20 @@
             
             // Set default dates for manual mode
             const today = new Date();
+            const isoToday = formatDateOnlyUTC(today);
             const sevenDaysAgo = new Date(today.getTime() - (7 * 24 * 60 * 60 * 1000));
+            const isoSevenDaysAgo = formatDateOnlyUTC(sevenDaysAgo);
             
-            document.getElementById('startDate').value = sevenDaysAgo.toISOString().split('T')[0];
-            document.getElementById('endDate').value =  today.toISOString().split('T')[0];
+            document.getElementById('startDate').value = isoSevenDaysAgo;
+            document.getElementById('endDate').value = isoToday;
+
+            const monthAgoDate = getOneMonthAgo(today);
+            const isoMonthAgo = formatDateOnlyUTC(monthAgoDate);
+            const xmlDownloadLink = document.getElementById('xmlDownloadLink');
+            if (xmlDownloadLink) {
+                const baseUrl = 'https://data.uspto.gov/bulkdata/datasets/ptblxml';
+                xmlDownloadLink.href = `${baseUrl}?fileDataFromDate=${isoMonthAgo}&fileDataToDate=${isoToday}`;
+            }
 
             initializeDevModeIfNeeded();
 
@@ -3285,11 +3465,17 @@
         function exportContactNew() {
             window.open('/api/export/contact-new', '_blank');
         }
+        function exportContactNewAndExisting() {
+            window.open('/api/export/contact-new-and-existing', '_blank');
+        }
         function exportContactCurrentAddresses() {
             window.open('/api/export/contact-current-addresses', '_blank');
         }
         function exportContactNewAddresses() {
             window.open('/api/export/contact-new-addresses', '_blank');
+        }
+        function exportContactNewAndExistingAddresses() {
+            window.open('/api/export/contact-new-and-existing-addresses', '_blank');
         }
 
         async function rebuildCsvs() {
@@ -3313,6 +3499,138 @@
                 const btn = document.getElementById('step2RebuildBtn');
                 if (btn) { btn.disabled = false; btn.textContent = '🧱 Rebuild CSVs (no API calls)'; }
                 setStepCompleted('step2', false);
+            }
+        }
+
+        async function generateAllCurrentCsvs() {
+            try {
+                const btn = document.getElementById('generateAllCurrentBtn');
+                const widgetDiv = document.getElementById('allCurrentWidget');
+                const progressDiv = document.getElementById('allCurrentProgress');
+                const messageDiv = document.getElementById('allCurrentProgressMessage');
+                const barDiv = document.getElementById('allCurrentProgressBar');
+                const timeDiv = document.getElementById('allCurrentElapsedTime');
+                const outputDiv = document.getElementById('allCurrentOutput');
+
+                // Set pending state with yellow styling
+                if (widgetDiv) {
+                    widgetDiv.style.background = '#fff3cd';
+                    widgetDiv.style.borderLeft = '4px solid #ffc107';
+                }
+                if (btn) { btn.disabled = true; btn.textContent = 'Generating...'; }
+                if (progressDiv) progressDiv.classList.remove('hidden');
+                if (messageDiv) messageDiv.textContent = 'Starting generation...';
+                if (barDiv) barDiv.style.width = '10%';
+                if (outputDiv) { outputDiv.textContent = ''; outputDiv.classList.add('hidden'); }
+
+                const startTime = Date.now();
+                const timeInterval = setInterval(() => {
+                    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                    if (timeDiv) timeDiv.textContent = `Elapsed: ${elapsed}s`;
+                }, 1000);
+
+                const resp = await fetch('/api/step2/generate-all-current', { method: 'POST' });
+                const payload = await resp.json().catch(() => ({}));
+
+                if (!resp.ok || !payload.success) {
+                    clearInterval(timeInterval);
+                    const errorMsg = payload.error || resp.statusText || 'Unknown error';
+                    alert('Failed to start All & Current CSV generation: ' + errorMsg);
+
+                    // Reset to default styling
+                    if (widgetDiv) {
+                        widgetDiv.style.background = '#f8f9fa';
+                        widgetDiv.style.borderLeft = '4px solid #6c757d';
+                    }
+                    if (progressDiv) progressDiv.classList.add('hidden');
+                    if (btn) { btn.disabled = false; btn.textContent = '🗂️ Generate All & Current CSVs'; }
+                    return;
+                }
+
+                // Poll for completion
+                if (messageDiv) messageDiv.textContent = 'Generating All & Current CSVs (this may take several minutes)...';
+                if (barDiv) barDiv.style.width = '50%';
+
+                let pollCount = 0;
+                let hasSeenRunning = false; // Track if we've ever seen the process running
+                const pollInterval = setInterval(async () => {
+                    try {
+                        pollCount++;
+                        const statusResp = await fetch('/api/status');
+                        const statusData = await statusResp.json();
+
+                        // Check if any step2-all-current process is still running
+                        const isRunning = statusData.runningProcesses?.some(p => p.includes('step2-all-current'));
+
+                        // Track if we've seen it running at least once
+                        if (isRunning) {
+                            hasSeenRunning = true;
+                        }
+
+                        // Only mark complete if:
+                        // 1. Process is not running AND
+                        // 2. We've seen it running before (or waited at least 15 seconds)
+                        const canComplete = !isRunning && (hasSeenRunning || pollCount > 5);
+
+                        if (canComplete) {
+                            clearInterval(pollInterval);
+                            clearInterval(timeInterval);
+                            if (barDiv) barDiv.style.width = '100%';
+                            if (messageDiv) messageDiv.textContent = 'Generation completed!';
+                            if (progressDiv) progressDiv.classList.add('hidden');
+                            if (btn) { btn.disabled = false; btn.textContent = '🗂️ Generate All & Current CSVs'; }
+
+                            // Try to fetch and display the output log
+                            try {
+                                const logResp = await fetch('/output/last_step2_all_current_output.txt');
+                                if (logResp.ok) {
+                                    const logText = await logResp.text();
+                                    // Extract the file generation summary
+                                    const filesMatch = logText.match(/📁 OUTPUT FILES:([\s\S]*?)(?=\n\n|$)/);
+                                    if (filesMatch && outputDiv) {
+                                        outputDiv.innerHTML = '<div style="font-family: monospace; white-space: pre-wrap; font-size: 13px;">✅ Generation completed!\n\n' + filesMatch[0] + '</div>';
+                                        outputDiv.classList.remove('hidden');
+                                    } else if (outputDiv) {
+                                        outputDiv.textContent = '✅ All & Current CSV generation completed successfully! Check the output directory for the files.';
+                                        outputDiv.classList.remove('hidden');
+                                    }
+                                }
+                            } catch (logError) {
+                                console.error('Could not fetch log:', logError);
+                                if (outputDiv) {
+                                    outputDiv.textContent = '✅ All & Current CSV generation completed successfully! Check the output directory for the files.';
+                                    outputDiv.classList.remove('hidden');
+                                }
+                            }
+
+                            // Set success state with green styling
+                            if (widgetDiv) {
+                                widgetDiv.style.background = '#d4edda';
+                                widgetDiv.style.borderLeft = '4px solid #28a745';
+                            }
+
+                            updateStatus();
+                        }
+                    } catch (pollError) {
+                        console.error('Poll error:', pollError);
+                    }
+                }, 3000);
+
+            } catch (e) {
+                console.error('Generate All & Current error:', e);
+                alert('Generate All & Current error: ' + e.message);
+
+                const btn = document.getElementById('generateAllCurrentBtn');
+                const widgetDiv = document.getElementById('allCurrentWidget');
+                const progressDiv = document.getElementById('allCurrentProgress');
+
+                // Reset to default styling on error
+                if (widgetDiv) {
+                    widgetDiv.style.background = '#f8f9fa';
+                    widgetDiv.style.borderLeft = '4px solid #6c757d';
+                }
+                if (btn) { btn.disabled = false; btn.textContent = '🗂️ Generate All & Current CSVs'; }
+                if (progressDiv) progressDiv.classList.add('hidden');
             }
         }
 
