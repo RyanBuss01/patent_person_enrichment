@@ -74,7 +74,7 @@ def _load_signatures_from_csv(path: str) -> List[str]:
         return signatures
 
     try:
-        with open(path, newline='') as f:
+        with open(path, newline='', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 sig = _person_signature_values(
@@ -213,7 +213,7 @@ def _write_rows_to_csv(path: str, rows: List[Dict[str, Any]], preferred_order: L
         headers = list(preferred_order)
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'w', newline='') as f:
+    with open(path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writeheader()
         for row in rows:
@@ -248,7 +248,7 @@ def _get_table_columns(db_manager: DatabaseManager, table_name: str) -> List[str
 
 def _open_csv_writer(path: str, fieldnames: List[str]):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    handle = open(path, 'w', newline='')
+    handle = open(path, 'w', newline='', encoding='utf-8')
     writer = csv.DictWriter(handle, fieldnames=fieldnames)
     writer.writeheader()
     return handle, writer
@@ -899,7 +899,7 @@ def build_address_row(item: dict, data_type: str) -> dict:
 def write_simple_zaba_csv(path: str, records: List[dict]) -> None:
     """Write a simplified CSV export for ZabaSearch records."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'w', newline='') as f:
+    with open(path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=SIMPLE_ZABA_HEADERS)
         writer.writeheader()
         for record in records:

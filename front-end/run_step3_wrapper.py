@@ -339,7 +339,8 @@ def _export_combined_to_csv(enriched_data, filename):
         rows.append(row)
     
     df = pd.DataFrame(rows)
-    df.to_csv(filename, index=False)
+    # Ensure UTF-8 output to avoid Windows encoding errors on non-ASCII
+    df.to_csv(filename, index=False, encoding='utf-8')
     logger.info(f"Exported {len(rows)} combined records to {filename}")
 
 if __name__ == "__main__":

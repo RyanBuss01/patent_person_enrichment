@@ -54,7 +54,8 @@ class DataExporter:
             rows.append(row)
         
         df = pd.DataFrame(rows)
-        df.to_csv(filename, index=False)
+        # Write UTF-8 to ensure extended characters work on Windows
+        df.to_csv(filename, index=False, encoding='utf-8')
         logger.info(f"Exported {len(rows)} records to {filename}")
     
     @staticmethod
