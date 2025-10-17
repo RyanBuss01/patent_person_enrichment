@@ -1126,9 +1126,9 @@ def write_formatted_csv(path: str, records: List[dict], data_type: str) -> int:
         # Keep the row regardless of address/zip presence
         rows.append(row)
 
-    # Write CSV
+    # Write CSV (UTF-8 for Windows compatibility)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'w', newline='') as f:
+    with open(path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=FORMATTED_HEADERS)
         writer.writeheader()
         for row in rows:
@@ -1185,7 +1185,7 @@ def write_contact_csv(path: str, records: List[dict], data_type: str) -> int:
     headers = ['patent_no', 'title', 'first_name', 'last_name', 'city', 'state'] + email_headers
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'w', newline='') as f:
+    with open(path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writeheader()
         for row in output_rows:
@@ -1257,7 +1257,7 @@ def write_address_csv(path: str, records: List[dict], data_type: str) -> int:
         headers.append('personal_address_1')
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'w', newline='') as f:
+    with open(path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writeheader()
         for row in output_rows:
@@ -1285,7 +1285,8 @@ def write_address_csv(path: str, records: List[dict], data_type: str) -> int:
 def write_combined_json(path: str, records: List[dict]) -> None:
     """Write combined JSON file"""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'w') as f:
+    # Ensure UTF-8 JSON output for Windows consoles
+    with open(path, 'w', encoding='utf-8') as f:
         json.dump(records, f, indent=2, default=str)
     
     logger.info(f"Wrote {len(records)} records to {path}")
