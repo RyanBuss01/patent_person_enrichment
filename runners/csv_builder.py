@@ -1111,6 +1111,12 @@ def write_formatted_csv(path: str, records: List[dict], data_type: str) -> int:
 
     rows: List[dict] = []
     removed = 0
+    # Only filter for the "formatted" CSVs for step 2 outputs: new and new & existing
+    basename = os.path.basename(path).lower()
+    filter_missing_address_zip = basename in {
+        'new_enrichments_formatted.csv',
+        'new_and_existing_enrichments_formatted.csv'
+    }
     for row in rows_all:
         # Sanitize address/zip if boolean-like
         addr_raw = row.get('mail_to_add1')
@@ -1123,7 +1129,14 @@ def write_formatted_csv(path: str, records: List[dict], data_type: str) -> int:
         if zip_code in {'true', 'false', 'nan', 'null', 'none'}:
             row['mail_to_zip'] = ''
 
-        # Keep the row regardless of address/zip presence
+        # Optionally drop rows missing both required fields
+        if filter_missing_address_zip:
+            addr_clean = _sanitize_for_csv(row.get('mail_to_add1'))
+            zip_clean = _sanitize_for_csv(row.get('mail_to_zip'))
+            if not addr_clean or not zip_clean:
+                removed += 1
+                continue
+
         rows.append(row)
 
     # Write CSV (UTF-8 for Windows compatibility)
