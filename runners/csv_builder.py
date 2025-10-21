@@ -1113,10 +1113,11 @@ def write_formatted_csv(path: str, records: List[dict], data_type: str) -> int:
     removed = 0
     # Only filter for the "formatted" CSVs for step 2 outputs: new and new & existing
     basename = os.path.basename(path).lower()
-    filter_missing_address_zip = basename in {
+    express_env = os.getenv('STEP2_EXPRESS_MODE', '').lower() == 'true'
+    filter_missing_address_zip = (basename in {
         'new_enrichments_formatted.csv',
         'new_and_existing_enrichments_formatted.csv'
-    }
+    }) and not express_env
     for row in rows_all:
         # Sanitize address/zip if boolean-like
         addr_raw = row.get('mail_to_add1')

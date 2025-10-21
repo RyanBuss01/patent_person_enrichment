@@ -84,6 +84,8 @@ def main():
     print("=" * 60)
 
     config = load_config(test_mode, express_mode, use_zaba)
+    # Expose express flag to downstream helpers (CSV builder) via env
+    os.environ['STEP2_EXPRESS_MODE'] = 'true' if express_mode else 'false'
     run_started_at = datetime.utcnow()
     config['RUN_STARTED_AT'] = run_started_at.isoformat()
     os.makedirs(config['OUTPUT_DIR'], exist_ok=True)
