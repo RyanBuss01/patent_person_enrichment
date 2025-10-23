@@ -1133,6 +1133,12 @@
                         <button class="btn btn-primary" onclick="runStep1()" id="step1Btn">
                             🔄 Run Integration
                         </button>
+                        <button class="btn btn-success" onclick="runStep1DevEnrichAll()" id="step1DevEnrichAllBtn">
+                            ✅ Enrich All
+                        </button>
+                        <button class="btn btn-success" onclick="runStep1DevEnrichAllUSA()" id="step1DevEnrichAllUSABtn">
+                            🇺🇸 Enrich All USA
+                        </button>
                         <button class="btn btn-secondary" onclick="showSample('step1-people')" id="step1SamplePeople">
                             👥 View Sample People
                         </button>
@@ -1150,9 +1156,6 @@
                         </button>
                         <button class="btn btn-secondary" onclick="runStep1IntegrationOnly()" id="step1IntegrationOnlyBtn">
                             🔌 Integration (no enrichments)
-                        </button>
-                        <button class="btn btn-success" onclick="runStep1DevEnrichAll()" id="step1DevEnrichAllBtn">
-                            ✅ Enrich All
                         </button>
                         <div class="field-group">
                             <label for="devIssueDate">Issue Date Cutoff</label>
@@ -2570,11 +2573,6 @@
         }
 
         async function runStep1DevEnrichAll() {
-            if (!isDevMode) {
-                alert('Enrich All is only available on the /dev route.');
-                return;
-            }
-
             const enrichAllBtn = document.getElementById('step1DevEnrichAllBtn');
             if (enrichAllBtn) {
                 enrichAllBtn.disabled = true;
@@ -2614,6 +2612,40 @@
                 if (enrichAllBtn) {
                     enrichAllBtn.disabled = false;
                 }
+            }
+        }
+
+        async function runStep1DevEnrichAllUSA() {
+            const button = document.getElementById('step1DevEnrichAllUSABtn');
+            if (button) button.disabled = true;
+
+            setStepRunning('step1');
+
+            try {
+                const response = await fetch('/api/step1/dev/enrich-all-usa', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const result = await response.json();
+
+                if (response.ok && result && result.success) {
+                    setStepCompleted('step1', true);
+                    const verifyBtn = document.getElementById('step1VerifyBtn');
+                    if (verifyBtn) verifyBtn.classList.add('hidden');
+                    showOutput('step1', result.output || result.message || 'Enrich All USA completed.');
+                    if (result.files) showFileInfo('step1', result.files);
+                    updateStatus();
+                } else {
+                    setStepCompleted('step1', false);
+                    const msg = (result && result.error) || `Request failed (${response.status})`;
+                    showOutput('step1', `Error: ${msg}`);
+                }
+            } catch (error) {
+                setStepCompleted('step1', false);
+                showOutput('step1', `Network error: ${error.message}`);
+                console.error('Step 1 (Dev Enrich All USA) error:', error);
+            } finally {
+                if (button) button.disabled = false;
             }
         }
 

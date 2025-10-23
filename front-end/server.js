@@ -1384,6 +1384,178 @@ app.post('/api/step1/dev/enrich-all', (req, res) => {
     }
 });
 
+app.post('/api/step1/dev/enrich-all-usa', (req, res) => {
+    const stepId = 'step1';
+
+    if (runningProcesses.has(stepId)) {
+        return res.json({
+            success: false,
+            error: 'Step 1 is already running'
+        });
+    }
+
+    try {
+        const downloadedPatents = readJsonFile('output/downloaded_patents.json');
+        if (!Array.isArray(downloadedPatents) || downloadedPatents.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'No downloaded patents found. Run Step 0 first.'
+            });
+        }
+
+        const outputDir = path.join(__dirname, '..', 'output');
+        try { fs.mkdirSync(outputDir, { recursive: true }); } catch (_) {}
+
+        const toArray = (v) => Array.isArray(v) ? v : [];
+        const isUSA = (raw) => {
+            if (!raw) return false;
+            let s = String(raw).trim().toUpperCase();
+            s = s.replace(/[\.,]/g, ''); // remove punctuation like U.S.
+            if (!s) return false;
+            if (s === 'US' || s === 'USA' || s === 'UNITED STATES' || s === 'UNITED STATES OF AMERICA') return true;
+            // handle variants like "U S", "U S A", or with country in parentheses
+            const compact = s.replace(/\s+/g, '');
+            if (compact === 'US' || compact === 'USA' || compact === 'UNITEDSTATES' || compact === 'UNITEDSTATESOFAMERICA') return true;
+            if (s.includes('UNITED STATES')) return true;
+            return false;
+        };
+
+        let personCounter = 0;
+        const newPatents = [];
+        const newPeople = [];
+
+        downloadedPatents.forEach((rawPatent, patentIndex) => {
+            if (!rawPatent) return;
+
+            const patentNumberRaw = rawPatent.patent_number || rawPatent.patentNumber || rawPatent.patent_id || rawPatent.number;
+            const patentNumber = (patentNumberRaw ? String(patentNumberRaw) : `unknown_${patentIndex}`).trim();
+            const patentTitle = (rawPatent.patent_title || rawPatent.title || rawPatent.patentTitle || '').toString();
+            const patentDate = (rawPatent.patent_date || rawPatent.issue_date || rawPatent.date || '').toString();
+
+            const inventors = toArray(rawPatent.inventors || rawPatent.inventor_list || rawPatent.inventor || []);
+            const assignees = toArray(rawPatent.assignees || rawPatent.assignee_list || rawPatent.assignee || []);
+
+            const peopleForThisPatent = [];
+
+            const normalizeAndMaybePush = (source, type) => {
+                if (!source) return;
+                const first = (source.first_name || source.firstName || source.inventor_name_first || source.name_first || source.given_name || '').toString().trim();
+                let last = (source.last_name || source.lastName || source.inventor_name_last || source.name_last || source.surname || '').toString().trim();
+                const organization = (source.organization || source.org_name || source.assignee_organization || source.company || source.name || '').toString().trim();
+
+                if (!first && !last && organization && type === 'assignee') {
+                    last = organization;
+                }
+                if (!first && !last && !organization) return;
+
+                const city = (source.city || source.city_name || source.city_or_town || '').toString().trim();
+                const state = (source.state || source.state_code || source.state_abbr || '').toString().trim();
+                const country = (source.country || source.country_code || '').toString().trim();
+                const address = (source.address || source.mail_to_add1 || source.address1 || source.street || '').toString().trim();
+                const postalCode = (source.zip || source.postal_code || source.mail_to_zip || '').toString().trim();
+
+                // Only include USA records
+                if (!isUSA(country)) return;
+
+                const record = {
+                    first_name: first,
+                    last_name: last,
+                    city,
+                    state,
+                    country,
+                    address: address || undefined,
+                    postal_code: postalCode || undefined,
+                    patent_number: patentNumber,
+                    patent_title: patentTitle,
+                    patent_date: patentDate,
+                    person_type: type,
+                    person_id: `${patentNumber || 'unknown'}_${type}_${personCounter}`,
+                    match_status: 'dev_enrich_all_usa',
+                    match_score: 0,
+                    associated_patents: patentNumber ? [patentNumber] : [],
+                    associated_patent_count: patentNumber ? 1 : 0,
+                    dev_enrich_all_usa: true
+                };
+
+                if (organization) record.organization = organization;
+                ['email', 'phone', 'raw_name'].forEach((field) => { if (source[field]) record[field] = source[field]; });
+
+                peopleForThisPatent.push(record);
+                personCounter += 1;
+            };
+
+            inventors.forEach((inventor) => normalizeAndMaybePush(inventor, 'inventor'));
+            assignees.forEach((assignee) => normalizeAndMaybePush(assignee, 'assignee'));
+
+            // Only keep the patent if at least one USA person is associated
+            if (peopleForThisPatent.length > 0) {
+                newPatents.push({
+                    patent_number: patentNumber,
+                    patent_title: patentTitle,
+                    patent_date: patentDate,
+                    inventors,
+                    assignees
+                });
+                newPeople.push(...peopleForThisPatent);
+            }
+        });
+
+        if (newPeople.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'No USA-based people were found in the downloaded data.'
+            });
+        }
+
+        writeJsonFile('output/new_people_for_enrichment.json', newPeople);
+        writeJsonFile('output/filtered_new_patents.json', newPatents);
+        writeJsonFile('output/existing_people_found.json', []);
+        writeJsonFile('output/same_name_diff_address.json', []);
+
+        const summaryMessage = `Dev Enrich All USA complete: queued ${newPeople.length.toLocaleString()} people from ${newPatents.length.toLocaleString()} USA patents.`;
+
+        const integrationSummary = {
+            success: true,
+            mode: 'dev_enrich_all_usa',
+            message: summaryMessage,
+            original_patents_count: downloadedPatents.length,
+            new_patents_count: newPatents.length,
+            new_people_count: newPeople.length,
+            total_xml_patents: downloadedPatents.length,
+            total_xml_people: newPeople.length,
+            verification_completed: true,
+            dev_enrich_all_usa: true,
+            processed_at: new Date().toISOString(),
+            match_statistics: {
+                auto_matched: 0,
+                needs_review: 0,
+                definitely_new: newPeople.length
+            },
+            warning: 'Integration bypassed in dev mode: only USA people queued for enrichment'
+        };
+
+        writeJsonFile('output/integration_results.json', integrationSummary);
+
+        // Persist output text for refresh retrieval
+        try {
+            fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step1_output.txt'), summaryMessage);
+        } catch (_) {}
+
+        return res.json({
+            success: true,
+            message: summaryMessage,
+            files: {
+                newPeople: { count: newPeople.length, stats: getFileStats('output/new_people_for_enrichment.json') },
+                newPatents: { count: newPatents.length, stats: getFileStats('output/filtered_new_patents.json') },
+                integrationResults: getFileStats('output/integration_results.json')
+            }
+        });
+    } catch (error) {
+        console.error('Step 1 (Dev Enrich All USA) failed:', error);
+        return res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 app.post('/api/step2/dev/zaba-enrich', async (req, res) => {
     const { testMode = false } = req.body;
     const stepId = 'step2_zaba';
