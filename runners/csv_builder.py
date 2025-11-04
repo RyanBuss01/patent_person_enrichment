@@ -1097,9 +1097,10 @@ def generate_full_csv_exports(
 def write_formatted_csv(path: str, records: List[dict], data_type: str) -> int:
     """Write formatted CSV file.
 
-    Do not drop rows for missing address/zip or boolean-like artifacts.
-    Instead, sanitize those fields to blanks so counts match the base sets.
-    Returns the number of dropped rows (should remain 0 except for unknown types).
+    Drop rows missing address/zip only for the Step 2 formatted exports
+    (new and new & existing). Otherwise sanitize those fields to blanks so
+    counts match the base sets. Returns the number of dropped rows (should
+    remain 0 except for unknown types).
     """
     if data_type == 'pdl':
         rows_all = [build_pdl_formatted_row(r) for r in records]
@@ -1113,11 +1114,10 @@ def write_formatted_csv(path: str, records: List[dict], data_type: str) -> int:
     removed = 0
     # Only filter for the "formatted" CSVs for step 2 outputs: new and new & existing
     basename = os.path.basename(path).lower()
-    express_env = os.getenv('STEP2_EXPRESS_MODE', '').lower() == 'true'
-    filter_missing_address_zip = (basename in {
+    filter_missing_address_zip = basename in {
         'new_enrichments_formatted.csv',
         'new_and_existing_enrichments_formatted.csv'
-    }) and not express_env
+    }
     for row in rows_all:
         # Sanitize address/zip if boolean-like
         addr_raw = row.get('mail_to_add1')
