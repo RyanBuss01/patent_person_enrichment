@@ -1538,6 +1538,7 @@
         let bulkMovedSelections = new Set();
         let step0ManualError = false;
         let suppressStep0GeneratedFiles = false;
+        let activeUploads = new Set(); // Track active uploads (to prevent status override during upload)
         const STEP0_XML_BATCH_THRESHOLD = 10 * 1024 * 1024; // 10MB
         const STEP0_XML_CHUNK_SIZE = 1 * 1024 * 1024; // 1MB chunks
 
@@ -1949,9 +1950,14 @@
         function updateStepStatus(stepId, hasResults, isRunning, hasError = false) {
             const step = document.getElementById(stepId);
             const statusEl = document.getElementById(stepId + 'Status');
-            
+
             // Don't change status if we're currently polling (running state is managed by polling)
             if (pollingIntervals.has(stepId)) {
+                return;
+            }
+
+            // Don't change status if actively uploading (prevents 30s timer from overriding upload status)
+            if (activeUploads.has(stepId)) {
                 return;
             }
             
@@ -3769,7 +3775,11 @@
             const progressMsg = document.getElementById('step0ProgressMessage');
             const progressBar = document.getElementById('step0ProgressBar');
 
-            for (let index = 0; index < totalChunks; index++) {
+            // Mark as actively uploading to prevent status override
+            activeUploads.add('step0');
+
+            try {
+                for (let index = 0; index < totalChunks; index++) {
                 const start = index * STEP0_XML_CHUNK_SIZE;
                 const end = Math.min((index + 1) * STEP0_XML_CHUNK_SIZE, file.size);
                 const chunk = file.slice(start, end);
@@ -3846,6 +3856,10 @@
                 if (result.files) showFileInfo('step0', result.files);
                 updateStatus();
                 return;
+                }
+            } finally {
+                // Remove from active uploads when done (success or error)
+                activeUploads.delete('step0');
             }
         }
 
@@ -3875,6 +3889,10 @@
                         await uploadXmlInChunks(file);
                         return;
                     }
+
+                    // Mark as actively uploading to prevent status override
+                    activeUploads.add('step0');
+
                     const buf = await file.arrayBuffer();
                     const resp = await fetch('/api/step0/upload-xml', {
                         method: 'POST',
@@ -3924,6 +3942,9 @@
                         step0ManualError = true;
                         showOutput('step0', `Error: ${err.message}`);
                     }
+                } finally {
+                    // Remove from active uploads when done (success or error)
+                    activeUploads.delete('step0');
                 }
             };
             inp.click();
