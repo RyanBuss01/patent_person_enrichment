@@ -3824,15 +3824,24 @@
                     continue;
                 }
 
-                if (progressMsg) {
-                    progressMsg.textContent = 'Processing uploaded XML on server...';
-                }
-                if (progressBar) {
-                    progressBar.style.width = '100%';
+                // Final chunk response - check if processing started
+                if (result.processing === true || result.status === 'started') {
+                    if (progressMsg) {
+                        progressMsg.textContent = 'Processing uploaded XML on server...';
+                    }
+                    if (progressBar) {
+                        progressBar.style.width = '100%';
+                    }
+
+                    // Start polling instead of marking complete
+                    console.log('XML chunks uploaded, starting polling for processing status...');
+                    startPolling('step0');
+                    return;
                 }
 
-                setStepCompleted('step0', true);
-                step0ManualError = false;
+                // If already completed (shouldn't happen with new async logic, but handle it)
+                setStepCompleted('step0', result.success !== false);
+                step0ManualError = result.success === false;
                 showOutput('step0', result.output || result.message || 'XML uploaded successfully');
                 if (result.files) showFileInfo('step0', result.files);
                 updateStatus();
@@ -3893,8 +3902,17 @@
                         showOutput('step0', msg);
                         return;
                     }
-                    setStepCompleted('step0', true);
-                    step0ManualError = false;
+
+                    // Check if processing started (async mode)
+                    if (result.processing === true || result.status === 'started') {
+                        console.log('XML uploaded, starting polling for processing status...');
+                        startPolling('step0');
+                        return;
+                    }
+
+                    // If already completed (shouldn't happen with new async logic, but handle it)
+                    setStepCompleted('step0', result.success !== false);
+                    step0ManualError = result.success === false;
                     showOutput('step0', result.output || result.message || 'XML uploaded successfully');
                     if (result.files) showFileInfo('step0', result.files);
                     updateStatus();

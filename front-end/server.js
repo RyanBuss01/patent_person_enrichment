@@ -419,17 +419,42 @@ async function processStep0XmlBuffer(buffer, { modeLabel = 'upload-xml', cycleRe
 
             console.log(`[Step0] XML processor started (${modeLabel})`);
 
+            // Track this as a running process so polling can see it
+            runningProcesses.set(stepId, {
+                process: proc,
+                startTime: new Date(),
+                progress: 'Parsing uploaded XML...',
+                stdout: '',
+                stderr: ''
+            });
+
             proc.stdout.on('data', d => {
                 const out = d.toString();
                 stdout += out;
                 console.log(out);
+
+                // Update running process info
+                const processInfo = runningProcesses.get(stepId);
+                if (processInfo) {
+                    processInfo.stdout += out;
+                    processInfo.progress = 'Parsing XML data...';
+                }
             });
             proc.stderr.on('data', d => {
                 const err = d.toString();
                 stderr += err;
                 console.error(err);
+
+                // Update running process stderr
+                const processInfo = runningProcesses.get(stepId);
+                if (processInfo) {
+                    processInfo.stderr += err;
+                }
             });
             proc.on('close', (code) => {
+                // Remove from running processes
+                runningProcesses.delete(stepId);
+
                 if (code === 0) {
                     const files = getStep0Files();
                     try {
@@ -444,6 +469,16 @@ async function processStep0XmlBuffer(buffer, { modeLabel = 'upload-xml', cycleRe
                         outputSummary: truncateText(stdout || '', 4000),
                         stdoutSnippet: truncateText(stdout || '', 2000)
                     });
+
+                    // Store completed status for polling
+                    runningProcesses.set(stepId + '_completed', {
+                        completed: true,
+                        success: true,
+                        output: stdout,
+                        files,
+                        completedAt
+                    });
+
                     console.log(`[Step0] XML processing complete (${modeLabel})`);
                     resolve({
                         success: true,
@@ -470,6 +505,17 @@ async function processStep0XmlBuffer(buffer, { modeLabel = 'upload-xml', cycleRe
                         stdoutSnippet: truncateText(stdout || '', 2000),
                         mode: modeLabel
                     });
+
+                    // Store completed status for polling
+                    runningProcesses.set(stepId + '_completed', {
+                        completed: true,
+                        success: false,
+                        error: `Parser exited with code ${code}`,
+                        stderr,
+                        stdout,
+                        completedAt
+                    });
+
                     console.error(`[Step0] XML processing failed (${modeLabel}) with code ${code}`);
                     reject({ success: false, error: `Parser exited with code ${code}`, stderr, stdout });
                 }
@@ -477,6 +523,8 @@ async function processStep0XmlBuffer(buffer, { modeLabel = 'upload-xml', cycleRe
 
             proc.stdin.end(buffer);
         } catch (err) {
+            // Clean up on error
+            runningProcesses.delete(stepId);
             reject(err);
         }
     });
@@ -924,9 +972,26 @@ app.post('/api/step0/upload-xml', express.raw({ type: ['application/xml', 'text/
         if (!buf || !buf.length) {
             return res.status(400).json({ success: false, error: 'No XML data received' });
         }
-        console.log('[Step0] XML upload body size (bytes):', totalBytes(buf));
-        const result = await processStep0XmlBuffer(buf, { modeLabel: 'upload-xml', cycleReason: 'step0_xml_upload' });
-        return res.json(result);
+        console.log('[Step0] XML upload body size (bytes):', totalBytes(buf), '- starting async processing...');
+
+        // Return immediately to client so it can start polling
+        res.json({
+            success: true,
+            status: 'started',
+            processing: true,
+            message: 'XML received. Processing...'
+        });
+
+        // Process asynchronously - don't await
+        processStep0XmlBuffer(buf, { modeLabel: 'upload-xml', cycleReason: 'step0_xml_upload' })
+        .then(() => {
+            console.log('[Step0] XML processing completed successfully');
+        })
+        .catch((error) => {
+            console.error('[Step0] XML processing failed:', error);
+        });
+
+        return; // Exit early - processing continues in background
     } catch (error) {
         console.error('[Step0] Upload XML failed:', error);
         if (error && error.success === false) {
@@ -983,22 +1048,42 @@ app.post('/api/step0/upload-xml-chunk', express.raw({ type: ['application/octet-
             return res.json({ success: true, chunkReceived: true, index: chunkIndex, progress: progressPercent });
         }
 
-        let result;
-        try {
-            const fullBuffer = fs.readFileSync(tempPath);
-            console.log(`[Step0] Final chunk received for ${uploadId}, total size ${totalBytes(fullBuffer)} bytes. Processing...`);
-            result = await processStep0XmlBuffer(fullBuffer, { modeLabel: 'upload-xml-chunked', cycleReason: 'step0_xml_upload_chunked' });
-        } finally {
+        // Final chunk received - start async processing and return immediately
+        console.log(`[Step0] Final chunk received for ${uploadId}, total size ${totalBytes(fs.statSync(tempPath).size)} bytes. Starting async processing...`);
+
+        // Return immediately to client so it can start polling
+        res.json({
+            success: true,
+            status: 'started',
+            processing: true,
+            message: 'All chunks received. Processing XML...'
+        });
+
+        // Process asynchronously - don't await
+        const fullBuffer = fs.readFileSync(tempPath);
+        processStep0XmlBuffer(fullBuffer, {
+            modeLabel: 'upload-xml-chunked',
+            cycleReason: 'step0_xml_upload_chunked'
+        })
+        .then(() => {
+            console.log('[Step0] Chunked XML processing completed successfully');
+        })
+        .catch((error) => {
+            console.error('[Step0] Chunked XML processing failed:', error);
+        })
+        .finally(() => {
+            // Clean up temp file
             try {
                 if (fs.existsSync(tempPath)) {
                     fs.unlinkSync(tempPath);
+                    console.log(`[Step0] Cleaned up temp chunk file for ${uploadId}`);
                 }
             } catch (cleanupErr) {
                 console.warn(`[Step0] Could not remove temp chunk file ${tempPath}:`, cleanupErr.message);
             }
-        }
+        });
 
-        return res.json(result);
+        return; // Exit early - processing continues in background
     } catch (error) {
         console.error('[Step0] Chunked XML upload failed:', error);
         try {
