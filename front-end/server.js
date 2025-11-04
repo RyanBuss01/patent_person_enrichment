@@ -420,9 +420,11 @@ async function processStep0XmlBuffer(buffer, { modeLabel = 'upload-xml', cycleRe
             console.log(`[Step0] XML processor started (${modeLabel})`);
 
             // Track this as a running process so polling can see it
+            // If already set (by chunk upload), update it; otherwise create new entry
+            const existingInfo = runningProcesses.get(stepId);
             runningProcesses.set(stepId, {
                 process: proc,
-                startTime: new Date(),
+                startTime: existingInfo ? existingInfo.startTime : new Date(),
                 progress: 'Parsing uploaded XML...',
                 stdout: '',
                 stderr: ''
@@ -974,6 +976,20 @@ app.post('/api/step0/upload-xml', express.raw({ type: ['application/xml', 'text/
         }
         console.log('[Step0] XML upload body size (bytes):', totalBytes(buf), '- starting async processing...');
 
+        const stepId = 'step0';
+
+        // Clear any old completed status
+        runningProcesses.delete(stepId + '_completed');
+
+        // Register as running IMMEDIATELY (before returning to client) to avoid race condition
+        runningProcesses.set(stepId, {
+            process: null, // Will be set by processStep0XmlBuffer
+            startTime: new Date(),
+            progress: 'Upload complete, starting XML parsing...',
+            stdout: '',
+            stderr: ''
+        });
+
         // Return immediately to client so it can start polling
         res.json({
             success: true,
@@ -1048,8 +1064,21 @@ app.post('/api/step0/upload-xml-chunk', express.raw({ type: ['application/octet-
             return res.json({ success: true, chunkReceived: true, index: chunkIndex, progress: progressPercent });
         }
 
-        // Final chunk received - start async processing and return immediately
+        // Final chunk received - register as running BEFORE returning to avoid race condition
+        const stepId = 'step0';
         console.log(`[Step0] Final chunk received for ${uploadId}, total size ${totalBytes(fs.statSync(tempPath).size)} bytes. Starting async processing...`);
+
+        // Clear any old completed status
+        runningProcesses.delete(stepId + '_completed');
+
+        // Register as running IMMEDIATELY (before returning to client)
+        runningProcesses.set(stepId, {
+            process: null, // Will be set by processStep0XmlBuffer
+            startTime: new Date(),
+            progress: 'Uploading complete, starting XML parsing...',
+            stdout: '',
+            stderr: ''
+        });
 
         // Return immediately to client so it can start polling
         res.json({
