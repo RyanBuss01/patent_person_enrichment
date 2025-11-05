@@ -384,11 +384,9 @@ class EnrichedPeopleLookup:
     def __init__(self, db_manager: DatabaseManager):
         self.db = db_manager
         self._cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-        self._prefetched_last: Set[str] = set()
+        self._prefetched_combos: Set[Tuple[str, str]] = set()
+        self._prefetched_last_full: Set[str] = set()
         self._all_records: Dict[str, Dict[str, Any]] = {}
-        self._state_limit = 250
-        self._last_name_limit = 750
-        self._known_last_variants: Dict[str, Set[str]] = {}
         self._select_clause, self._mapping = self._discover_existing_people_columns()
         self._base_select_sql = (
             f"SELECT ep.*{(', ' + self._select_clause) if self._select_clause else ''} "
@@ -399,16 +397,9 @@ class EnrichedPeopleLookup:
             "AND LOWER(TRIM(IFNULL(ep.city,''))) = LOWER(TRIM(IFNULL(ex.city,''))) "
             "AND LOWER(TRIM(IFNULL(ep.state,''))) = LOWER(TRIM(IFNULL(ex.state,''))) "
         )
-        self._query_by_last_and_state = (
+        self._query_last_only = (
             self._base_select_sql +
-            "WHERE LOWER(TRIM(ep.last_name)) = %s "
-            "AND LOWER(TRIM(IFNULL(ep.state,''))) = %s "
-            "ORDER BY ep.enriched_at DESC LIMIT %s"
-        )
-        self._query_by_last_only = (
-            self._base_select_sql +
-            "WHERE LOWER(TRIM(ep.last_name)) = %s "
-            "ORDER BY ep.enriched_at DESC LIMIT %s"
+            "WHERE LOWER(TRIM(ep.last_name)) = %s"
         )
 
     def _discover_existing_people_columns(self) -> Tuple[str, Dict[str, str]]:
@@ -500,88 +491,139 @@ class EnrichedPeopleLookup:
         if not people:
             return
 
-        variants_by_normalized: Dict[str, Set[str]] = {}
+        combos: Set[Tuple[str, str]] = set()
         for person in people:
             raw_last = (person.get('last_name') or '').strip()
             normalized = _normalize_value(raw_last)
             if not normalized:
                 continue
-            variants_by_normalized.setdefault(normalized, set()).add(raw_last or normalized)
+            state = _normalize_value(person.get('state'))
+            combos.add((normalized, state))
 
-        if not variants_by_normalized:
+        if not combos:
             return
 
-        for normalized, variants in variants_by_normalized.items():
-            existing = self._known_last_variants.setdefault(normalized, set())
-            existing.update(filter(None, variants))
-
-        unique_normalized: List[str] = list(variants_by_normalized.keys())
-
-        chunk_size = 50
-        total = len(unique_normalized)
+        chunk_size = 250
+        combos_list = list(combos)
+        total = len(combos_list)
         for idx in range(0, total, chunk_size):
-            chunk_keys = unique_normalized[idx:idx + chunk_size]
-            chunk_variants: Set[str] = set()
-            for key in chunk_keys:
-                chunk_variants.update(self._known_last_variants.get(key, set()))
-            self._prefetch_last_names(chunk_keys, list(chunk_variants))
+            chunk = combos_list[idx:idx + chunk_size]
+            self._bulk_prefetch(chunk)
             print(
-                f"PROGRESS: Prefetching existing enrichments {min(idx + len(chunk_keys), total)}/{total}"
+                f"PROGRESS: Prefetching existing enrichments {min(idx + len(chunk), total)}/{total}"
             )
 
-    def _prefetch_last_names(self, normalized_targets: List[str], raw_names: List[str]) -> None:
-        filtered: List[str] = []
-        seen: Set[str] = set()
-        for name in raw_names:
-            trimmed = (name or '').strip()
-            if not trimmed:
-                continue
-            if trimmed in seen:
-                continue
-            seen.add(trimmed)
-            filtered.append(trimmed)
-
-        to_query = [ln for ln in filtered if _normalize_value(ln) not in self._prefetched_last]
-        if not to_query:
-            self._prefetched_last.update(normalized_targets)
+    def _bulk_prefetch(self, combos: List[Tuple[str, str]]) -> None:
+        normalized_combos: List[Tuple[str, str]] = [
+            (_normalize_value(last), _normalize_value(state))
+            for last, state in combos
+        ]
+        normalized_combos = [c for c in normalized_combos if c[0]]
+        new_combos = [c for c in normalized_combos if c not in self._prefetched_combos]
+        if not new_combos:
             return
 
-        placeholders = ', '.join(['%s'] * len(to_query))
-        limit = self._last_name_limit * max(1, len(to_query))
+        union_parts: List[str] = []
+        params: List[Any] = []
+        for last, state in new_combos:
+            union_parts.append("SELECT %s AS lookup_last, %s AS lookup_state")
+            params.extend([last, state])
+
+        lookup_sql = " UNION ALL ".join(union_parts)
         query = (
             self._base_select_sql +
-            f"WHERE ep.last_name IN ({placeholders}) "
-            "ORDER BY ep.enriched_at DESC LIMIT %s"
+            "JOIN (" + lookup_sql + ") AS lookups "
+            "ON LOWER(TRIM(ep.last_name)) = lookups.lookup_last "
+            "AND LOWER(TRIM(IFNULL(ep.state,''))) = lookups.lookup_state"
         )
-        params: List[Any] = list(to_query)
-        params.append(limit)
         try:
             rows = self.db.execute_query(query, tuple(params)) or []
         except Exception as exc:
             logger.warning(
-                f"Error prefetching enriched_people for last names {to_query[:5]}...: {exc}"
+                f"Error prefetching enriched_people for {len(new_combos)} combos: {exc}"
             )
             rows = []
 
-        grouped: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        per_combo: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        per_last: Dict[str, List[Dict[str, Any]]] = {}
+        collected: List[Dict[str, Any]] = []
         for row in rows:
             record = self._convert_row(row)
-            last = _normalize_value(record.get('last_name'))
-            state = _normalize_value(record.get('state'))
-            grouped.setdefault(last, {}).setdefault(state, []).append(record)
+            last_key = _normalize_value(record.get('last_name'))
+            state_key = _normalize_value(record.get('state'))
+            combo_key = (last_key, state_key)
+            per_combo.setdefault(combo_key, []).append(record)
+            per_last.setdefault(last_key, []).append(record)
+            collected.append(record)
 
-        for last, state_map in grouped.items():
-            all_records: List[Dict[str, Any]] = []
-            for state, records in state_map.items():
-                key = (last, state)
-                self._cache[key] = list(records)
-                all_records.extend(records)
-            self._cache[(last, '')] = list(all_records)
-            self._store_records(all_records)
-            self._prefetched_last.add(last)
+        if collected:
+            self._store_records(collected)
 
-        for normalized in normalized_targets:
-            self._prefetched_last.add(normalized)
+        for combo_key, records in per_combo.items():
+            self._cache[combo_key] = records
+
+        for combo in new_combos:
+            if combo not in self._cache:
+                self._cache[combo] = []
+            self._prefetched_combos.add(combo)
+
+        for last_key, records in per_last.items():
+            agg_key = (last_key, '')
+            existing = self._cache.get(agg_key, [])
+            if not existing:
+                self._cache[agg_key] = list(records)
+            else:
+                known = {_record_signature(rec) for rec in existing}
+                for rec in records:
+                    sig = _record_signature(rec)
+                    if sig not in known:
+                        existing.append(rec)
+                        known.add(sig)
+
+    def _prefetch_last_only(self, normalized_last: str) -> None:
+        if not normalized_last or normalized_last in self._prefetched_last_full:
+            return
+        try:
+            rows = self.db.execute_query(self._query_last_only, (normalized_last,)) or []
+        except Exception as exc:
+            logger.warning(
+                f"Error prefetching enriched_people for last name '{normalized_last}': {exc}"
+            )
+            rows = []
+
+        per_state: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        collected: List[Dict[str, Any]] = []
+        for row in rows:
+            record = self._convert_row(row)
+            last_key = _normalize_value(record.get('last_name'))
+            state_key = _normalize_value(record.get('state'))
+            combo_key = (last_key, state_key)
+            per_state.setdefault(combo_key, []).append(record)
+            collected.append(record)
+
+        if collected:
+            self._store_records(collected)
+
+        for combo_key, records in per_state.items():
+            self._cache[combo_key] = records
+            self._prefetched_combos.add(combo_key)
+
+        if collected:
+            agg_key = (normalized_last, '')
+            existing = self._cache.get(agg_key, [])
+            if not existing:
+                self._cache[agg_key] = list(collected)
+            else:
+                known = {_record_signature(rec) for rec in existing}
+                for rec in collected:
+                    sig = _record_signature(rec)
+                    if sig not in known:
+                        existing.append(rec)
+                        known.add(sig)
+        else:
+            self._cache.setdefault((normalized_last, ''), [])
+
+        self._prefetched_last_full.add(normalized_last)
 
     def _fetch_candidates(self, last_name: str, state: Optional[str], raw_hint: Optional[str] = None) -> List[Dict[str, Any]]:
         normalized_last = _normalize_value(last_name)
@@ -595,25 +637,16 @@ class EnrichedPeopleLookup:
             self._cache[cache_key] = []
             return []
 
-        if normalized_last not in self._prefetched_last:
-            hint_variants = set(self._known_last_variants.get(normalized_last, set()))
-            if raw_hint:
-                hint_variants.add(raw_hint)
-            if not hint_variants:
-                hint_variants.add(last_name)
-            self._known_last_variants.setdefault(normalized_last, set()).update(hint_variants)
-            self._prefetch_last_names([normalized_last], list(hint_variants))
+        if normalized_state:
+            self._bulk_prefetch([(normalized_last, normalized_state)])
+        else:
+            self._prefetch_last_only(normalized_last)
 
-        if cache_key not in self._cache:
-            aggregated = self._cache.get((normalized_last, ''))
-            if aggregated and normalized_state:
-                filtered = [
-                    record for record in aggregated
-                    if _normalize_value(record.get('state')) == normalized_state
-                ]
-                self._cache[cache_key] = filtered
-            else:
-                self._cache[cache_key] = aggregated[:] if aggregated else []
+        if cache_key not in self._cache or not self._cache[cache_key]:
+            agg_key = (normalized_last, '')
+            if agg_key not in self._cache:
+                self._prefetch_last_only(normalized_last)
+            self._cache[cache_key] = self._cache.get(cache_key, []) or self._cache.get(agg_key, [])
 
         return self._cache.get(cache_key, [])
 
