@@ -7,7 +7,7 @@ import logging
 import os
 import json
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Set, Tuple
 from pathlib import Path
 import sys
 
@@ -27,67 +27,100 @@ def _person_signature(person: Dict[str, Any]) -> str:
     patent_number = (person.get('patent_number') or '').strip()
     return f"{first_name}_{last_name}_{city}_{state}_{patent_number}"
 
+def _normalize_value(value: Any) -> str:
+    return str(value).strip().lower() if value is not None else ''
+
+
 def check_existing_pdl_enrichments(people_to_enrich: List[Dict[str, Any]]) -> tuple:
-    """Check which people already have PDL enrichments (enrichment_data IS NOT NULL)"""
+    """Check which people already have PDL enrichments (bulk lookup)."""
     if not people_to_enrich:
-        return [], []
-    
-    logger.info("Checking database for existing PDL enrichments...")
-    print("Checking for existing PDL enrichments...")
-    
+        return [], 0
+
+    logger.info("Checking database for existing PDL enrichments (bulk lookup)...")
+    print("Checking for existing PDL enrichments (bulk lookup)...")
+
     try:
         db_config = DatabaseConfig.from_env()
         db_manager = DatabaseManager(db_config)
-        
-        # Create a set to store people who already have PDL data
-        already_enriched_people = set()
-        
-        # Check each person individually for PDL data (enrichment_data IS NOT NULL)
+
+        # Collect lookup keys for people we plan to enrich
+        lookup_keys: Set[Tuple[str, str, str, str]] = set()
+        lookup_states: Set[str] = set()
         for person in people_to_enrich:
-            check_query = """
-            SELECT id FROM enriched_people 
-            WHERE LOWER(TRIM(first_name)) = LOWER(%s) 
-            AND LOWER(TRIM(last_name)) = LOWER(%s)
-            AND LOWER(TRIM(IFNULL(city,''))) = LOWER(%s)
-            AND LOWER(TRIM(IFNULL(state,''))) = LOWER(%s)
-            AND enrichment_data IS NOT NULL
-            LIMIT 1
+            first = _normalize_value(person.get('first_name'))
+            last = _normalize_value(person.get('last_name'))
+            city = _normalize_value(person.get('city'))
+            state = _normalize_value(person.get('state'))
+            lookup_keys.add((first, last, city, state))
+            lookup_states.add(state)
+
+        if not lookup_keys:
+            return people_to_enrich, 0
+
+        # Pull existing enriched people in bulk grouped by state to limit scan size
+        existing_keys: Set[Tuple[str, str, str, str]] = set()
+        state_list = sorted(lookup_states)
+        # Ensure we always include empty-string state in chunks if present
+        chunk_size = 25
+        for i in range(0, len(state_list), chunk_size) or [0]:
+            chunk = state_list[i:i + chunk_size]
+            if not chunk:
+                chunk = ['']
+            placeholders = ','.join(['%s'] * len(chunk))
+            query = f"""
+                SELECT LOWER(TRIM(first_name)) AS first_name,
+                       LOWER(TRIM(last_name)) AS last_name,
+                       LOWER(TRIM(IFNULL(city,''))) AS city,
+                       LOWER(TRIM(IFNULL(state,''))) AS state
+                FROM enriched_people
+                WHERE enrichment_data IS NOT NULL
+                  AND LOWER(TRIM(IFNULL(state,''))) IN ({placeholders})
             """
-            
-            check_params = (
-                person.get('first_name', '').strip(),
-                person.get('last_name', '').strip(),
-                person.get('city', '').strip(),
-                person.get('state', '').strip()
-            )
-            
-            try:
-                existing_check = db_manager.execute_query(check_query, check_params)
-                if existing_check:
-                    person_sig = _person_signature(person)
-                    already_enriched_people.add(person_sig)
-            except Exception as e:
-                logger.warning(f"Could not check PDL status for {person.get('first_name')} {person.get('last_name')}: {e}")
-        
-        logger.info(f"Found {len(already_enriched_people)} people already enriched with PDL")
-        print(f"Skipping {len(already_enriched_people)} already enriched people")
-        
-        # Filter out people already enriched with PDL
-        new_people_to_enrich = []
+            rows = db_manager.execute_query(query, tuple(chunk))
+            for row in rows or []:
+                key = (
+                    row.get('first_name') or '',
+                    row.get('last_name') or '',
+                    row.get('city') or '',
+                    row.get('state') or ''
+                )
+                existing_keys.add(key)
+
+        logger.info("Existing PDL enriched lookup size: %s", len(existing_keys))
+
+        new_people_to_enrich: List[Dict[str, Any]] = []
         skipped_count = 0
-        
+        skip_preview: List[str] = []
+
         for person in people_to_enrich:
-            person_sig = _person_signature(person)
-            if person_sig in already_enriched_people:
+            key = (
+                _normalize_value(person.get('first_name')),
+                _normalize_value(person.get('last_name')),
+                _normalize_value(person.get('city')),
+                _normalize_value(person.get('state'))
+            )
+            if key in existing_keys:
                 skipped_count += 1
-                person_name = f"{person.get('first_name', '')} {person.get('last_name', '')}"
-                logger.debug(f"Skipping {person_name} - already PDL enriched")
-                print(f"SKIP: {person_name} (already enriched)")
+                if len(skip_preview) < 10:
+                    name = f"{person.get('first_name', '').strip()} {person.get('last_name', '').strip()}".strip()
+                    skip_preview.append(name or _person_signature(person))
             else:
                 new_people_to_enrich.append(person)
-        
+
+        if skipped_count:
+            logger.info("Skipping %s already-enriched people via bulk lookup", skipped_count)
+            print(f"Skipping {skipped_count} already enriched people")
+        else:
+            logger.info("No existing PDL enrichments matched the incoming people")
+
+        # Optionally print the first few skips for visibility
+        preview_limit = 10
+        if skip_preview:
+            for name in skip_preview:
+                print(f"SKIP: {name} (already enriched)")
+
         return new_people_to_enrich, skipped_count
-        
+
     except Exception as e:
         logger.error(f"Error checking existing PDL enrichments: {e}")
         return people_to_enrich, 0
