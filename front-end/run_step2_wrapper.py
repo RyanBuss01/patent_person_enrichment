@@ -7,8 +7,10 @@ import sys
 import os
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
+from typing import List, Dict, Any
 from dotenv import load_dotenv
 
 # Add the parent directory to sys.path so we can import our modules
@@ -27,6 +29,266 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def _dev_enrich_all_usa_requested() -> bool:
+    """Detect whether the last Step 1 run was the Dev 'Enrich All USA' shortcut."""
+    integration_path = Path('output/integration_results.json')
+    message_markers: List[str] = []
+
+    try:
+        text = Path('output/last_step1_output.txt').read_text(encoding='utf-8', errors='ignore')
+        message_markers.append(text)
+    except FileNotFoundError:
+        message_markers.append('')
+    except Exception:
+        message_markers.append('')
+
+    integration_data: Dict[str, Any] = {}
+    try:
+        with integration_path.open('r', encoding='utf-8') as f:
+            integration_data = json.load(f)
+    except FileNotFoundError:
+        integration_data = {}
+    except Exception:
+        logger.debug("Could not parse integration_results.json for dev detection", exc_info=True)
+        integration_data = {}
+
+    mode = str(integration_data.get('mode') or '').lower()
+    summary = str(integration_data.get('message') or '')
+    if mode == 'dev_enrich_all_usa' or integration_data.get('dev_enrich_all_usa'):
+        return True
+
+    combined_messages = ' '.join(m for m in message_markers if m)
+    if 'dev enrich all usa' in combined_messages.lower():
+        return True
+    if 'dev enrich all usa' in summary.lower():
+        return True
+
+    return False
+
+
+def _is_usa_country(raw: Any) -> bool:
+    """Case-insensitive country helper that mirrors the Step 1 JS logic."""
+    if not raw:
+        return False
+    s = str(raw).strip().upper()
+    s = re.sub(r'[\\.,]', '', s)
+    if not s:
+        return False
+    if s in {'US', 'USA', 'UNITED STATES', 'UNITED STATES OF AMERICA'}:
+        return True
+    compact = re.sub(r'\\s+', '', s)
+    if compact in {'US', 'USA', 'UNITEDSTATES', 'UNITEDSTATESOFAMERICA'}:
+        return True
+    return 'UNITED STATES' in s
+
+
+def _normalize_person(source: Dict[str, Any], type_: str, patent_number: str,
+                      patent_title: str, patent_date: str, counter: List[int]) -> Dict[str, Any]:
+    """Normalize inventor/assignee payload similar to the Dev Step 1 route."""
+    if not source:
+        return {}
+
+    first = str(source.get('first_name') or source.get('firstName') or
+                source.get('inventor_name_first') or source.get('name_first') or
+                source.get('given_name') or '').strip()
+    last = str(source.get('last_name') or source.get('lastName') or
+               source.get('inventor_name_last') or source.get('name_last') or
+               source.get('surname') or '').strip()
+    organization = str(source.get('organization') or source.get('org_name') or
+                       source.get('assignee_organization') or source.get('company') or
+                       source.get('name') or '').strip()
+
+    if not first and not last and organization and type_ == 'assignee':
+        last = organization
+
+    if not first and not last and not organization:
+        return {}
+
+    city = str(source.get('city') or source.get('city_name') or source.get('city_or_town') or '').strip()
+    state = str(source.get('state') or source.get('state_code') or source.get('state_abbr') or '').strip()
+    country = str(source.get('country') or source.get('country_code') or '').strip()
+    address = str(source.get('address') or source.get('mail_to_add1') or
+                  source.get('address1') or source.get('street') or '').strip()
+    postal = str(source.get('zip') or source.get('postal_code') or source.get('mail_to_zip') or '').strip()
+
+    if not _is_usa_country(country):
+        return {}
+
+    record = {
+        'first_name': first,
+        'last_name': last,
+        'city': city,
+        'state': state,
+        'country': country,
+        'address': address or None,
+        'postal_code': postal or None,
+        'patent_number': patent_number,
+        'patent_title': patent_title,
+        'patent_date': patent_date,
+        'person_type': type_,
+        'person_id': f"{patent_number or 'unknown'}_{type_}_{counter[0]}",
+        'match_status': 'dev_enrich_all_usa',
+        'match_score': 0,
+        'associated_patents': [patent_number] if patent_number else [],
+        'associated_patent_count': 1 if patent_number else 0,
+        'dev_enrich_all_usa': True,
+        'verification_needed': False,
+        'potential_matches': []
+    }
+
+    if organization:
+        record['organization'] = organization
+
+    for field in ('email', 'phone', 'raw_name'):
+        if source.get(field):
+            record[field] = source[field]
+
+    counter[0] += 1
+    return record
+
+
+def _rebuild_dev_enrich_all_usa_people(existing_count: int = 0) -> List[Dict[str, Any]]:
+    """Fallback: rebuild Dev Enrich All USA payload if Step 1 JSON is missing/empty."""
+    if not _dev_enrich_all_usa_requested():
+        return []
+
+    downloaded_path = Path('output/downloaded_patents.json')
+    if not downloaded_path.exists():
+        logger.warning("Dev Enrich All USA fallback requested but downloaded_patents.json is missing")
+        return []
+
+    try:
+        with downloaded_path.open('r', encoding='utf-8') as f:
+            downloaded_patents = json.load(f)
+    except Exception as exc:
+        logger.error(f"Failed to parse downloaded_patents.json for Dev Enrich All USA fallback: {exc}")
+        return []
+
+    if not isinstance(downloaded_patents, list):
+        logger.warning("Dev Enrich All USA fallback aborted: downloaded_patents.json is not a list")
+        return []
+
+    new_people: List[Dict[str, Any]] = []
+    new_patents: List[Dict[str, Any]] = []
+    counter = [0]
+
+    for index, raw_patent in enumerate(downloaded_patents):
+        if not isinstance(raw_patent, dict):
+            continue
+
+        patent_number = str(
+            raw_patent.get('patent_number') or raw_patent.get('patentNumber') or
+            raw_patent.get('patent_id') or raw_patent.get('number') or
+            f'unknown_{index}'
+        ).strip()
+        patent_title = str(
+            raw_patent.get('patent_title') or raw_patent.get('title') or
+            raw_patent.get('patentTitle') or ''
+        )
+        patent_date = str(
+            raw_patent.get('patent_date') or raw_patent.get('issue_date') or
+            raw_patent.get('date') or ''
+        )
+
+        inventors = raw_patent.get('inventors') or raw_patent.get('inventor_list') or []
+        assignees = raw_patent.get('assignees') or raw_patent.get('assignee_list') or []
+
+        people_for_patent: List[Dict[str, Any]] = []
+
+        for inventor in inventors if isinstance(inventors, list) else []:
+            normalized = _normalize_person(
+                inventor, 'inventor', patent_number, patent_title, patent_date, counter
+            )
+            if normalized:
+                people_for_patent.append(normalized)
+
+        for assignee in assignees if isinstance(assignees, list) else []:
+            normalized = _normalize_person(
+                assignee, 'assignee', patent_number, patent_title, patent_date, counter
+            )
+            if normalized:
+                people_for_patent.append(normalized)
+
+        if people_for_patent:
+            new_patents.append({
+                'patent_number': patent_number,
+                'patent_title': patent_title,
+                'patent_date': patent_date,
+                'inventors': inventors if isinstance(inventors, list) else [],
+                'assignees': assignees if isinstance(assignees, list) else []
+            })
+            new_people.extend(people_for_patent)
+
+    if not new_people:
+        logger.warning("Dev Enrich All USA fallback produced 0 people – skipping overwrite")
+        return []
+
+    if existing_count and len(new_people) <= existing_count:
+        # Nothing gained by overwriting with the same or smaller dataset
+        return []
+
+    output_dir = Path('output')
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    people_path = output_dir / 'new_people_for_enrichment.json'
+    patents_path = output_dir / 'filtered_new_patents.json'
+    existing_people_path = output_dir / 'existing_people_found.json'
+    moved_path = output_dir / 'same_name_diff_address.json'
+    integration_path = output_dir / 'integration_results.json'
+
+    with people_path.open('w', encoding='utf-8') as f:
+        json.dump(new_people, f, indent=2)
+
+    with patents_path.open('w', encoding='utf-8') as f:
+        json.dump(new_patents, f, indent=2)
+
+    # Reset verification-related files for dev runs
+    with existing_people_path.open('w', encoding='utf-8') as f:
+        json.dump([], f)
+    with moved_path.open('w', encoding='utf-8') as f:
+        json.dump([], f)
+
+    integration_data: Dict[str, Any] = {}
+    try:
+        if integration_path.exists():
+            with integration_path.open('r', encoding='utf-8') as f:
+                parsed = json.load(f)
+                if isinstance(parsed, dict):
+                    integration_data = parsed
+    except Exception:
+        logger.debug("Could not read existing integration_results.json during fallback", exc_info=True)
+        integration_data = {}
+
+    integration_data.update({
+        'success': True,
+        'mode': 'dev_enrich_all_usa',
+        'dev_enrich_all_usa': True,
+        'message': (
+            f"Dev Enrich All USA reconstructed: queued {len(new_people):,} people "
+            f"from {len(new_patents):,} USA patents."
+        ),
+        'new_people_count': len(new_people),
+        'new_patents_count': len(new_patents),
+        'verification_completed': True,
+        'processed_at': datetime.utcnow().isoformat()
+    })
+
+    with integration_path.open('w', encoding='utf-8') as f:
+        json.dump(integration_data, f, indent=2, default=str)
+
+    logger.info(
+        "Rebuilt Dev Enrich All USA dataset with %s people and %s patents",
+        len(new_people), len(new_patents)
+    )
+    print(
+        f"STEP 2: Reconstructed {len(new_people):,} people and {len(new_patents):,} patents "
+        "from Dev Enrich All USA selection"
+    )
+    print(f"STEP 2: Loaded {len(new_people):,} people from Step 1 (Dev Enrich All USA fallback)")
+
+    return new_people
 
 def load_config(test_mode=False, express_mode=False, use_zaba=False):
     """Load enrichment configuration"""
@@ -47,22 +309,33 @@ def load_config(test_mode=False, express_mode=False, use_zaba=False):
 def load_people_for_enrichment():
     """Load people from Step 1 results"""
     step1_people_file = 'output/new_people_for_enrichment.json'
-    
-    if not os.path.exists(step1_people_file):
-        logger.warning("No Step 1 people data found")
-        return []
-    
-    try:
-        with open(step1_people_file, 'r') as f:
-            people_data = json.load(f)
-        
+
+    people_data: List[Dict[str, Any]] = []
+    if os.path.exists(step1_people_file):
+        try:
+            with open(step1_people_file, 'r', encoding='utf-8') as f:
+                loaded = json.load(f)
+            if isinstance(loaded, list):
+                people_data = loaded
+        except Exception as exc:
+            logger.error(f"Error loading people from Step 1: {exc}")
+            people_data = []
+
+    if people_data:
         logger.info(f"Loaded {len(people_data)} people from Step 1 results")
         print(f"STEP 2: Loaded {len(people_data)} people from Step 1")
         return people_data
-        
-    except Exception as e:
-        logger.error(f"Error loading people from Step 1: {e}")
-        return []
+
+    rebuilt = _rebuild_dev_enrich_all_usa_people(existing_count=len(people_data))
+    if rebuilt:
+        return rebuilt
+
+    if os.path.exists(step1_people_file):
+        logger.warning("Step 2 found new_people_for_enrichment.json but it is empty")
+    else:
+        logger.warning("No Step 1 people data found")
+
+    return people_data
 
 def main():
     """Run Step 2: Data Enrichment"""
