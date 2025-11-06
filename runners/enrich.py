@@ -270,9 +270,8 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
                     f"PROGRESS: Duplicate screening {idx}/{total_people_to_enrich}"
                 )
 
-        existing_enriched_records = lookup.get_all_records()
-        print(f"Loaded {len(existing_enriched_records)} existing enriched records for duplicate checks")
-        print(f"PROGRESS: Enrichment cache contains {len(existing_enriched_records)} records")
+        existing_enriched_records = lookup.get_records_by_ids(matched_existing_ids)
+        print(f"Loaded {len(existing_enriched_records)} matched existing records for reuse")
 
         print(
             "After duplicate check: "
