@@ -218,22 +218,23 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
         # Already enriched people that Step 1 filtered out (we want to carry them forward)
         already_enriched_from_step1 = config.get('already_enriched_people', [])
         lookup.prefetch_people(already_enriched_from_step1)
-        matched_existing_for_this_run: List[Dict[str, Any]] = []
+        matched_existing_ids: List[int] = []
         matched_signatures: set = set()
         if already_enriched_from_step1:
             total_existing = len(already_enriched_from_step1)
             print(f"Processing {total_existing} already-enriched people from Step 1...")
             for idx, person in enumerate(already_enriched_from_step1, start=1):
-                match = lookup.find_best_match(person)
-                if match:
-                    sig = _record_signature(match)
+                match_id = lookup.find_matching_id(person)
+                if match_id:
+                    sig = _person_signature(person)
                     if sig not in matched_signatures:
-                        matched_existing_for_this_run.append(match)
+                        matched_existing_ids.append(match_id)
                         matched_signatures.add(sig)
                 if idx % 25 == 0 or idx == total_existing:
                     print(
                         f"PROGRESS: Matching Step1 existing {idx}/{total_existing}"
                     )
+        matched_existing_for_this_run = lookup.get_records_by_ids(matched_existing_ids)
 
         _set_stage(3, "Checking for duplicates")
 
@@ -258,8 +259,7 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
                 skipped_count += 1
                 continue
 
-            match = lookup.find_best_match(person)
-            if match is not None:
+            if lookup.find_best_match(person, require_record=False):
                 skipped_duplicate_count += 1
                 skipped_count += 1
             else:
@@ -323,7 +323,7 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
         progress_path = Path(config.get('OUTPUT_DIR', 'output')) / 'step2_progress.json'
         try:
             with open(progress_path, 'w') as pf:
-                json.dump({
+                payload = {
                     'step': 2,
                     'total': int(len(new_people_to_enrich) + skipped_count + len(already_enriched_from_step1)),
                     'processed': 0,
@@ -335,11 +335,14 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
                     'total_steps': total_steps,
                     'started_at': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                     'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ')
-                }, pf)
+                }
+                json.dump(payload, pf)
         except Exception:
             pass
 
         # Enrich the new people in a single pass (original faster flow)
+        config['_existing_signatures'] = lookup.get_signature_snapshot()
+
         newly_enriched = enrich_people_batch(new_people_to_enrich, config, progress={
             'path': str(progress_path),
             'total': int(len(new_people_to_enrich) + skipped_count + len(already_enriched_from_step1)),
@@ -390,6 +393,7 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
         print(f"  Result keys: {list(result.keys())}")
         
         _set_stage(total_steps, "Completed", extra={'result_summary': {'enriched': len(newly_enriched)}}, log=False)
+        config.pop('_existing_signatures', None)
         return result
         
     except Exception as e:
@@ -408,6 +412,7 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
                 json.dump(payload, sf)
         except Exception:
             pass
+        config.pop('_existing_signatures', None)
         return {
             'success': False,
             'error': str(e),
@@ -436,10 +441,10 @@ class EnrichedPeopleLookup:
 
     def __init__(self, db_manager: DatabaseManager):
         self.db = db_manager
-        self._cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-        self._prefetched_combos: Set[Tuple[str, str]] = set()
-        self._prefetched_last_full: Set[str] = set()
-        self._all_records: Dict[str, Dict[str, Any]] = {}
+        self._signature_to_id: Dict[str, int] = {}
+        self._last_state_index: Dict[Tuple[str, str], Set[int]] = {}
+        self._id_cache: Dict[int, Dict[str, Any]] = {}
+        self._id_stub: Dict[int, Dict[str, Any]] = {}
         self._select_clause, self._mapping = self._discover_existing_people_columns()
         self._base_select_sql = (
             f"SELECT ep.*{(', ' + self._select_clause) if self._select_clause else ''} "
@@ -524,6 +529,14 @@ class EnrichedPeopleLookup:
             'city': city,
             'state': state,
         }
+        try:
+            record_id = row.get('id')
+        except AttributeError:
+            record_id = None
+        if record_id is None and isinstance(row, (list, tuple)) and len(row) > 0:
+            record_id = row[0]
+        if record_id is not None:
+            record['id'] = record_id
 
         for alias in self._mapping:
             if alias in row and alias not in record:
@@ -544,51 +557,21 @@ class EnrichedPeopleLookup:
         if not people:
             return
 
-        combos: Set[Tuple[str, str]] = set()
+        combos_by_state: Dict[str, Set[str]] = {}
         for person in people:
             raw_last = (person.get('last_name') or '').strip()
             normalized = _normalize_value(raw_last)
             if not normalized:
                 continue
             state = _normalize_value(person.get('state'))
-            combos.add((normalized, state))
+            combos_by_state.setdefault(state, set()).add(normalized)
 
-        if not combos:
+        if not combos_by_state:
             return
 
-        chunk_size = 250
-        combos_list = list(combos)
-        total = len(combos_list)
-        for idx in range(0, total, chunk_size):
-            chunk = combos_list[idx:idx + chunk_size]
-            self._bulk_prefetch(chunk)
-            print(
-                f"PROGRESS: Prefetching existing enrichments {min(idx + len(chunk), total)}/{total}"
-            )
-
-    def _bulk_prefetch(self, combos: List[Tuple[str, str]]) -> None:
-        normalized_combos: List[Tuple[str, str]] = [
-            (_normalize_value(last), _normalize_value(state))
-            for last, state in combos
-        ]
-        normalized_combos = [c for c in normalized_combos if c[0]]
-        new_combos = [c for c in normalized_combos if c not in self._prefetched_combos]
-        if not new_combos:
-            return
-
-        combos_by_state: Dict[str, Set[str]] = {}
-        for last, state in new_combos:
-            combos_by_state.setdefault(state, set()).add(last)
-
-        # Determine total number of chunks for logging
         names_chunk_size = 80
-        total_chunks = 0
-        for names in combos_by_state.values():
-            total_chunks += (len(names) + names_chunk_size - 1) // names_chunk_size
+        total_chunks = sum((len(names) + names_chunk_size - 1) // names_chunk_size for names in combos_by_state.values())
         processed_chunks = 0
-
-        # Track combos that returned rows so we can default others to empty later
-        combos_with_results: Set[Tuple[str, str]] = set()
 
         for state_value, last_names in combos_by_state.items():
             names_list = sorted(last_names)
@@ -596,51 +579,56 @@ class EnrichedPeopleLookup:
                 chunk_last_names = names_list[idx:idx + names_chunk_size]
                 placeholders = ', '.join(['%s'] * len(chunk_last_names))
                 query = (
-                    self._base_select_sql +
-                    "WHERE LOWER(TRIM(IFNULL(ep.state,''))) = %s "
-                    f"AND LOWER(TRIM(ep.last_name)) IN ({placeholders})"
+                    "SELECT id, first_name, last_name, city, state, patent_number "
+                    "FROM enriched_people "
+                    "WHERE LOWER(TRIM(IFNULL(state,''))) = %s "
+                    f"AND LOWER(TRIM(last_name)) IN ({placeholders})"
                 )
-                params: List[Any] = [state_value] + chunk_last_names
+                params: List[Any] = [state_value] + list(chunk_last_names)
                 try:
                     rows = self.db.execute_query(query, tuple(params)) or []
                 except Exception as exc:
                     logger.warning(
-                        "Error prefetching enriched_people for state '%s' chunk starting at %s: %s",
-                        state_value or '', chunk_last_names[0], exc
+                        "Prefetch chunk error (state='%s', names~%s): %s",
+                        state_value or '', len(chunk_last_names), exc
                     )
                     rows = []
 
-                combo_records: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-                per_last_records: Dict[str, List[Dict[str, Any]]] = {}
-                collected: List[Dict[str, Any]] = []
                 for row in rows:
-                    record = self._convert_row(row)
-                    last_key = _normalize_value(record.get('last_name'))
-                    state_key = _normalize_value(record.get('state'))
-                    combo_key = (last_key, state_key)
-                    combo_records.setdefault(combo_key, []).append(record)
-                    per_last_records.setdefault(last_key, []).append(record)
-                    collected.append(record)
-                    combos_with_results.add(combo_key)
+                    try:
+                        row_id = row.get('id') if isinstance(row, dict) else row[0]
+                    except Exception:
+                        row_id = None
+                    if not row_id:
+                        continue
 
-                if collected:
-                    self._store_records(collected)
+                    first = (row.get('first_name') if isinstance(row, dict) else row[1]) or ''
+                    last = (row.get('last_name') if isinstance(row, dict) else row[2]) or ''
+                    city = (row.get('city') if isinstance(row, dict) else row[3]) or ''
+                    state = (row.get('state') if isinstance(row, dict) else row[4]) or ''
+                    patent = (row.get('patent_number') if isinstance(row, dict) else row[5]) or ''
 
-                for combo_key, records in combo_records.items():
-                    self._cache[combo_key] = records
+                    record_stub = {
+                        'first_name': first,
+                        'last_name': last,
+                        'city': city,
+                        'state': state,
+                        'patent_number': patent,
+                        'first_norm': _normalize_value(first),
+                        'last_norm': _normalize_value(last),
+                        'city_norm': _normalize_value(city),
+                        'state_norm': _normalize_value(state)
+                    }
+                    signature = _record_signature(record_stub)
+                    self._signature_to_id[signature] = row_id
+                    self._id_stub[row_id] = record_stub
 
-                for last_key, records in per_last_records.items():
-                    agg_key = (last_key, '')
-                    existing = self._cache.get(agg_key, [])
-                    if existing:
-                        known = {_record_signature(rec) for rec in existing}
-                        for rec in records:
-                            sig = _record_signature(rec)
-                            if sig not in known:
-                                existing.append(rec)
-                                known.add(sig)
-                    else:
-                        self._cache[agg_key] = list(records)
+                    norm_last = _normalize_value(last)
+                    norm_state = _normalize_value(state)
+                    combo_key = (norm_last, norm_state)
+                    self._last_state_index.setdefault(combo_key, set()).add(row_id)
+                    # fallback bucket (any state)
+                    self._last_state_index.setdefault((norm_last, ''), set()).add(row_id)
 
                 processed_chunks += 1
                 label_state = state_value if state_value else 'blank'
@@ -649,128 +637,122 @@ class EnrichedPeopleLookup:
                     f"(state='{label_state}', last_names={len(chunk_last_names)})"
                 )
 
-        for combo in new_combos:
-            if combo not in combos_with_results:
-                self._cache.setdefault(combo, [])
-
-        self._prefetched_combos.update(new_combos)
-
-    def _prefetch_last_only(self, normalized_last: str) -> None:
-        if not normalized_last or normalized_last in self._prefetched_last_full:
-            return
+    def _load_record(self, record_id: int) -> Optional[Dict[str, Any]]:
+        if record_id in self._id_cache:
+            return self._id_cache[record_id]
         try:
-            rows = self.db.execute_query(self._query_last_only, (normalized_last,)) or []
-        except Exception as exc:
-            logger.warning(
-                f"Error prefetching enriched_people for last name '{normalized_last}': {exc}"
+            row = self.db.execute_query(
+                self._base_select_sql + "WHERE ep.id = %s LIMIT 1",
+                (record_id,),
+                fetch_one=True
             )
-            rows = []
+        except Exception:
+            row = None
+        if not row:
+            self._id_cache[record_id] = None
+            return None
+        record = self._convert_row(row)
+        self._id_cache[record_id] = record
+        return record
 
-        per_state: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-        collected: List[Dict[str, Any]] = []
-        for row in rows:
-            record = self._convert_row(row)
-            last_key = _normalize_value(record.get('last_name'))
-            state_key = _normalize_value(record.get('state'))
-            combo_key = (last_key, state_key)
-            per_state.setdefault(combo_key, []).append(record)
-            collected.append(record)
+    def get_records_by_ids(self, ids: Iterable[int]) -> List[Dict[str, Any]]:
+        unique_ids: List[int] = []
+        seen: Set[int] = set()
+        for record_id in ids:
+            if record_id and record_id not in seen:
+                seen.add(record_id)
+                unique_ids.append(record_id)
 
-        if collected:
-            self._store_records(collected)
-
-        for combo_key, records in per_state.items():
-            self._cache[combo_key] = records
-            self._prefetched_combos.add(combo_key)
-
-        if collected:
-            agg_key = (normalized_last, '')
-            existing = self._cache.get(agg_key, [])
-            if not existing:
-                self._cache[agg_key] = list(collected)
+        results: List[Dict[str, Any]] = []
+        missing: List[int] = []
+        for record_id in unique_ids:
+            record = self._id_cache.get(record_id)
+            if record and record.get('enriched_data'):
+                results.append(record)
             else:
-                known = {_record_signature(rec) for rec in existing}
-                for rec in collected:
-                    sig = _record_signature(rec)
-                    if sig not in known:
-                        existing.append(rec)
-                        known.add(sig)
-        else:
-            self._cache.setdefault((normalized_last, ''), [])
+                missing.append(record_id)
 
-        self._prefetched_last_full.add(normalized_last)
-
-    def _fetch_candidates(self, last_name: str, state: Optional[str], raw_hint: Optional[str] = None) -> List[Dict[str, Any]]:
-        normalized_last = _normalize_value(last_name)
-        normalized_state = _normalize_value(state)
-        cache_key = (normalized_last, normalized_state)
-
-        if cache_key in self._cache:
-            return self._cache[cache_key]
-
-        if not normalized_last:
-            self._cache[cache_key] = []
-            return []
-
-        if normalized_state:
-            self._bulk_prefetch([(normalized_last, normalized_state)])
-        else:
-            self._prefetch_last_only(normalized_last)
-
-        if cache_key not in self._cache or not self._cache[cache_key]:
-            agg_key = (normalized_last, '')
-            if agg_key not in self._cache:
-                self._prefetch_last_only(normalized_last)
-            self._cache[cache_key] = self._cache.get(cache_key, []) or self._cache.get(agg_key, [])
-
-        return self._cache.get(cache_key, [])
-
-    def find_best_match(self, person: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        last_name = _normalize_value(person.get('last_name'))
-        if not last_name:
-            return None
-
-        raw_last = (person.get('last_name') or '').strip()
-        state = _normalize_value(person.get('state'))
-        candidates = self._fetch_candidates(last_name, state, raw_hint=raw_last)
-        if state and not candidates:
-            candidates = self._fetch_candidates(last_name, None, raw_hint=raw_last)
-        if not candidates:
-            return None
-
-        first = _normalize_value(person.get('first_name'))
-        city = _normalize_value(person.get('city'))
-
-        state_match: Optional[Dict[str, Any]] = None
-        initial_match: Optional[Dict[str, Any]] = None
-
-        for candidate in candidates:
-            existing_data = candidate.get('enriched_data', {}).get('original_person', {}) or {}
-            cand_first = _normalize_value(existing_data.get('first_name') or candidate.get('first_name'))
-            cand_last = _normalize_value(existing_data.get('last_name') or candidate.get('last_name'))
-            cand_city = _normalize_value(existing_data.get('city') or candidate.get('city'))
-            cand_state = _normalize_value(existing_data.get('state') or candidate.get('state'))
-
-            if first and last_name and city and state and (
-                cand_first == first and cand_last == last_name and cand_city == city and cand_state == state
-            ):
-                return candidate
-
-            if first and last_name and state and (
-                cand_first == first and cand_last == last_name and cand_state == state
-            ) and state_match is None:
-                state_match = candidate
+        chunk_size = 200
+        for idx in range(0, len(missing), chunk_size):
+            chunk = missing[idx:idx + chunk_size]
+            if not chunk:
                 continue
+            placeholders = ', '.join(['%s'] * len(chunk))
+            query = self._base_select_sql + f"WHERE ep.id IN ({placeholders})"
+            try:
+                rows = self.db.execute_query(query, tuple(chunk)) or []
+            except Exception as exc:
+                logger.warning(f"Bulk load failed for ids {chunk[:5]}...: {exc}")
+                rows = []
+            for row in rows:
+                try:
+                    rec_id = row.get('id')
+                except AttributeError:
+                    rec_id = None
+                if rec_id is None and isinstance(row, (list, tuple)) and len(row) > 0:
+                    rec_id = row[0]
+                record = self._convert_row(row)
+                if rec_id is None:
+                    continue
+                self._id_cache[rec_id] = record
 
-            if first and last_name and state and cand_first and (
-                cand_first[:1] == first[:1] and cand_last == last_name and cand_state == state
-            ) and initial_match is None:
-                initial_match = candidate
+        for record_id in unique_ids:
+            record = self._id_cache.get(record_id)
+            if record:
+                results.append(record)
+        return results
 
-        return state_match or initial_match
+    def find_matching_id(self, person: Dict[str, Any]) -> Optional[int]:
+        last_name_norm = _normalize_value(person.get('last_name'))
+        if not last_name_norm:
+            return None
+
+        state_norm = _normalize_value(person.get('state'))
+        signature = _person_signature(person)
+        sig_id = self._signature_to_id.get(signature)
+        if sig_id:
+            return sig_id
+
+        candidate_ids = list(self._last_state_index.get((last_name_norm, state_norm), []))
+        if state_norm and not candidate_ids:
+            candidate_ids = list(self._last_state_index.get((last_name_norm, ''), []))
+        if not candidate_ids:
+            return None
+
+        first_norm = _normalize_value(person.get('first_name'))
+        city_norm = _normalize_value(person.get('city'))
+
+        for cid in candidate_ids:
+            stub = self._id_stub.get(cid) or {}
+            if not stub:
+                continue
+            cand_first = stub.get('first_norm')
+            cand_last = stub.get('last_norm')
+            cand_city = stub.get('city_norm')
+            cand_state = stub.get('state_norm')
+
+            if first_norm and last_name_norm and city_norm and state_norm and (
+                cand_first == first_norm and cand_last == last_name_norm and cand_city == city_norm and cand_state == state_norm
+            ):
+                return cid
+
+            if first_norm and last_name_norm and state_norm and (
+                cand_first == first_norm and cand_last == last_name_norm and cand_state == state_norm
+            ):
+                return cid
+
+            if first_norm and last_name_norm and state_norm and cand_first and (
+                cand_first[:1] == first_norm[:1] and cand_last == last_name_norm and cand_state == state_norm
+            ):
+                return cid
+
+        return None
 
     def get_all_records(self) -> List[Dict[str, Any]]:
-        return list(self._all_records.values())
+        return self.get_records_by_ids(self._signature_to_id.values())
+
+    def get_signature_snapshot(self) -> Set[str]:
+        return set(self._signature_to_id.keys())
 
 
 def load_people_to_enrich(config: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -860,6 +842,10 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any], pr
         except Exception:
             pass
 
+    existing_signatures = set(config.get('_existing_signatures') or [])
+    commit_interval = 50
+    pending_commits = 0
+
     for i, person in enumerate(people):
         # Secondary safety: enforce test mode cap inside the loop
         if bool(config.get('TEST_MODE')) and i >= 5:
@@ -872,48 +858,14 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any], pr
         print(f"PROGRESS: Enriching {current_index}/{total}")
         print(f"  Person data: first_name='{person.get('first_name')}', last_name='{person.get('last_name')}', city='{person.get('city')}', state='{person.get('state')}'")
         
+        signature = _person_signature(person)
+        if signature in existing_signatures:
+            print("  Skipping: already enriched (cached signature)")
+            processed_counter += 1
+            write_progress_safely()
+            continue
+
         try:
-            # Secondary guard: check DB directly for existing enrichment to avoid duplicate API calls
-            try:
-                if cursor is not None and conn is not None:
-                    fn = (person.get('first_name') or '').strip()
-                    ln = (person.get('last_name') or '').strip()
-                    st = (person.get('state') or '').strip()
-                    ct = (person.get('city') or '').strip()
-                    pn = (person.get('patent_number') or '').strip()
-                    # Try with city + patent when available
-                    params = [fn, ln, st, ct]
-                    query = (
-                        "SELECT 1 FROM enriched_people WHERE first_name=%s AND last_name=%s "
-                        "AND IFNULL(state,'')=%s AND IFNULL(city,'')=%s"
-                    )
-                    if pn:
-                        query += " AND IFNULL(patent_number,'')=%s"
-                        params.append(pn)
-                    query += " LIMIT 1"
-                    cursor.execute(query, tuple(params))
-                    hit = cursor.fetchone()
-                    if not hit and ct:
-                        # Retry ignoring city
-                        params2 = [fn, ln, st]
-                        query2 = (
-                            "SELECT 1 FROM enriched_people WHERE first_name=%s AND last_name=%s "
-                            "AND IFNULL(state,'')=%s"
-                        )
-                        if pn:
-                            query2 += " AND IFNULL(patent_number,'')=%s"
-                            params2.append(pn)
-                        query2 += " LIMIT 1"
-                        cursor.execute(query2, tuple(params2))
-                        hit = cursor.fetchone()
-                    if hit:
-                        print("  Skipping: already enriched in DB")
-                        processed_counter += 1
-                        write_progress_safely()
-                        continue
-            except Exception:
-                # On any DB check error, proceed to API path
-                pass
             # Real API path only – clean person data
             clean_person = {
                 'first_name': str(person.get('first_name', '')).strip(),
@@ -979,20 +931,27 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any], pr
                 try:
                     if cursor is not None and conn is not None:
                         _save_single_enrichment(cursor, enrichment_result)
-                        conn.commit()
+                        pending_commits += 1
+                        if pending_commits >= commit_interval:
+                            conn.commit()
+                            pending_commits = 0
                         if bool(config.get('TEST_MODE')):
                             print("  DEBUG: Saved enrichment to SQL")
                 except Exception as e:
                     logger.error(f"  Error saving enrichment for {person_name}: {e}")
                     if bool(config.get('TEST_MODE')):
                         print(f"  DEBUG: Save error: {e}")
+                existing_signatures.add(signature)
             else:
                 # Record failure (no enrichment result)
                 try:
                     if cursor is not None and conn is not None:
                         # Use cleaned person when available
                         _record_failed_enrichment(cursor, db_config.engine if 'db_config' in locals() else 'mysql', clean_person, 'not_found', None)
-                        conn.commit()
+                        pending_commits += 1
+                        if pending_commits >= commit_interval:
+                            conn.commit()
+                            pending_commits = 0
                         if bool(config.get('TEST_MODE')):
                             print("  DEBUG: Recorded failed enrichment in failed_enrichments")
                 except Exception as e:
@@ -1005,7 +964,10 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any], pr
             try:
                 if cursor is not None and conn is not None:
                     _record_failed_enrichment(cursor, db_config.engine if 'db_config' in locals() else 'mysql', person, f'exception: {str(e)}', None)
-                    conn.commit()
+                    pending_commits += 1
+                    if pending_commits >= commit_interval:
+                        conn.commit()
+                        pending_commits = 0
             except Exception:
                 pass
         
@@ -1015,6 +977,12 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any], pr
         write_progress_safely()
     
     # Clean up DB connection context manager
+    try:
+        if conn is not None and pending_commits and cursor is not None:
+            conn.commit()
+    except Exception:
+        pass
+
     try:
         if conn_ctx is not None:
             # Exit the context manager if we manually entered it
