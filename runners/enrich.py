@@ -748,6 +748,14 @@ class EnrichedPeopleLookup:
 
         return None
 
+    def find_best_match(self, person: Dict[str, Any], require_record: bool = True):
+        match_id = self.find_matching_id(person)
+        if match_id is None:
+            return None if require_record else False
+        if not require_record:
+            return True
+        return self._load_record(match_id)
+
     def get_all_records(self) -> List[Dict[str, Any]]:
         return self.get_records_by_ids(self._signature_to_id.values())
 
