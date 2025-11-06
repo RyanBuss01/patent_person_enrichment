@@ -167,10 +167,38 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
     """Simple, fast enrichment process"""
     
     try:
-        print("STEP 1: Loading people to enrich...")
+        total_steps = 6
+        output_dir = Path(config.get('OUTPUT_DIR', 'output'))
+        stage_path = output_dir / 'step2_stage.json'
 
+        try:
+            stage_path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+        def _set_stage(step_number: int, label: str, extra: Optional[Dict[str, Any]] = None, log: bool = True) -> None:
+            payload = {
+                'current_step': int(step_number),
+                'total_steps': int(total_steps),
+                'stage_label': label,
+                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ')
+            }
+            if extra:
+                payload.update(extra)
+            try:
+                with stage_path.open('w') as sf:
+                    json.dump(payload, sf)
+            except Exception:
+                pass
+            if log:
+                print(f"STEP {step_number}/{total_steps}: {label}")
+
+        _set_stage(1, "Loading people to enrich")
         people_to_enrich = load_people_to_enrich(config)
         if not people_to_enrich:
+            _set_stage(total_steps, "Completed (no people to enrich)")
             return {
                 'success': True,
                 'message': 'No people to enrich',
@@ -182,7 +210,7 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
 
         print(f"Found {len(people_to_enrich)} people to potentially enrich")
 
-        print("STEP 2: Preparing existing enrichment lookup...")
+        _set_stage(2, "Preparing existing enrichment lookup")
         db_config = DatabaseConfig.from_env()
         db_manager = DatabaseManager(db_config)
         lookup = EnrichedPeopleLookup(db_manager)
@@ -207,7 +235,7 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
                         f"PROGRESS: Matching Step1 existing {idx}/{total_existing}"
                     )
 
-        print("STEP 3: Checking for duplicates...")
+        _set_stage(3, "Checking for duplicates")
 
         new_people_to_enrich: List[Dict[str, Any]] = []
         skipped_count = 0
@@ -286,7 +314,9 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
             new_people_to_enrich = new_people_to_enrich[:5]
             print(f"TEST MODE: Limited to {len(new_people_to_enrich)} people")
         
-        print(f"STEP 4: Enriching {len(new_people_to_enrich)} people...")
+        enrich_label = f"Enriching {len(new_people_to_enrich):,} people"
+        _set_stage(4, enrich_label)
+        print(f"STEP 4/{total_steps}: {enrich_label}")
         print(f"PROGRESS: Enrichment queue ready ({len(new_people_to_enrich)}/{len(people_to_enrich) + len(already_enriched_from_step1)})")
 
         # Initialize simple live progress (works with UI poller)
@@ -299,7 +329,10 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
                     'processed': 0,
                     'newly_enriched': 0,
                     'already_enriched': int(skipped_count + len(already_enriched_from_step1)),
-                    'stage': 'starting_enrichment',
+                    'stage': enrich_label,
+                    'stage_label': enrich_label,
+                    'current_step': 4,
+                    'total_steps': total_steps,
                     'started_at': time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                     'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ')
                 }, pf)
@@ -310,11 +343,15 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
         newly_enriched = enrich_people_batch(new_people_to_enrich, config, progress={
             'path': str(progress_path),
             'total': int(len(new_people_to_enrich) + skipped_count + len(already_enriched_from_step1)),
-            'skipped': int(skipped_count + len(already_enriched_from_step1))
+            'skipped': int(skipped_count + len(already_enriched_from_step1)),
+            'stage_label': enrich_label,
+            'current_step': 4,
+            'total_steps': total_steps
         })
         
         # Note: Each enrichment is now saved to SQL inside the loop
-        print(f"STEP 5: Saved {len(newly_enriched)} enrichments during processing")
+        _set_stage(5, "Saving enrichment results")
+        print(f"STEP 5/{total_steps}: Saved {len(newly_enriched)} enrichments during processing")
         if newly_enriched:
             print(f"PROGRESS: Enrichment saved ({len(newly_enriched)}/{len(new_people_to_enrich)})")
 
@@ -345,16 +382,32 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
             'failed_count': len(new_people_to_enrich) - len(newly_enriched)
         }
         
-        print(f"STEP 6: Function completed successfully!")
+        _set_stage(6, "Finalizing results", extra={'result_summary': {'enriched': len(newly_enriched)}}, log=False)
+        print(f"STEP 6/{total_steps}: Function completed successfully!")
         print(f"  Returning {len(combined_enriched)} total enriched records")
         print(f"  Newly enriched: {len(newly_enriched)}")
         print(f"  Matched existing from Step 1: {len(matched_existing_for_this_run)}")
         print(f"  Result keys: {list(result.keys())}")
         
+        _set_stage(total_steps, "Completed", extra={'result_summary': {'enriched': len(newly_enriched)}}, log=False)
         return result
         
     except Exception as e:
         logger.error(f"Enrichment failed: {e}")
+        try:
+            payload = {
+                'current_step': total_steps,
+                'total_steps': total_steps,
+                'stage_label': 'Failed',
+                'error': str(e),
+                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ')
+            }
+            output_dir = Path(config.get('OUTPUT_DIR', 'output'))
+            stage_path = output_dir / 'step2_stage.json'
+            with stage_path.open('w') as sf:
+                json.dump(payload, sf)
+        except Exception:
+            pass
         return {
             'success': False,
             'error': str(e),
@@ -523,62 +576,84 @@ class EnrichedPeopleLookup:
         if not new_combos:
             return
 
-        union_parts: List[str] = []
-        params: List[Any] = []
+        combos_by_state: Dict[str, Set[str]] = {}
         for last, state in new_combos:
-            union_parts.append("SELECT %s AS lookup_last, %s AS lookup_state")
-            params.extend([last, state])
+            combos_by_state.setdefault(state, set()).add(last)
 
-        lookup_sql = " UNION ALL ".join(union_parts)
-        query = (
-            self._base_select_sql +
-            "JOIN (" + lookup_sql + ") AS lookups "
-            "ON LOWER(TRIM(ep.last_name)) = lookups.lookup_last "
-            "AND LOWER(TRIM(IFNULL(ep.state,''))) = lookups.lookup_state"
-        )
-        try:
-            rows = self.db.execute_query(query, tuple(params)) or []
-        except Exception as exc:
-            logger.warning(
-                f"Error prefetching enriched_people for {len(new_combos)} combos: {exc}"
-            )
-            rows = []
+        # Determine total number of chunks for logging
+        names_chunk_size = 80
+        total_chunks = 0
+        for names in combos_by_state.values():
+            total_chunks += (len(names) + names_chunk_size - 1) // names_chunk_size
+        processed_chunks = 0
 
-        per_combo: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-        per_last: Dict[str, List[Dict[str, Any]]] = {}
-        collected: List[Dict[str, Any]] = []
-        for row in rows:
-            record = self._convert_row(row)
-            last_key = _normalize_value(record.get('last_name'))
-            state_key = _normalize_value(record.get('state'))
-            combo_key = (last_key, state_key)
-            per_combo.setdefault(combo_key, []).append(record)
-            per_last.setdefault(last_key, []).append(record)
-            collected.append(record)
+        # Track combos that returned rows so we can default others to empty later
+        combos_with_results: Set[Tuple[str, str]] = set()
 
-        if collected:
-            self._store_records(collected)
+        for state_value, last_names in combos_by_state.items():
+            names_list = sorted(last_names)
+            for idx in range(0, len(names_list), names_chunk_size):
+                chunk_last_names = names_list[idx:idx + names_chunk_size]
+                placeholders = ', '.join(['%s'] * len(chunk_last_names))
+                query = (
+                    self._base_select_sql +
+                    "WHERE LOWER(TRIM(IFNULL(ep.state,''))) = %s "
+                    f"AND LOWER(TRIM(ep.last_name)) IN ({placeholders})"
+                )
+                params: List[Any] = [state_value] + chunk_last_names
+                try:
+                    rows = self.db.execute_query(query, tuple(params)) or []
+                except Exception as exc:
+                    logger.warning(
+                        "Error prefetching enriched_people for state '%s' chunk starting at %s: %s",
+                        state_value or '', chunk_last_names[0], exc
+                    )
+                    rows = []
 
-        for combo_key, records in per_combo.items():
-            self._cache[combo_key] = records
+                combo_records: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+                per_last_records: Dict[str, List[Dict[str, Any]]] = {}
+                collected: List[Dict[str, Any]] = []
+                for row in rows:
+                    record = self._convert_row(row)
+                    last_key = _normalize_value(record.get('last_name'))
+                    state_key = _normalize_value(record.get('state'))
+                    combo_key = (last_key, state_key)
+                    combo_records.setdefault(combo_key, []).append(record)
+                    per_last_records.setdefault(last_key, []).append(record)
+                    collected.append(record)
+                    combos_with_results.add(combo_key)
+
+                if collected:
+                    self._store_records(collected)
+
+                for combo_key, records in combo_records.items():
+                    self._cache[combo_key] = records
+
+                for last_key, records in per_last_records.items():
+                    agg_key = (last_key, '')
+                    existing = self._cache.get(agg_key, [])
+                    if existing:
+                        known = {_record_signature(rec) for rec in existing}
+                        for rec in records:
+                            sig = _record_signature(rec)
+                            if sig not in known:
+                                existing.append(rec)
+                                known.add(sig)
+                    else:
+                        self._cache[agg_key] = list(records)
+
+                processed_chunks += 1
+                label_state = state_value if state_value else 'blank'
+                print(
+                    f"PROGRESS: Prefetch chunk {processed_chunks}/{total_chunks} "
+                    f"(state='{label_state}', last_names={len(chunk_last_names)})"
+                )
 
         for combo in new_combos:
-            if combo not in self._cache:
-                self._cache[combo] = []
-            self._prefetched_combos.add(combo)
+            if combo not in combos_with_results:
+                self._cache.setdefault(combo, [])
 
-        for last_key, records in per_last.items():
-            agg_key = (last_key, '')
-            existing = self._cache.get(agg_key, [])
-            if not existing:
-                self._cache[agg_key] = list(records)
-            else:
-                known = {_record_signature(rec) for rec in existing}
-                for rec in records:
-                    sig = _record_signature(rec)
-                    if sig not in known:
-                        existing.append(rec)
-                        known.add(sig)
+        self._prefetched_combos.update(new_combos)
 
     def _prefetch_last_only(self, normalized_last: str) -> None:
         if not normalized_last or normalized_last in self._prefetched_last_full:
@@ -772,6 +847,14 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any], pr
                 'already_enriched': int(progress.get('skipped', 0)),
                 'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ')
             }
+            stage_label = progress.get('stage_label')
+            if stage_label:
+                payload['stage'] = stage_label
+                payload['stage_label'] = stage_label
+            if progress.get('current_step') is not None:
+                payload['current_step'] = int(progress.get('current_step'))
+            if progress.get('total_steps') is not None:
+                payload['total_steps'] = int(progress.get('total_steps'))
             with open(progress.get('path'), 'w') as pf:
                 json.dump(payload, pf)
         except Exception:
@@ -781,12 +864,12 @@ def enrich_people_batch(people: List[Dict[str, Any]], config: Dict[str, Any], pr
         # Secondary safety: enforce test mode cap inside the loop
         if bool(config.get('TEST_MODE')) and i >= 5:
             break
-        progress = i + 1
+        current_index = i + 1
         total = len(people)
         person_name = f"{person.get('first_name', '')} {person.get('last_name', '')}"
-        
-        print(f"ENRICHING {progress}/{total}: {person_name}")
-        print(f"PROGRESS: Enriching {progress}/{total}")
+
+        print(f"ENRICHING {current_index}/{total}: {person_name}")
+        print(f"PROGRESS: Enriching {current_index}/{total}")
         print(f"  Person data: first_name='{person.get('first_name')}', last_name='{person.get('last_name')}', city='{person.get('city')}', state='{person.get('state')}'")
         
         try:

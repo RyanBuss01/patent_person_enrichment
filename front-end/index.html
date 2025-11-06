@@ -3674,22 +3674,71 @@
 
         // Poll Step 2 progress periodically and show (processed/total)
         async function pollStep2Progress() {
-            if (pollingIntervals && pollingIntervals.has('step2')) {
-                return; // Live polling already managing progress output
-            }
             try {
                 const resp = await fetch('/api/step2/progress');
                 const p = await resp.json();
-                const el = document.getElementById('step2LiveProgress');
-                if (!el) return;
-                if (p && (p.total || p.processed)) {
-                    const processed = p.processed || 0;
-                    const total = p.total || 0;
-                    el.textContent = `Progress: (${processed}/${total})`;
-                    el.classList.remove('hidden');
-                } else {
-                    el.classList.add('hidden');
-                    el.textContent = '';
+                const wrap = document.getElementById('step2Progress');
+                const messageEl = document.getElementById('step2ProgressMessage');
+                const barEl = document.getElementById('step2ProgressBar');
+                const liveEl = document.getElementById('step2LiveProgress');
+                if (!wrap || !messageEl || !barEl || !liveEl) {
+                    return;
+                }
+
+                const running = !!p.running;
+                const total = Number.isFinite(Number(p.total)) ? Number(p.total) : Number(p.total_people || 0);
+                const processed = Number.isFinite(Number(p.processed)) ? Number(p.processed) : 0;
+                const newly = Number.isFinite(Number(p.newly_enriched)) ? Number(p.newly_enriched) : 0;
+                const already = Number.isFinite(Number(p.already_enriched)) ? Number(p.already_enriched) : 0;
+                const percent = total > 0 ? Math.min(100, Math.max(0, Math.round((processed / total) * 100))) : 0;
+                const totalSteps = Number.isFinite(Number(p.total_steps)) ? Number(p.total_steps) : null;
+                const currentStep = Number.isFinite(Number(p.current_step)) ? Number(p.current_step) : null;
+                const stageRaw = typeof p.stage_label === 'string' && p.stage_label.trim()
+                    ? p.stage_label
+                    : (typeof p.stage === 'string' && p.stage.trim() ? p.stage : '');
+                const stage = stageRaw.replace(/_/g, ' ').trim();
+                const prefix = (currentStep && totalSteps)
+                    ? `(${currentStep}/${totalSteps}) `
+                    : '';
+
+                if ((running || processed > 0 || total > 0) && (processed || total || stage)) {
+                    wrap.classList.remove('hidden');
+                    const countLabel = total > 0
+                        ? `${processed.toLocaleString()} / ${total.toLocaleString()}`
+                        : (processed > 0 ? processed.toLocaleString() : '');
+                    const stagePrefix = stage || 'Processing';
+                    const combined = countLabel ? `${prefix}${stagePrefix} • ${countLabel}` : `${prefix}${stagePrefix}`;
+                    messageEl.textContent = combined;
+                    const statusEl = document.getElementById('step2Status');
+                    if (statusEl && running) {
+                        statusEl.textContent = `${prefix}${stagePrefix}`;
+                    }
+                    barEl.style.width = total > 0 ? `${percent}%` : (running ? '35%' : '0%');
+
+                    const parts = [];
+                    if (Number.isFinite(newly) && newly > 0) {
+                        parts.push(`New: ${newly.toLocaleString()}`);
+                    }
+                    if (Number.isFinite(already) && already > 0) {
+                        parts.push(`Skipped: ${already.toLocaleString()}`);
+                    }
+                    if (p.source === 'pdl' || p.method === 'peopledatalabs') {
+                        parts.push('Source: PDL');
+                    } else if (typeof p.method === 'string') {
+                        parts.push(`Source: ${p.method}`);
+                    }
+                    liveEl.textContent = parts.length ? parts.join(' • ') : countLabel;
+                    liveEl.classList.remove('hidden');
+                } else if (!running) {
+                    wrap.classList.add('hidden');
+                    barEl.style.width = '0%';
+                    messageEl.textContent = 'Processing...';
+                    liveEl.textContent = '';
+                    liveEl.classList.add('hidden');
+                    const statusEl = document.getElementById('step2Status');
+                    if (statusEl && statusEl.classList.contains('status-running')) {
+                        statusEl.textContent = 'Starting...';
+                    }
                 }
             } catch (_) { /* ignore */ }
         }

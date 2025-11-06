@@ -3906,9 +3906,22 @@ app.get('/api/export/contact-new-and-existing-addresses', (req, res) => {
 // Step 2 live progress endpoint
 app.get('/api/step2/progress', (req, res) => {
     try {
-        const p = readJsonFile('output/step2_progress.json') || {};
         const running = runningProcesses.has('step2');
-        res.json({ running, ...p });
+        const pdlProgress = readJsonFile('output/step2_pdl_progress.json');
+        const legacyProgress = readJsonFile('output/step2_progress.json');
+        const stageInfo = readJsonFile('output/step2_stage.json');
+
+        let progress = {};
+        if (pdlProgress && typeof pdlProgress === 'object') {
+            progress = { ...pdlProgress, source: 'pdl' };
+        } else if (legacyProgress && typeof legacyProgress === 'object') {
+            progress = { ...legacyProgress, source: 'legacy' };
+        }
+        if (stageInfo && typeof stageInfo === 'object') {
+            progress = { ...progress, ...stageInfo };
+        }
+
+        res.json({ running, ...progress });
     } catch (e) {
         res.json({ running: runningProcesses.has('step2') });
     }
