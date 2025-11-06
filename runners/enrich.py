@@ -7,7 +7,7 @@ import os
 import json
 import time
 import pandas as pd
-from typing import Dict, Any, List, Tuple, Optional, Set
+from typing import Dict, Any, List, Tuple, Optional, Set, Iterable
 from pathlib import Path
 from classes.people_data_labs_enricher import PeopleDataLabsEnricher
 from database.db_manager import DatabaseManager, DatabaseConfig
