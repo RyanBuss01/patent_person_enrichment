@@ -210,19 +210,33 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
 
         print(f"Found {len(people_to_enrich)} people to potentially enrich")
 
-        _set_stage(2, "Loading already-enriched people from Step 1")
+        _set_stage(2, "Preparing existing enrichment lookup")
         db_config = DatabaseConfig.from_env()
         db_manager = DatabaseManager(db_config)
+        lookup = EnrichedPeopleLookup(db_manager)
 
         # Already enriched people that Step 1 filtered out (we want to carry them forward)
         already_enriched_from_step1 = config.get('already_enriched_people', [])
-        matched_existing_for_this_run = []
+        lookup.prefetch_people(already_enriched_from_step1)
+        matched_existing_ids: List[int] = []
+        matched_signatures: set = set()
         if already_enriched_from_step1:
-            print(f"Loading {len(already_enriched_from_step1)} already-enriched people from Step 1...")
-            matched_existing_for_this_run = load_enriched_records_by_people(already_enriched_from_step1, db_manager)
-            print(f"Loaded {len(matched_existing_for_this_run)} matched existing records for reuse")
+            total_existing = len(already_enriched_from_step1)
+            print(f"Processing {total_existing} already-enriched people from Step 1...")
+            for idx, person in enumerate(already_enriched_from_step1, start=1):
+                match_id = lookup.find_matching_id(person)
+                if match_id:
+                    sig = _person_signature(person)
+                    if sig not in matched_signatures:
+                        matched_existing_ids.append(match_id)
+                        matched_signatures.add(sig)
+                if idx % 25 == 0 or idx == total_existing:
+                    print(
+                        f"PROGRESS: Matching Step1 existing {idx}/{total_existing}"
+                    )
+        matched_existing_for_this_run = lookup.get_records_by_ids(matched_existing_ids)
 
-        _set_stage(3, "Checking for duplicates in batches")
+        _set_stage(3, "Checking for duplicates")
 
         new_people_to_enrich: List[Dict[str, Any]] = []
         skipped_count = 0
@@ -236,43 +250,28 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
             failed_set = _load_failed_signatures(db_config)
             print(f"Loaded {len(failed_set)} failed signatures to skip in express mode")
 
-        # Check for existing enrichments in batches of 50
-        print(f"Checking {len(people_to_enrich)} people for existing enrichments (batch size: 50)...")
-        existing_signatures = set()
-        batch_size = 50
-        total_batches = (len(people_to_enrich) + batch_size - 1) // batch_size
+        lookup.prefetch_people(people_to_enrich)
 
-        for batch_idx in range(0, len(people_to_enrich), batch_size):
-            batch = people_to_enrich[batch_idx:batch_idx + batch_size]
-            batch_existing = check_existing_enrichments_batch(batch, db_manager)
-            existing_signatures.update(batch_existing)
-
-            current_batch = (batch_idx // batch_size) + 1
-            print(f"PROGRESS: Checked batch {current_batch}/{total_batches} ({len(existing_signatures)} duplicates found so far)")
-
-        # Filter out duplicates and failed enrichments
         total_people_to_enrich = len(people_to_enrich)
         for idx, person in enumerate(people_to_enrich, start=1):
-            sig = _person_signature(person)
-
-            if express_mode and sig in failed_set:
+            if express_mode and _person_signature(person) in failed_set:
                 skipped_failed_count += 1
                 skipped_count += 1
                 continue
 
-            if sig in existing_signatures:
+            if lookup.find_best_match(person, require_record=False):
                 skipped_duplicate_count += 1
                 skipped_count += 1
             else:
                 new_people_to_enrich.append(person)
 
-            if idx % 100 == 0 or idx == total_people_to_enrich:
+            if idx % 50 == 0 or idx == total_people_to_enrich:
                 print(
-                    f"PROGRESS: Filtered {idx}/{total_people_to_enrich} people"
+                    f"PROGRESS: Duplicate screening {idx}/{total_people_to_enrich}"
                 )
 
-        existing_enriched_records = matched_existing_for_this_run
-        print(f"Reusing {len(existing_enriched_records)} matched existing records from Step 1")
+        existing_enriched_records = lookup.get_records_by_ids(matched_existing_ids)
+        print(f"Loaded {len(existing_enriched_records)} matched existing records for reuse")
 
         print(
             "After duplicate check: "
@@ -341,7 +340,7 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
             pass
 
         # Enrich the new people in a single pass (original faster flow)
-        config['_existing_signatures'] = existing_signatures
+        config['_existing_signatures'] = lookup.get_signature_snapshot()
 
         newly_enriched = enrich_people_batch(new_people_to_enrich, config, progress={
             'path': str(progress_path),
@@ -436,145 +435,331 @@ def _record_signature(record: Dict[str, Any]) -> str:
     ])
 
 
-def check_existing_enrichments_batch(people_batch: List[Dict[str, Any]], db_manager: DatabaseManager) -> Set[str]:
-    """
-    Check which people in the batch already exist in enriched_people table.
-    Returns a set of signatures for people that already exist.
-    Uses a single efficient SQL query with tuple matching.
-    """
-    if not people_batch:
-        return set()
+class EnrichedPeopleLookup:
+    """Lazy loader that fetches only necessary enriched_people rows."""
 
-    # Build the query with tuple matching: (first_name, last_name, city, state, patent_number)
-    # This is much faster than the old prefetch approach
-    conditions = []
-    params = []
+    def __init__(self, db_manager: DatabaseManager):
+        self.db = db_manager
+        self._signature_to_id: Dict[str, int] = {}
+        self._last_state_index: Dict[Tuple[str, str], Set[int]] = {}
+        self._id_cache: Dict[int, Dict[str, Any]] = {}
+        self._id_stub: Dict[int, Dict[str, Any]] = {}
+        self._select_clause, self._mapping = self._discover_existing_people_columns()
+        self._base_select_sql = (
+            f"SELECT ep.*{(', ' + self._select_clause) if self._select_clause else ''} "
+            "FROM enriched_people ep "
+            "LEFT JOIN existing_people ex ON "
+            "LOWER(TRIM(ep.first_name)) = LOWER(TRIM(ex.first_name)) "
+            "AND LOWER(TRIM(ep.last_name)) = LOWER(TRIM(ex.last_name)) "
+            "AND LOWER(TRIM(IFNULL(ep.city,''))) = LOWER(TRIM(IFNULL(ex.city,''))) "
+            "AND LOWER(TRIM(IFNULL(ep.state,''))) = LOWER(TRIM(IFNULL(ex.state,''))) "
+        )
+        self._query_last_only = (
+            self._base_select_sql +
+            "WHERE LOWER(TRIM(ep.last_name)) = %s"
+        )
 
-    for person in people_batch:
-        first_name = (person.get('first_name') or '').strip()
-        last_name = (person.get('last_name') or '').strip()
-        city = (person.get('city') or '').strip()
-        state = (person.get('state') or '').strip()
-        patent_number = (person.get('patent_number') or '').strip()
-
-        conditions.append("(LOWER(TRIM(first_name)) = %s AND LOWER(TRIM(last_name)) = %s AND LOWER(TRIM(IFNULL(city,''))) = %s AND LOWER(TRIM(IFNULL(state,''))) = %s AND patent_number = %s)")
-        params.extend([
-            first_name.lower(),
-            last_name.lower(),
-            city.lower(),
-            state.lower(),
-            patent_number
-        ])
-
-    if not conditions:
-        return set()
-
-    query = f"""
-        SELECT first_name, last_name, city, state, patent_number
-        FROM enriched_people
-        WHERE {' OR '.join(conditions)}
-    """
-
-    try:
-        rows = db_manager.execute_query(query, tuple(params)) or []
-    except Exception as exc:
-        logger.warning(f"Batch check error for {len(people_batch)} people: {exc}")
-        return set()
-
-    # Build signatures for existing people
-    existing_signatures = set()
-    for row in rows:
-        person_data = {
-            'first_name': row.get('first_name') if isinstance(row, dict) else row[0],
-            'last_name': row.get('last_name') if isinstance(row, dict) else row[1],
-            'city': row.get('city') if isinstance(row, dict) else row[2],
-            'state': row.get('state') if isinstance(row, dict) else row[3],
-            'patent_number': row.get('patent_number') if isinstance(row, dict) else row[4]
-        }
-        existing_signatures.add(_person_signature(person_data))
-
-    return existing_signatures
-
-
-def load_enriched_records_by_people(people: List[Dict[str, Any]], db_manager: DatabaseManager) -> List[Dict[str, Any]]:
-    """
-    Load full enriched records for a list of people from the database.
-    Used for already-enriched people from Step 1 that need to be included in output.
-    """
-    if not people:
-        return []
-
-    # Batch load in chunks of 50
-    all_records = []
-    batch_size = 50
-
-    for i in range(0, len(people), batch_size):
-        batch = people[i:i+batch_size]
-        conditions = []
-        params = []
-
-        for person in batch:
-            first_name = (person.get('first_name') or '').strip()
-            last_name = (person.get('last_name') or '').strip()
-            city = (person.get('city') or '').strip()
-            state = (person.get('state') or '').strip()
-            patent_number = (person.get('patent_number') or '').strip()
-
-            conditions.append("(LOWER(TRIM(first_name)) = %s AND LOWER(TRIM(last_name)) = %s AND LOWER(TRIM(IFNULL(city,''))) = %s AND LOWER(TRIM(IFNULL(state,''))) = %s AND patent_number = %s)")
-            params.extend([
-                first_name.lower(),
-                last_name.lower(),
-                city.lower(),
-                state.lower(),
-                patent_number
-            ])
-
-        if not conditions:
-            continue
-
-        query = f"""
-            SELECT * FROM enriched_people
-            WHERE {' OR '.join(conditions)}
-        """
-
+    def _discover_existing_people_columns(self) -> Tuple[str, Dict[str, str]]:
+        cols: List[str] = []
         try:
-            rows = db_manager.execute_query(query, tuple(params)) or []
+            col_rows = self.db.execute_query("SHOW COLUMNS FROM existing_people") or []
+            cols = [
+                (row.get('Field') or row.get('COLUMN_NAME') or row.get('field'))
+                for row in col_rows if isinstance(row, dict)
+            ]
+        except Exception:
+            cols = []
 
+        def pick(primary: str, aliases: Optional[List[str]] = None) -> str:
+            aliases = aliases or []
+            if primary in cols:
+                return primary
+            for candidate in aliases:
+                if candidate in cols:
+                    return candidate
+            return ''
+
+        mapping = {
+            'issue_id': pick('issue_id'),
+            'new_issue_rec_num': pick('new_issue_rec_num', ['issue_rec_num', 'rec_num']),
+            'inventor_id': pick('inventor_id'),
+            'patent_no': pick('patent_no', ['patent_number', 'patent_num']),
+            'title': pick('title', ['patent_title', 'invention_title']),
+            'issue_date': pick('issue_date', ['date', 'patent_date']),
+            'bar_code': pick('bar_code', ['barcode']),
+            'mod_user': pick('mod_user', ['modified_by', 'last_modified_by']),
+            'mail_to_assignee': pick('mail_to_assignee', ['assignee', 'assign_name']),
+            'mail_to_name': pick('mail_to_name'),
+            'mail_to_add1': pick('mail_to_add1', ['address', 'addr1', 'mail_to_add_1'])
+        }
+
+        select_parts = []
+        for alias, column in mapping.items():
+            if not column:
+                continue
+            if alias == column:
+                select_parts.append(f"ex.{column}")
+            else:
+                select_parts.append(f"ex.{column} AS {alias}")
+
+        return ', '.join(select_parts), mapping
+
+    def _convert_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            enrichment_data = json.loads(row.get('enrichment_data', '{}'))
+        except Exception:
+            enrichment_data = {}
+
+        first_name = row.get('first_name') or ''
+        last_name = row.get('last_name') or ''
+        city = row.get('city') or ''
+        state = row.get('state') or ''
+        patent_number = row.get('patent_number') or row.get('patent_no') or ''
+
+        record = {
+            'original_name': f"{first_name} {last_name}".strip(),
+            'patent_number': patent_number,
+            'patent_title': enrichment_data.get('original_person', {}).get('patent_title', ''),
+            'match_score': enrichment_data.get('enrichment_result', {}).get('match_score', 0),
+            'enriched_data': enrichment_data,
+            'enriched_at': row.get('enriched_at'),
+            'first_name': first_name,
+            'last_name': last_name,
+            'city': city,
+            'state': state,
+        }
+        try:
+            record_id = row.get('id')
+        except AttributeError:
+            record_id = None
+        if record_id is None and isinstance(row, (list, tuple)) and len(row) > 0:
+            record_id = row[0]
+        if record_id is not None:
+            record['id'] = record_id
+
+        for alias in self._mapping:
+            if alias in row and alias not in record:
+                record[alias] = row.get(alias)
+
+        if 'mail_to_add1' not in record:
+            record['mail_to_add1'] = row.get('address')
+
+        return record
+
+    def _store_records(self, records: List[Dict[str, Any]]) -> None:
+        for rec in records:
+            sig = _record_signature(rec)
+            if sig not in self._all_records:
+                self._all_records[sig] = rec
+
+    def prefetch_people(self, people: List[Dict[str, Any]]) -> None:
+        if not people:
+            return
+
+        combos_by_state: Dict[str, Set[str]] = {}
+        for person in people:
+            raw_last = (person.get('last_name') or '').strip()
+            normalized = _normalize_value(raw_last)
+            if not normalized:
+                continue
+            state = _normalize_value(person.get('state'))
+            combos_by_state.setdefault(state, set()).add(normalized)
+
+        if not combos_by_state:
+            return
+
+        names_chunk_size = 80
+        total_chunks = sum((len(names) + names_chunk_size - 1) // names_chunk_size for names in combos_by_state.values())
+        processed_chunks = 0
+
+        for state_value, last_names in combos_by_state.items():
+            names_list = sorted(last_names)
+            for idx in range(0, len(names_list), names_chunk_size):
+                chunk_last_names = names_list[idx:idx + names_chunk_size]
+                placeholders = ', '.join(['%s'] * len(chunk_last_names))
+                query = (
+                    "SELECT id, first_name, last_name, city, state, patent_number "
+                    "FROM enriched_people "
+                    "WHERE LOWER(TRIM(IFNULL(state,''))) = %s "
+                    f"AND LOWER(TRIM(last_name)) IN ({placeholders})"
+                )
+                params: List[Any] = [state_value] + list(chunk_last_names)
+                try:
+                    rows = self.db.execute_query(query, tuple(params)) or []
+                except Exception as exc:
+                    logger.warning(
+                        "Prefetch chunk error (state='%s', names~%s): %s",
+                        state_value or '', len(chunk_last_names), exc
+                    )
+                    rows = []
+
+                for row in rows:
+                    try:
+                        row_id = row.get('id') if isinstance(row, dict) else row[0]
+                    except Exception:
+                        row_id = None
+                    if not row_id:
+                        continue
+
+                    first = (row.get('first_name') if isinstance(row, dict) else row[1]) or ''
+                    last = (row.get('last_name') if isinstance(row, dict) else row[2]) or ''
+                    city = (row.get('city') if isinstance(row, dict) else row[3]) or ''
+                    state = (row.get('state') if isinstance(row, dict) else row[4]) or ''
+                    patent = (row.get('patent_number') if isinstance(row, dict) else row[5]) or ''
+
+                    record_stub = {
+                        'first_name': first,
+                        'last_name': last,
+                        'city': city,
+                        'state': state,
+                        'patent_number': patent,
+                        'first_norm': _normalize_value(first),
+                        'last_norm': _normalize_value(last),
+                        'city_norm': _normalize_value(city),
+                        'state_norm': _normalize_value(state)
+                    }
+                    signature = _record_signature(record_stub)
+                    self._signature_to_id[signature] = row_id
+                    self._id_stub[row_id] = record_stub
+
+                    norm_last = _normalize_value(last)
+                    norm_state = _normalize_value(state)
+                    combo_key = (norm_last, norm_state)
+                    self._last_state_index.setdefault(combo_key, set()).add(row_id)
+                    # fallback bucket (any state)
+                    self._last_state_index.setdefault((norm_last, ''), set()).add(row_id)
+
+                processed_chunks += 1
+                label_state = state_value if state_value else 'blank'
+                print(
+                    f"PROGRESS: Prefetch chunk {processed_chunks}/{total_chunks} "
+                    f"(state='{label_state}', last_names={len(chunk_last_names)})"
+                )
+
+    def _load_record(self, record_id: int) -> Optional[Dict[str, Any]]:
+        if record_id in self._id_cache:
+            return self._id_cache[record_id]
+        try:
+            row = self.db.execute_query(
+                self._base_select_sql + "WHERE ep.id = %s LIMIT 1",
+                (record_id,),
+                fetch_one=True
+            )
+        except Exception:
+            row = None
+        if not row:
+            self._id_cache[record_id] = None
+            return None
+        record = self._convert_row(row)
+        self._id_cache[record_id] = record
+        return record
+
+    def get_records_by_ids(self, ids: Iterable[int]) -> List[Dict[str, Any]]:
+        unique_ids: List[int] = []
+        seen: Set[int] = set()
+        for record_id in ids:
+            if record_id and record_id not in seen:
+                seen.add(record_id)
+                unique_ids.append(record_id)
+
+        results: List[Dict[str, Any]] = []
+        missing: List[int] = []
+        for record_id in unique_ids:
+            record = self._id_cache.get(record_id)
+            if record and record.get('enriched_data'):
+                results.append(record)
+            else:
+                missing.append(record_id)
+
+        chunk_size = 200
+        for idx in range(0, len(missing), chunk_size):
+            chunk = missing[idx:idx + chunk_size]
+            if not chunk:
+                continue
+            placeholders = ', '.join(['%s'] * len(chunk))
+            query = self._base_select_sql + f"WHERE ep.id IN ({placeholders})"
+            try:
+                rows = self.db.execute_query(query, tuple(chunk)) or []
+            except Exception as exc:
+                logger.warning(f"Bulk load failed for ids {chunk[:5]}...: {exc}")
+                rows = []
             for row in rows:
                 try:
-                    enrichment_data = json.loads(row.get('enrichment_data', '{}'))
-                except Exception:
-                    enrichment_data = {}
+                    rec_id = row.get('id')
+                except AttributeError:
+                    rec_id = None
+                if rec_id is None and isinstance(row, (list, tuple)) and len(row) > 0:
+                    rec_id = row[0]
+                record = self._convert_row(row)
+                if rec_id is None:
+                    continue
+                self._id_cache[rec_id] = record
 
-                first_name = row.get('first_name') or ''
-                last_name = row.get('last_name') or ''
-                city = row.get('city') or ''
-                state = row.get('state') or ''
-                patent_number = row.get('patent_number') or ''
+        for record_id in unique_ids:
+            record = self._id_cache.get(record_id)
+            if record:
+                results.append(record)
+        return results
 
-                record = {
-                    'original_name': f"{first_name} {last_name}".strip(),
-                    'patent_number': patent_number,
-                    'patent_title': enrichment_data.get('original_person', {}).get('patent_title', ''),
-                    'match_score': enrichment_data.get('enrichment_result', {}).get('match_score', 0),
-                    'enriched_data': enrichment_data,
-                    'enriched_at': row.get('enriched_at'),
-                    'first_name': first_name,
-                    'last_name': last_name,
-                    'city': city,
-                    'state': state,
-                }
+    def find_matching_id(self, person: Dict[str, Any]) -> Optional[int]:
+        last_name_norm = _normalize_value(person.get('last_name'))
+        if not last_name_norm:
+            return None
 
-                if row.get('id'):
-                    record['id'] = row.get('id')
+        state_norm = _normalize_value(person.get('state'))
+        signature = _person_signature(person)
+        sig_id = self._signature_to_id.get(signature)
+        if sig_id:
+            return sig_id
 
-                all_records.append(record)
+        candidate_ids = list(self._last_state_index.get((last_name_norm, state_norm), []))
+        if state_norm and not candidate_ids:
+            candidate_ids = list(self._last_state_index.get((last_name_norm, ''), []))
+        if not candidate_ids:
+            return None
 
-        except Exception as exc:
-            logger.warning(f"Error loading enriched records for batch: {exc}")
-            continue
+        first_norm = _normalize_value(person.get('first_name'))
+        city_norm = _normalize_value(person.get('city'))
 
-    return all_records
+        for cid in candidate_ids:
+            stub = self._id_stub.get(cid) or {}
+            if not stub:
+                continue
+            cand_first = stub.get('first_norm')
+            cand_last = stub.get('last_norm')
+            cand_city = stub.get('city_norm')
+            cand_state = stub.get('state_norm')
+
+            if first_norm and last_name_norm and city_norm and state_norm and (
+                cand_first == first_norm and cand_last == last_name_norm and cand_city == city_norm and cand_state == state_norm
+            ):
+                return cid
+
+            if first_norm and last_name_norm and state_norm and (
+                cand_first == first_norm and cand_last == last_name_norm and cand_state == state_norm
+            ):
+                return cid
+
+            if first_norm and last_name_norm and state_norm and cand_first and (
+                cand_first[:1] == first_norm[:1] and cand_last == last_name_norm and cand_state == state_norm
+            ):
+                return cid
+
+        return None
+
+    def find_best_match(self, person: Dict[str, Any], require_record: bool = True):
+        match_id = self.find_matching_id(person)
+        if match_id is None:
+            return None if require_record else False
+        if not require_record:
+            return True
+        return self._load_record(match_id)
+
+    def get_all_records(self) -> List[Dict[str, Any]]:
+        return self.get_records_by_ids(self._signature_to_id.values())
+
+    def get_signature_snapshot(self) -> Set[str]:
+        return set(self._signature_to_id.keys())
 
 
 def load_people_to_enrich(config: Dict[str, Any]) -> List[Dict[str, Any]]:
