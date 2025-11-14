@@ -248,7 +248,7 @@ def run_sql_data_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
             existing_signatures.update(batch_existing)
 
             current_batch = (batch_idx // batch_size) + 1
-            print(f"PROGRESS: Checked batch {current_batch}/{total_batches} ({len(existing_signatures)} duplicates found so far)")
+            print(f"PROGRESS: Checked batch {current_batch}/{total_batches} - {len(existing_signatures)} duplicates found so far")
 
         # Filter out duplicates and failed enrichments
         total_people_to_enrich = len(people_to_enrich)

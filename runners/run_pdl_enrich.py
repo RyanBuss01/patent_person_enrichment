@@ -292,12 +292,14 @@ def run_pdl_enrichment(config: Dict[str, Any]) -> Dict[str, Any]:
         
         logger.info(f"Found {len(people_to_enrich)} people to potentially enrich")
         print(f"Loaded {len(people_to_enrich)} people for PDL enrichment")
-        
-        # Check for existing PDL enrichments
-        new_people_to_enrich, skipped_count = check_existing_pdl_enrichments(people_to_enrich)
-        
-        logger.info(f"After filtering PDL duplicates: {len(new_people_to_enrich)} new people, {skipped_count} already enriched")
-        print(f"Will enrich {len(new_people_to_enrich)} new people")
+
+        # Note: Duplicate checking is now handled efficiently in run_sql_data_enrichment()
+        # No need for redundant checking here
+        new_people_to_enrich = people_to_enrich
+        skipped_count = 0
+
+        logger.info(f"Passing {len(new_people_to_enrich)} people to enrichment (duplicate check will happen in batch)")
+        print(f"Will check and enrich {len(new_people_to_enrich)} people")
         
         # Test mode limit
         if config.get('TEST_MODE') and len(new_people_to_enrich) > 5:
