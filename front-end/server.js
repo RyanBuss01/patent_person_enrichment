@@ -2543,13 +2543,20 @@ app.post('/api/step2/express', async (req, res) => {
                 try {
                     fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_output.txt'), (result && result.output) ? String(result.output) : '');
                 } catch (e) { /* ignore */ }
+                const completedAt = new Date();
+                writeStepStatus(stepId, {
+                    success: true,
+                    completedAt: completedAt.toISOString(),
+                    files,
+                    outputSummary: truncateText((result && result.output) ? String(result.output) : '', 4000)
+                });
                 runningProcesses.set(stepId + '_completed', {
                     completed: true,
                     success: true,
                     output: result.output,
                     files: files,
                     results: enrichmentResults,
-                    completedAt: new Date()
+                    completedAt
                 });
             })
             .catch((error) => {
@@ -2558,13 +2565,21 @@ app.post('/api/step2/express', async (req, res) => {
                     const msg = [error.error || error.message || 'Step 2 failed', error.stderr || '', error.stdout || ''].filter(Boolean).join('\n\n');
                     fs.writeFileSync(path.join(__dirname, '..', 'output', 'last_step2_output.txt'), msg);
                 } catch (e) { /* ignore */ }
+                const completedAt = new Date();
+                writeStepStatus(stepId, {
+                    success: false,
+                    completedAt: completedAt.toISOString(),
+                    error: error.error || error.message || 'Step 2 (express) failed',
+                    stderr: truncateText(error.stderr || '', 4000),
+                    stdoutSnippet: truncateText(error.stdout || '', 2000)
+                });
                 runningProcesses.set(stepId + '_completed', {
                     completed: true,
                     success: false,
                     error: error.error || error.message,
                     stderr: error.stderr,
                     stdout: error.stdout,
-                    completedAt: new Date()
+                    completedAt
                 });
             });
         res.json({ success: true, status: 'started', processing: true, message: 'Step 2 (express) started. Use /api/step2/status to check progress.' });
