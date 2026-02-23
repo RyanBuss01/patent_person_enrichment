@@ -2162,19 +2162,6 @@
                         </div>
                         <div class="step-description">
                             Enrich trademark contact data using PeopleDataLabs Company API.
-                            Choose which fields to search by and export results for CRM/Zapier import.
-                        </div>
-
-                        <!-- Search Field Selection -->
-                        <div class="biz-search-fields" id="bizSearchFields">
-                            <label><strong>Search By:</strong></label>
-                            <div style="display: flex; gap: 15px; flex-wrap: wrap; margin-top: 8px;">
-                                <label><input type="checkbox" id="bizFieldName" checked> Company Name</label>
-                                <label><input type="checkbox" id="bizFieldLocation" checked> Location</label>
-                                <label><input type="checkbox" id="bizFieldWebsite"> Website</label>
-                                <label><input type="checkbox" id="bizFieldTicker"> Ticker</label>
-                                <label><input type="checkbox" id="bizFieldLinkedin"> LinkedIn Profile</label>
-                            </div>
                         </div>
 
                         <div class="step-actions">
@@ -5066,19 +5053,7 @@
             const stepId = 'bizStep2';
             setStepRunning(stepId);
 
-            // Gather selected search fields
-            const searchFields = [];
-            if (document.getElementById('bizFieldName') && document.getElementById('bizFieldName').checked) searchFields.push('name');
-            if (document.getElementById('bizFieldLocation') && document.getElementById('bizFieldLocation').checked) searchFields.push('location');
-            if (document.getElementById('bizFieldWebsite') && document.getElementById('bizFieldWebsite').checked) searchFields.push('website');
-            if (document.getElementById('bizFieldTicker') && document.getElementById('bizFieldTicker').checked) searchFields.push('ticker');
-            if (document.getElementById('bizFieldLinkedin') && document.getElementById('bizFieldLinkedin').checked) searchFields.push('profile');
-
-            if (searchFields.length === 0) {
-                setStepCompleted(stepId, false);
-                showOutput(stepId, 'Error: Please select at least one search field.');
-                return;
-            }
+            const searchFields = ['name', 'location'];
 
             try {
                 const response = await fetch('/api/biz/step2', {
