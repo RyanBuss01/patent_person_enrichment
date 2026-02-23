@@ -2200,10 +2200,13 @@
                     <h3>Business CSV Exports</h3>
                     <div class="export-actions">
                         <button class="btn btn-success" onclick="exportBizNewEnrichments()">
-                            New Enrichments
+                            New
                         </button>
                         <button class="btn btn-primary" onclick="exportBizNewAndExisting()">
-                            New + Existing
+                            New And Existing
+                        </button>
+                        <button class="btn btn-secondary" onclick="exportBizRaw()">
+                            Raw
                         </button>
                     </div>
                 </div>
@@ -5115,6 +5118,9 @@
         }
         function exportBizNewAndExisting() {
             window.location.href = '/api/biz/export/new-and-existing';
+        }
+        function exportBizRaw() {
+            window.location.href = '/api/biz/export/raw';
         }
 
         // ============================================================

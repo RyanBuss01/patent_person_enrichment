@@ -3477,6 +3477,53 @@ app.get('/api/biz/export/new-and-existing', async (req, res) => {
     }
 });
 
+// Raw: straight SELECT * from enriched_companies
+app.get('/api/biz/export/raw', async (req, res) => {
+    let conn;
+    try {
+        const mysql = require('mysql2/promise');
+        conn = await mysql.createConnection({
+            host: process.env.DB_HOST || 'localhost',
+            port: Number(process.env.DB_PORT || 3306),
+            database: process.env.DB_NAME || 'patent_data',
+            user: process.env.DB_USER || 'root',
+            password: process.env.DB_PASSWORD || 'password'
+        });
+
+        const [rows] = await conn.execute(
+            'SELECT id, company_name, city, state, country, trademark_number, legal_entity_type, enrichment_data, api_cost, enriched_at, created_at, updated_at FROM enriched_companies ORDER BY enriched_at DESC'
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'No enriched companies found in database.' });
+        }
+
+        const csvEsc = (val) => {
+            if (val === null || val === undefined) return '';
+            const s = typeof val === 'object' ? JSON.stringify(val) : String(val);
+            if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+            return s;
+        };
+
+        const headers = ['id', 'company_name', 'city', 'state', 'country', 'trademark_number', 'legal_entity_type', 'enrichment_data', 'api_cost', 'enriched_at', 'created_at', 'updated_at'];
+        let csv = headers.join(',') + '\n';
+        for (const row of rows) {
+            csv += headers.map(h => csvEsc(row[h])).join(',') + '\n';
+        }
+
+        console.log(`[export/raw] Exporting ${rows.length} rows from enriched_companies`);
+        res.setHeader('Content-Disposition', 'attachment; filename="enriched_companies_raw.csv"');
+        res.setHeader('Content-Type', 'text/csv');
+        res.send(csv);
+
+    } catch (err) {
+        console.error('[export/raw] Error:', err);
+        res.status(500).json({ error: 'Failed to export: ' + err.message });
+    } finally {
+        if (conn) await conn.end().catch(() => {});
+    }
+});
+
 // Company Search: synchronous PDL Company Search API call
 app.post('/api/biz/company-search', async (req, res) => {
     try {
