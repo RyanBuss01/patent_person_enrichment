@@ -3342,11 +3342,12 @@ app.get('/api/biz/sample/:step', (req, res) => {
 // New Enrichments only (from this run's CSV file)
 app.get('/api/biz/export/new-enrichments', (req, res) => {
     const filePath = path.join(__dirname, '..', 'output', 'business', 'enriched_companies.csv');
-    if (!fs.existsSync(filePath)) {
-        return res.status(404).json({ error: 'No enriched companies CSV available. Run Business Step 2 first.' });
-    }
     res.setHeader('Content-Disposition', 'attachment; filename="new_enrichments.csv"');
     res.setHeader('Content-Type', 'text/csv');
+    if (!fs.existsSync(filePath)) {
+        const emptyHeaders = 'trademark_number,original_name,match_score,original_address_1,original_address_2,original_city,original_state,original_zip,original_country,original_legal_entity_type,all_serial_numbers,all_registration_numbers,company_name,company_display_name,company_size,company_industry,company_website,company_linkedin_url,company_founded,company_type,company_ticker,company_location_locality,company_location_region,company_location_country,company_location_street_address,company_location_postal_code,company_employee_count,company_phone,company_description\n';
+        return res.send(emptyHeaders);
+    }
     fs.createReadStream(filePath).pipe(res);
 });
 
@@ -3382,7 +3383,8 @@ app.get('/api/biz/export/new-and-existing', async (req, res) => {
             port: Number(process.env.DB_PORT || 3306),
             database: process.env.DB_NAME || 'patent_data',
             user: process.env.DB_USER || 'root',
-            password: process.env.DB_PASSWORD || 'password'
+            password: process.env.DB_PASSWORD || 'password',
+            ssl: { rejectUnauthorized: false }
         });
 
         // Get all enriched companies that match any trademark in the current set
@@ -3396,10 +3398,6 @@ app.get('/api/biz/export/new-and-existing', async (req, res) => {
             const key = `${(r.company_name || '').trim().toLowerCase()}|${(r.city || '').trim().toLowerCase()}|${(r.state || '').trim().toLowerCase()}`;
             return tmKeySet.has(key);
         });
-
-        if (matched.length === 0) {
-            return res.status(404).json({ error: 'No enriched companies found matching current trademarks.' });
-        }
 
         // Build CSV
         const csvEsc = (val) => {
@@ -3487,16 +3485,13 @@ app.get('/api/biz/export/raw', async (req, res) => {
             port: Number(process.env.DB_PORT || 3306),
             database: process.env.DB_NAME || 'patent_data',
             user: process.env.DB_USER || 'root',
-            password: process.env.DB_PASSWORD || 'password'
+            password: process.env.DB_PASSWORD || 'password',
+            ssl: { rejectUnauthorized: false }
         });
 
         const [rows] = await conn.execute(
             'SELECT id, company_name, city, state, country, trademark_number, legal_entity_type, enrichment_data, api_cost, enriched_at, created_at, updated_at FROM enriched_companies ORDER BY enriched_at DESC'
         );
-
-        if (rows.length === 0) {
-            return res.status(404).json({ error: 'No enriched companies found in database.' });
-        }
 
         const csvEsc = (val) => {
             if (val === null || val === undefined) return '';
@@ -3744,7 +3739,8 @@ async function hydrateThreeFields(arr, label = 'hydrate_three_fields') {
             port: Number(process.env.DB_PORT || 3306),
             database: process.env.DB_NAME || 'patent_data',
             user: process.env.DB_USER || 'root',
-            password: process.env.DB_PASSWORD || 'password'
+            password: process.env.DB_PASSWORD || 'password',
+            ssl: { rejectUnauthorized: false }
         });
     } catch (e) {
         console.warn('[export] Could not connect to DB to hydrate (3 fields):', e.message);
