@@ -4,35 +4,108 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Patent Processing Pipeline</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
+        /* ============================================================
+           THEME VARIABLES
+           ============================================================ */
+        :root {
+            --bg-primary: #f8fafc;
+            --bg-secondary: #ffffff;
+            --bg-tertiary: #f1f5f9;
+            --bg-input: #ffffff;
+            --border: #e2e8f0;
+            --border-subtle: #f1f5f9;
+            --text-primary: #0f172a;
+            --text-secondary: #475569;
+            --text-muted: #64748b;
+            --accent: #0891b2;
+            --accent-hover: #0e7490;
+            --accent-subtle: rgba(8, 145, 178, 0.08);
+            --accent-text: #ffffff;
+            --success: #059669;
+            --success-subtle: rgba(5, 150, 105, 0.08);
+            --warning: #d97706;
+            --warning-subtle: rgba(217, 119, 6, 0.08);
+            --danger: #dc2626;
+            --danger-subtle: rgba(220, 38, 38, 0.06);
+            --surface-overlay: rgba(0, 0, 0, 0.5);
+            --terminal-bg: #1e293b;
+            --terminal-text: #e2e8f0;
+            --shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+            --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.08);
+            --radius: 8px;
+            --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Courier New', monospace;
+        }
+
+        [data-theme="dark"] {
+            --bg-primary: #0a0f14;
+            --bg-secondary: #111827;
+            --bg-tertiary: #1e293b;
+            --bg-input: #1e293b;
+            --border: #2d3748;
+            --border-subtle: #1e293b;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent: #00d4ff;
+            --accent-hover: #33dfff;
+            --accent-subtle: rgba(0, 212, 255, 0.12);
+            --accent-text: #0a0f14;
+            --success: #34d399;
+            --success-subtle: rgba(52, 211, 153, 0.12);
+            --warning: #fbbf24;
+            --warning-subtle: rgba(251, 191, 36, 0.12);
+            --danger: #f87171;
+            --danger-subtle: rgba(248, 113, 113, 0.12);
+            --surface-overlay: rgba(0, 0, 0, 0.7);
+            --terminal-bg: #0a0f14;
+            --terminal-text: #e2e8f0;
+            --shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+            --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.4);
+        }
+
+        /* ============================================================
+           BASE
+           ============================================================ */
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
-        
+
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: var(--font-sans);
+            background: var(--bg-primary);
+            color: var(--text-primary);
             min-height: 100vh;
             padding: 20px;
+            -webkit-font-smoothing: antialiased;
         }
-        
+
+        /* ============================================================
+           CONTAINER & HEADER
+           ============================================================ */
         .container {
             max-width: 1200px;
             margin: 0 auto;
-            background: white;
-            border-radius: 15px;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            background: var(--bg-secondary);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow-lg);
             overflow: hidden;
         }
-        
+
         .header {
-            background: linear-gradient(45deg, #2c3e50, #3498db);
-            color: white;
-            padding: 30px;
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            padding: 24px 30px;
             text-align: center;
             position: relative;
+            border-bottom: 2px solid var(--accent);
         }
 
         .header-actions {
@@ -42,23 +115,53 @@
             margin-bottom: 12px;
         }
 
-        .btn-info {
-            background: #17a2b8;
-            color: white;
+        .header h1 {
+            font-size: 1.8em;
+            font-weight: 600;
+            margin-bottom: 6px;
+            letter-spacing: -0.02em;
         }
 
-        .btn-info:hover {
-            background: #138496;
-            transform: translateY(-2px);
+        .header p {
+            font-size: 0.95em;
+            color: var(--text-secondary);
         }
 
+        /* Theme toggle */
+        .theme-toggle {
+            position: absolute;
+            top: 16px;
+            right: 20px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            font-size: 1.1em;
+            transition: all 0.2s ease;
+            color: var(--text-secondary);
+        }
+
+        .theme-toggle:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        /* ============================================================
+           DEV BANNER
+           ============================================================ */
         .dev-banner {
-            background: #fff4e6;
-            color: #d35400;
-            padding: 12px 20px;
+            background: var(--warning-subtle);
+            color: var(--warning);
+            padding: 10px 20px;
             text-align: center;
             font-weight: 600;
-            border-bottom: 2px solid #e67e22;
+            font-size: 0.9em;
+            border-bottom: 1px solid var(--border);
         }
 
         .dev-banner span {
@@ -67,172 +170,187 @@
             font-weight: 500;
             margin-top: 3px;
         }
-        
-        .header h1 {
-            font-size: 2.5em;
-            margin-bottom: 10px;
-        }
-        
-        .header p {
-            font-size: 1.1em;
-            opacity: 0.9;
-        }
-        
+
+        /* ============================================================
+           CONTENT
+           ============================================================ */
         .content {
             padding: 30px;
         }
-        
+
+        /* ============================================================
+           STATUS BAR & GRID
+           ============================================================ */
         .status-bar {
-            background: #f8f9fa;
+            background: var(--bg-tertiary);
             padding: 20px;
-            border-radius: 10px;
+            border-radius: var(--radius);
             margin-bottom: 30px;
-            border-left: 5px solid #3498db;
+            border: 1px solid var(--border);
         }
-        
+
+        .status-bar h3 {
+            color: var(--text-primary);
+            font-weight: 600;
+            font-size: 1em;
+        }
+
         .status-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
+            gap: 12px;
             margin-top: 15px;
         }
-        
+
         .status-item {
-            background: white;
-            padding: 15px;
-            border-radius: 8px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            background: var(--bg-secondary);
+            padding: 14px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
         }
-        
+
         .status-item h4 {
-            color: #2c3e50;
-            margin-bottom: 8px;
+            color: var(--text-secondary);
+            font-size: 0.8em;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 6px;
         }
-        
+
         .status-item .count {
             font-size: 1.5em;
-            font-weight: bold;
-            color: #3498db;
+            font-weight: 700;
+            color: var(--accent);
         }
-        
+
+        /* ============================================================
+           PIPELINE STEPS
+           ============================================================ */
         .pipeline-steps {
             display: grid;
-            gap: 25px;
+            gap: 20px;
         }
 
         .pipeline-link {
             display: flex;
             justify-content: flex-start;
-            margin-bottom: 20px;
-            gap: 12px;
+            margin-bottom: 16px;
+            gap: 10px;
             flex-wrap: wrap;
         }
-        
+
         .step {
-            background: #f8f9fa;
-            border-radius: 12px;
-            padding: 25px;
-            border-left: 5px solid #ddd;
-            transition: all 0.3s ease;
+            background: var(--bg-tertiary);
+            border-radius: var(--radius);
+            padding: 24px;
+            border: 1px solid var(--border);
+            border-top: 2px solid var(--border);
+            transition: border-color 0.2s ease;
         }
-        
+
         .step.step-coming-soon {
-            background: #f8f9fa;
-            border-left-color: #bdc3c7;
-            opacity: 0.7;
+            opacity: 0.5;
         }
-        
+
         .step.step-coming-soon .step-title {
-            color: #7f8c8d;
+            color: var(--text-muted);
         }
-        
+
         .step.step-coming-soon .step-description {
-            color: #95a5a6;
+            color: var(--text-muted);
         }
-        
+
         .status-coming-soon {
-            background: #ecf0f1;
-            color: #7f8c8d;
+            background: var(--bg-tertiary);
+            color: var(--text-muted);
             font-style: italic;
         }
-        
+
         .step.completed {
-            border-left-color: #27ae60;
-            background: #f0f8f5;
+            border-top-color: var(--success);
         }
 
         .step.running {
-            border-left-color: #f39c12;
-            background: #fef9e7;
+            border-top-color: var(--warning);
         }
 
         .step.error {
-            border-left-color: #c0392b;
-            background: #fdecea;
+            border-top-color: var(--danger);
         }
-        
+
         .step-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 15px;
+            margin-bottom: 12px;
         }
-        
+
         .step-title {
-            font-size: 1.3em;
-            font-weight: bold;
-            color: #2c3e50;
+            font-size: 1.1em;
+            font-weight: 600;
+            color: var(--text-primary);
+            letter-spacing: -0.01em;
         }
-        
+
         .step-status {
-            padding: 5px 15px;
-            border-radius: 20px;
-            font-size: 0.9em;
-            font-weight: bold;
+            padding: 4px 14px;
+            border-radius: 999px;
+            font-size: 0.8em;
+            font-weight: 600;
+            letter-spacing: 0.02em;
         }
-        
+
         .status-ready {
-            background: #e8f4f8;
-            color: #2980b9;
+            background: var(--accent-subtle);
+            color: var(--accent);
+            border: 1px solid var(--accent);
         }
-        
+
         .status-completed {
-            background: #d5f4e6;
-            color: #27ae60;
+            background: var(--success-subtle);
+            color: var(--success);
+            border: 1px solid var(--success);
         }
 
         .status-running {
-            background: #fef3cd;
-            color: #f39c12;
+            background: var(--warning-subtle);
+            color: var(--warning);
+            border: 1px solid var(--warning);
         }
 
         .status-error {
-            background: #f8d7da;
-            color: #c0392b;
+            background: var(--danger-subtle);
+            color: var(--danger);
+            border: 1px solid var(--danger);
         }
-        
+
         .step-description {
-            color: #666;
-            margin-bottom: 20px;
+            color: var(--text-secondary);
+            margin-bottom: 18px;
             line-height: 1.6;
+            font-size: 0.9em;
         }
-        
+
         .step-actions {
             display: flex;
-            gap: 15px;
+            gap: 10px;
             align-items: center;
             flex-wrap: wrap;
         }
 
+        /* ============================================================
+           DEV MODE PANEL
+           ============================================================ */
         .dev-mode-panel {
-            margin-top: 15px;
+            margin-top: 14px;
             padding: 14px 18px;
-            border: 2px dashed #e67e22;
-            border-radius: 10px;
-            background: #fff7ec;
+            border: 1px dashed var(--warning);
+            border-radius: var(--radius);
+            background: var(--warning-subtle);
             display: flex;
             flex-wrap: wrap;
-            gap: 18px;
+            gap: 14px;
             align-items: flex-start;
         }
 
@@ -243,109 +361,136 @@
         }
 
         .dev-mode-panel .field-group label {
-            color: #d35400;
+            color: var(--warning);
         }
-        
+
+        /* ============================================================
+           BUTTONS
+           ============================================================ */
         .btn {
-            padding: 12px 25px;
-            border: none;
-            border-radius: 6px;
+            padding: 10px 20px;
+            border: 1px solid transparent;
+            border-radius: var(--radius);
             cursor: pointer;
-            font-weight: bold;
+            font-weight: 600;
             text-decoration: none;
             display: inline-block;
-            transition: all 0.3s ease;
-            font-size: 0.95em;
+            transition: all 0.15s ease;
+            font-size: 0.88em;
+            font-family: var(--font-sans);
+            letter-spacing: 0.01em;
         }
-        
+
         .btn-primary {
-            background: #3498db;
-            color: white;
+            background: var(--accent);
+            color: var(--accent-text);
+            border-color: var(--accent);
         }
-        
+
         .btn-primary:hover {
-            background: #2980b9;
-            transform: translateY(-2px);
+            background: var(--accent-hover);
+            border-color: var(--accent-hover);
         }
-        
+
         .btn-test {
-            background: #f39c12;
-            color: white;
+            background: var(--warning);
+            color: #1a1a1a;
+            border-color: var(--warning);
         }
-        
+
         .btn-test:hover {
-            background: #e67e22;
-            transform: translateY(-2px);
+            filter: brightness(1.1);
         }
-        
+
         .btn-success {
-            background: #28a745;
-            color: white;
+            background: var(--success);
+            color: #ffffff;
+            border-color: var(--success);
         }
+
         .btn-success:hover {
-            background: #218838;
-            transform: translateY(-2px);
+            filter: brightness(1.1);
         }
 
         .btn-danger {
-            background: #dc3545;
-            color: white;
+            background: var(--danger);
+            color: #ffffff;
+            border-color: var(--danger);
         }
 
         .btn-danger:hover {
-            background: #b02a37;
-            transform: translateY(-2px);
+            filter: brightness(1.1);
         }
 
         .btn-secondary {
-            background: #95a5a6;
-            color: white;
+            background: transparent;
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
         }
-        
+
         .btn-secondary:hover {
-            background: #7f8c8d;
+            border-color: var(--accent);
+            color: var(--accent);
+            background: var(--accent-subtle);
         }
-        
+
+        .btn-info {
+            background: var(--accent-subtle);
+            color: var(--accent);
+            border: 1px solid var(--accent);
+        }
+
+        .btn-info:hover {
+            background: var(--accent);
+            color: var(--accent-text);
+        }
+
         .btn:disabled {
-            background: #bdc3c7;
+            background: var(--bg-tertiary);
+            color: var(--text-muted);
+            border-color: var(--border);
             cursor: not-allowed;
-            transform: none;
+            filter: none;
         }
-        
+
+        /* ============================================================
+           FILE INFO & STATS
+           ============================================================ */
         .file-info {
-            background: white;
+            background: var(--bg-secondary);
             padding: 15px;
-            border-radius: 8px;
+            border-radius: var(--radius);
             margin-top: 15px;
-            border: 1px solid #ecf0f1;
+            border: 1px solid var(--border);
         }
-        
+
         .file-info h4 {
-            color: #2c3e50;
+            color: var(--text-primary);
             margin-bottom: 10px;
+            font-weight: 600;
+            font-size: 0.95em;
         }
-        
+
         .file-stats {
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-            font-size: 0.9em;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 10px;
+            font-size: 0.88em;
         }
-        
+
         .file-stat {
             display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
+            flex-direction: column;
+            gap: 6px;
             padding: 10px 12px;
-            border: 1px solid #e1e9f3;
-            border-radius: 8px;
-            background: #f8fbff;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--bg-tertiary);
         }
 
         .file-key {
             font-weight: 600;
-            color: #2c3e50;
-            flex: 1 1 100%;
+            color: var(--text-primary);
         }
 
         .file-details {
@@ -356,235 +501,657 @@
         }
 
         .file-chip {
-            background: #ecf5ff;
-            color: #1f4f82;
+            background: var(--accent-subtle);
+            color: var(--accent);
             border-radius: 999px;
-            padding: 3px 10px;
+            padding: 2px 10px;
             line-height: 1.4;
+            font-size: 0.85em;
+            font-weight: 500;
         }
-        
+
+        /* ============================================================
+           TERMINAL / OUTPUT
+           ============================================================ */
+        /* Collapsible sections */
+        .collapsible {
+            margin-top: 12px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+        }
+
+        .collapsible summary {
+            padding: 10px 14px;
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+            font-weight: 600;
+            font-size: 0.85em;
+            cursor: pointer;
+            user-select: none;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .collapsible summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .collapsible summary::before {
+            content: '▸';
+            font-size: 0.9em;
+            transition: transform 0.15s ease;
+            color: var(--text-muted);
+        }
+
+        .collapsible[open] summary::before {
+            transform: rotate(90deg);
+        }
+
+        .collapsible summary:hover {
+            color: var(--accent);
+        }
+
+        .collapsible .output-section {
+            margin-top: 0;
+            border: none;
+            border-radius: 0;
+        }
+
+        .collapsible .sample-data {
+            margin-top: 0;
+            border: none;
+            border-radius: 0;
+        }
+
         .output-section {
-            margin-top: 20px;
-            padding: 15px;
-            background: #2c3e50;
-            color: #ecf0f1;
-            border-radius: 8px;
-            font-family: 'Courier New', monospace;
+            margin-top: 16px;
+            padding: 16px;
+            background: var(--terminal-bg);
+            color: var(--terminal-text);
+            border-radius: var(--radius);
+            font-family: var(--font-mono);
             max-height: 300px;
             overflow-y: auto;
             white-space: pre-wrap;
-            font-size: 0.85em;
-            line-height: 1.4;
+            font-size: 0.82em;
+            line-height: 1.5;
+            border: 1px solid var(--border);
         }
-        
+
         .sample-data {
-            background: #f8f9fa;
+            background: var(--bg-tertiary);
             padding: 15px;
-            border-radius: 8px;
+            border-radius: var(--radius);
             margin-top: 15px;
             max-height: 200px;
             overflow-y: auto;
-        }
-        
-        .sample-data pre {
-            font-size: 0.8em;
-            color: #2c3e50;
+            border: 1px solid var(--border);
         }
 
-        /* Cost estimate cards */
+        .sample-data pre {
+            font-size: 0.8em;
+            color: var(--text-primary);
+            font-family: var(--font-mono);
+        }
+
+        /* ============================================================
+           COST ESTIMATE
+           ============================================================ */
         .cost-estimate {
             display: flex;
             flex-direction: column;
             gap: 8px;
             margin-top: 6px;
         }
+
         .cost-card {
-            background: #ffffff;
-            border-radius: 8px;
-            padding: 8px 10px;
-            border-left: 4px solid #ccc;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+            background: var(--bg-secondary);
+            border-radius: var(--radius);
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--border);
             max-width: 350px;
         }
-        .cost-card.max { background: #e8f4fb; border-left-color: #3498db; }
-        .cost-card.est { background: #ecf9f1; border-left-color: #27ae60; }
-        .cost-line { display:flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-        .cost-title { font-weight: 400; color: #2c3e50; margin: 0; font-size: inherit; }
-        .cost-value { font-size: inherit; font-weight: 700; color: #2c3e50; }
-        .cost-note { margin-top: 2px; font-size: 0.85em; color: #6c757d; }
-        .people-pill { display:inline-block; margin-top: 4px; background:#f1f3f5; color:#495057; border-radius:999px; padding:3px 8px; font-weight:600; font-size:0.9em; }
 
+        .cost-card.max {
+            border-left-color: var(--accent);
+            background: var(--accent-subtle);
+        }
+
+        .cost-card.est {
+            border-left-color: var(--success);
+            background: var(--success-subtle);
+        }
+
+        .cost-line {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 12px;
+        }
+
+        .cost-title {
+            font-weight: 400;
+            color: var(--text-secondary);
+            margin: 0;
+            font-size: inherit;
+        }
+
+        .cost-value {
+            font-size: inherit;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .cost-note {
+            margin-top: 2px;
+            font-size: 0.85em;
+            color: var(--text-muted);
+        }
+
+        .people-pill {
+            display: inline-block;
+            margin-top: 4px;
+            background: var(--accent-subtle);
+            color: var(--accent);
+            border-radius: 999px;
+            padding: 3px 10px;
+            font-weight: 600;
+            font-size: 0.85em;
+        }
+
+        /* ============================================================
+           PROGRESS BAR
+           ============================================================ */
         .progress-bar {
-            background: #ecf0f1;
-            border-radius: 10px;
+            background: var(--bg-tertiary);
+            border-radius: 999px;
             overflow: hidden;
-            height: 6px;
+            height: 4px;
             margin-top: 10px;
+            border: 1px solid var(--border);
         }
 
         .progress-fill {
-            background: linear-gradient(90deg, #3498db, #2ecc71);
+            background: var(--accent);
             height: 100%;
             transition: width 0.3s ease;
+            box-shadow: 0 0 8px var(--accent);
             animation: pulse 2s ease-in-out infinite alternate;
         }
 
         @keyframes pulse {
-            0% { opacity: 0.6; }
+            0% { opacity: 0.7; }
             100% { opacity: 1; }
         }
 
         .elapsed-time {
-            font-size: 0.8em;
-            color: #7f8c8d;
+            font-size: 0.78em;
+            color: var(--text-muted);
             margin-top: 5px;
+            font-family: var(--font-mono);
         }
-        
-        /* Download Configuration Styles */
+
+        /* ============================================================
+           DOWNLOAD CONFIG
+           ============================================================ */
         .download-config {
-            background: #e8f4f8;
-            border: 2px solid #3498db;
-            border-radius: 10px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--accent);
+            border-radius: var(--radius);
             padding: 20px;
-            margin-top: 20px;
+            margin-top: 16px;
         }
-        
+
         .config-header {
-            color: #2c3e50;
-            font-size: 1.1em;
-            font-weight: bold;
+            color: var(--text-primary);
+            font-size: 1em;
+            font-weight: 600;
             margin-bottom: 15px;
         }
-        
+
         .config-modes {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            margin-bottom: 20px;
+            gap: 12px;
+            margin-bottom: 16px;
         }
-        
+
         .mode-option {
-            background: white;
-            padding: 15px;
-            border-radius: 8px;
-            border: 2px solid #ecf0f1;
+            background: var(--bg-tertiary);
+            padding: 14px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
             cursor: pointer;
-            transition: all 0.3s ease;
+            transition: all 0.15s ease;
         }
-        
+
         .mode-option.active {
-            border-color: #3498db;
-            background: #f8fafa;
+            border-color: var(--accent);
+            background: var(--accent-subtle);
         }
-        
+
         .mode-option h4 {
-            color: #2c3e50;
-            margin-bottom: 8px;
+            color: var(--text-primary);
+            margin-bottom: 6px;
+            font-size: 0.95em;
         }
-        
+
         .mode-option p {
-            color: #666;
-            font-size: 0.9em;
+            color: var(--text-secondary);
+            font-size: 0.85em;
         }
-        
+
         .config-fields {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
+            gap: 12px;
             margin-bottom: 15px;
         }
-        
+
         .field-group {
             display: flex;
             flex-direction: column;
         }
-        
+
         .field-group label {
-            color: #2c3e50;
-            font-weight: bold;
+            color: var(--text-secondary);
+            font-weight: 600;
             margin-bottom: 5px;
-            font-size: 0.9em;
+            font-size: 0.82em;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
         }
-        
+
         .field-group input, .field-group select {
             padding: 8px 12px;
-            border: 2px solid #ecf0f1;
-            border-radius: 6px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
             font-size: 0.9em;
+            background: var(--bg-input);
+            color: var(--text-primary);
+            font-family: var(--font-sans);
+            transition: border-color 0.15s ease, box-shadow 0.15s ease;
         }
-        
+
         .field-group input:focus, .field-group select:focus {
             outline: none;
-            border-color: #3498db;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-subtle);
         }
-        
-        /* Verification Interface Styles */
+
+        /* ============================================================
+           VERIFICATION INTERFACE
+           ============================================================ */
         .verification-interface {
-            background: #fff3cd;
-            border: 2px solid #ffc107;
-            border-radius: 10px;
+            background: var(--warning-subtle);
+            border: 1px solid var(--warning);
+            border-radius: var(--radius);
             padding: 20px;
-            margin-top: 20px;
+            margin-top: 16px;
         }
+
+        .verification-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .verification-header h4 {
+            color: var(--warning);
+            font-size: 1.1em;
+            margin: 0;
+            font-weight: 600;
+        }
+
+        .verification-counter {
+            background: var(--warning-subtle);
+            color: var(--warning);
+            border: 1px solid var(--warning);
+            padding: 4px 14px;
+            border-radius: 999px;
+            font-weight: 600;
+            font-size: 0.82em;
+        }
+
+        .verification-tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .tab-button {
+            padding: 7px 12px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.85em;
+            font-family: var(--font-sans);
+            transition: all 0.15s ease;
+        }
+
+        .tab-button.active {
+            background: var(--accent-subtle);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .tab-button:disabled {
+            background: var(--bg-tertiary);
+            color: var(--text-muted);
+            cursor: not-allowed;
+        }
+
+        .person-card {
+            background: var(--bg-secondary);
+            border-radius: var(--radius);
+            padding: 20px;
+            border: 1px solid var(--border);
+            margin-bottom: 12px;
+        }
+
+        .person-info {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        .person-details {
+            background: var(--bg-tertiary);
+            padding: 14px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+        }
+
+        .person-details h5 {
+            color: var(--text-primary);
+            margin-bottom: 10px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 6px;
+            font-size: 0.9em;
+            font-weight: 600;
+        }
+
+        .detail-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 6px;
+            font-size: 0.85em;
+        }
+
+        .detail-label {
+            font-weight: 600;
+            color: var(--text-muted);
+        }
+
+        .match-candidates {
+            background: var(--accent-subtle);
+            padding: 14px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+        }
+
+        .match-candidate {
+            background: var(--bg-secondary);
+            padding: 10px;
+            border-radius: var(--radius);
+            margin-bottom: 8px;
+            border-left: 3px solid var(--accent);
+        }
+
+        .match-score {
+            font-weight: 700;
+            color: var(--accent);
+            font-size: 0.85em;
+        }
+
+        .verification-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+
+        .btn-accept {
+            background: var(--success);
+            color: #ffffff;
+            padding: 8px 18px;
+            border: none;
+            border-radius: var(--radius);
+            cursor: pointer;
+            font-weight: 600;
+            font-family: var(--font-sans);
+            transition: filter 0.15s ease;
+        }
+
+        .btn-accept:hover {
+            filter: brightness(1.1);
+        }
+
+        .btn-reject {
+            background: var(--danger);
+            color: #ffffff;
+            padding: 8px 18px;
+            border: none;
+            border-radius: var(--radius);
+            cursor: pointer;
+            font-weight: 600;
+            font-family: var(--font-sans);
+            transition: filter 0.15s ease;
+        }
+
+        .btn-reject:hover {
+            filter: brightness(1.1);
+        }
+
+        .btn-skip {
+            background: transparent;
+            color: var(--text-secondary);
+            padding: 8px 18px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            cursor: pointer;
+            font-weight: 600;
+            font-family: var(--font-sans);
+            transition: all 0.15s ease;
+        }
+
+        .btn-skip:hover {
+            border-color: var(--text-secondary);
+        }
+
+        .btn-update-db {
+            background: var(--success);
+            color: #ffffff;
+            padding: 8px 18px;
+            border: none;
+            border-radius: var(--radius);
+            cursor: pointer;
+            font-weight: 600;
+            font-family: var(--font-sans);
+            transition: filter 0.15s ease;
+        }
+
+        .btn-update-db:hover {
+            filter: brightness(0.9);
+        }
+
+        .verification-complete {
+            background: var(--success-subtle);
+            border: 1px solid var(--success);
+            border-radius: var(--radius);
+            padding: 20px;
+            text-align: center;
+            color: var(--success);
+        }
+
+        .verification-summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 12px;
+            margin-top: 15px;
+        }
+
+        .summary-item {
+            background: var(--bg-secondary);
+            padding: 14px;
+            border-radius: var(--radius);
+            text-align: center;
+            border: 1px solid var(--border);
+        }
+
+        .summary-count {
+            font-size: 1.5em;
+            font-weight: 700;
+            color: var(--success);
+        }
+
+        /* ============================================================
+           BULK OVERLAY
+           ============================================================ */
         .bulk-overlay {
             position: fixed;
             inset: 0;
-            background: rgba(0,0,0,0.5);
+            background: var(--surface-overlay);
+            backdrop-filter: blur(4px);
             display: flex;
             align-items: center;
             justify-content: center;
             z-index: 9999;
         }
+
         .bulk-overlay.hidden { display: none; }
+
         .bulk-overlay-content {
-            background: #ffffff;
+            background: var(--bg-secondary);
             max-width: 860px;
             width: 92%;
             max-height: 75vh;
-            border-radius: 12px;
-            box-shadow: 0 12px 40px rgba(0,0,0,0.25);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow-lg);
             display: flex;
             flex-direction: column;
             font-size: 0.85em;
         }
+
         .bulk-overlay-header {
             padding: 14px 20px;
-            border-bottom: 1px solid #e9ecef;
+            border-bottom: 1px solid var(--border);
             display: flex;
             justify-content: space-between;
             align-items: center;
         }
+
         .bulk-overlay-header h3 {
             margin: 0;
-            font-size: 1.2em;
-            font-weight: 500;
-            color: #2c3e50;
+            font-size: 1.1em;
+            font-weight: 600;
+            color: var(--text-primary);
         }
+
         .bulk-overlay-body {
             padding: 0 20px 20px;
             overflow-y: auto;
         }
+
         .bulk-overlay-table {
             width: 100%;
             border-collapse: collapse;
         }
+
         .bulk-overlay-table th,
         .bulk-overlay-table td {
-            border-bottom: 1px solid #f1f3f5;
+            border-bottom: 1px solid var(--border);
             padding: 9px 8px;
             vertical-align: middle;
-            color: #495057;
-        }
-        .bulk-overlay-table th {
-            background: #f8f9fa;
-            text-align: left;
-            font-weight: 500;
+            color: var(--text-secondary);
         }
 
+        .bulk-overlay-table th {
+            background: var(--bg-tertiary);
+            text-align: left;
+            font-weight: 600;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            color: var(--text-muted);
+        }
+
+        .bulk-overlay-table tbody tr:hover {
+            background: var(--accent-subtle);
+        }
+
+        .bulk-name {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .bulk-name span {
+            line-height: 1.2;
+        }
+
+        .bulk-meta {
+            font-size: 0.72em;
+            color: var(--text-muted);
+        }
+
+        .disabled-note {
+            font-size: 0.72em;
+            color: var(--danger);
+        }
+
+        .bulk-overlay-footer {
+            padding: 14px 20px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .bulk-selection-count {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .bulk-transition {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text-primary);
+        }
+
+        .bulk-transition span {
+            line-height: 1.2;
+        }
+
+        .bulk-transition .arrow {
+            color: var(--text-muted);
+            font-size: 1.1em;
+        }
+
+        .bulk-check {
+            text-align: right;
+            width: 90px;
+        }
+
+        /* ============================================================
+           DOCS OVERLAY
+           ============================================================ */
         .docs-overlay {
             position: fixed;
             inset: 0;
-            background: rgba(17, 24, 39, 0.75);
+            background: var(--surface-overlay);
+            backdrop-filter: blur(4px);
             display: flex;
             justify-content: center;
             align-items: center;
@@ -597,11 +1164,12 @@
         }
 
         .docs-overlay-content {
-            background: #ffffff;
+            background: var(--bg-secondary);
             width: min(1000px, 92vw);
             height: min(90vh, 900px);
-            border-radius: 14px;
-            box-shadow: 0 25px 60px rgba(0, 0, 0, 0.35);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow-lg);
             display: flex;
             flex-direction: column;
             overflow: hidden;
@@ -611,27 +1179,27 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 16px 20px;
-            background: #f5f7fa;
-            border-bottom: 1px solid #e1e5eb;
+            padding: 14px 20px;
+            background: var(--bg-tertiary);
+            border-bottom: 1px solid var(--border);
         }
 
         .docs-overlay-header h3 {
             margin: 0;
-            color: #1f2933;
-            font-size: 1.1em;
+            color: var(--text-primary);
+            font-size: 1em;
             font-weight: 600;
         }
 
         .docs-overlay-actions {
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 8px;
         }
 
         .docs-overlay-body {
             flex: 1;
-            background: #1f2933;
+            background: var(--terminal-bg);
         }
 
         .docs-overlay-body iframe {
@@ -640,285 +1208,245 @@
             border: none;
             background: white;
         }
-        .bulk-overlay-table tbody tr:hover {
-            background: #fdf0d5;
+
+        /* ============================================================
+           COMPANY SEARCH OVERLAY
+           ============================================================ */
+        .cosearch-overlay {
+            position: fixed;
+            inset: 0;
+            background: var(--surface-overlay);
+            backdrop-filter: blur(4px);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 30px 20px;
+            z-index: 10000;
         }
-        .bulk-name {
+
+        .cosearch-overlay.hidden {
+            display: none;
+        }
+
+        .cosearch-overlay-content {
+            background: var(--bg-secondary);
+            width: min(1100px, 95vw);
+            max-height: 90vh;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow-lg);
             display: flex;
             flex-direction: column;
-            gap: 2px;
+            overflow: hidden;
         }
-        .bulk-name span {
-            line-height: 1.2;
-        }
-        .bulk-meta {
-            font-size: 0.72em;
-            color: #adb5bd;
-        }
-        .disabled-note {
-            font-size: 0.72em;
-            color: #c0392b;
-        }
-        .bulk-overlay-footer {
+
+        .cosearch-overlay-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
             padding: 14px 20px;
-            border-top: 1px solid #e9ecef;
+            background: var(--bg-tertiary);
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+
+        .cosearch-overlay-header h3 {
+            margin: 0;
+            color: var(--text-primary);
+            font-size: 1.1em;
+            font-weight: 600;
+        }
+
+        .cosearch-overlay-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        .cosearch-form {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 14px;
+            margin-bottom: 16px;
+        }
+
+        .cosearch-form .field-group {
+            margin: 0;
+        }
+
+        .cosearch-actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+        }
+
+        .cosearch-status {
+            font-size: 0.85em;
+            color: var(--text-muted);
+            margin-left: 8px;
+        }
+
+        .cosearch-status.error {
+            color: var(--danger);
+        }
+
+        .cosearch-results-wrap {
+            margin-top: 12px;
+            overflow-x: auto;
+        }
+
+        .cosearch-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.82em;
+        }
+
+        .cosearch-table th,
+        .cosearch-table td {
+            border-bottom: 1px solid var(--border);
+            padding: 8px 10px;
+            vertical-align: top;
+            color: var(--text-secondary);
+            text-align: left;
+            white-space: nowrap;
+        }
+
+        .cosearch-table th {
+            background: var(--bg-tertiary);
+            font-weight: 600;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            color: var(--text-muted);
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+
+        .cosearch-table tbody tr:hover {
+            background: var(--accent-subtle);
+        }
+
+        .cosearch-table td.wrap-cell {
+            white-space: normal;
+            max-width: 250px;
+            word-break: break-word;
+        }
+
+        .cosearch-footer {
+            padding: 12px 20px;
+            border-top: 1px solid var(--border);
             display: flex;
             justify-content: space-between;
             align-items: center;
             gap: 12px;
-        }
-        .bulk-selection-count {
-            font-weight: 500;
-            color: #2c3e50;
-        }
-        .bulk-transition {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            color: #343a40;
-        }
-        .bulk-transition span {
-            line-height: 1.2;
-        }
-        .bulk-transition .arrow {
-            color: #adb5bd;
-            font-size: 1.1em;
-        }
-        .bulk-check {
-            text-align: right;
-            width: 90px;
-        }
-        .verification-tabs {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 12px;
-        }
-        .tab-button {
-            padding: 8px 12px;
-            border-radius: 6px;
-            border: 1px solid #ddd;
-            background: #f8f9fa;
-            cursor: pointer;
-            font-weight: 600;
-        }
-        .tab-button.active { background: #e2e6ea; border-color: #ced4da; }
-        .tab-button:disabled { background: #f1f3f5; color: #adb5bd; cursor: not-allowed; }
-        
-        .verification-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 20px;
-        }
-        
-        .verification-header h4 {
-            color: #856404;
-            font-size: 1.2em;
-            margin: 0;
-        }
-        
-        .verification-counter {
-            background: #ffc107;
-            color: #856404;
-            padding: 5px 15px;
-            border-radius: 20px;
-            font-weight: bold;
-            font-size: 0.9em;
-        }
-        
-        .person-card {
-            background: white;
-            border-radius: 8px;
-            padding: 20px;
-            border: 1px solid #dee2e6;
-            margin-bottom: 15px;
-        }
-        
-        .person-info {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            margin-bottom: 20px;
-        }
-        
-        .person-details {
-            background: #f8f9fa;
-            padding: 15px;
-            border-radius: 6px;
-        }
-        
-        .person-details h5 {
-            color: #2c3e50;
-            margin-bottom: 10px;
-            border-bottom: 2px solid #e9ecef;
-            padding-bottom: 5px;
-        }
-        
-        .detail-row {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 8px;
-            font-size: 0.9em;
-        }
-        
-        .detail-label {
-            font-weight: bold;
-            color: #6c757d;
-        }
-        
-        .match-candidates {
-            background: #e8f4f8;
-            padding: 15px;
-            border-radius: 6px;
-        }
-        
-        .match-candidate {
-            background: white;
-            padding: 10px;
-            border-radius: 4px;
-            margin-bottom: 10px;
-            border-left: 4px solid #3498db;
-        }
-        
-        .match-score {
-            font-weight: bold;
-            color: #3498db;
-            font-size: 0.9em;
-        }
-        
-        .verification-actions {
-            display: flex;
-            gap: 15px;
-            justify-content: center;
-        }
-        
-        .btn-accept {
-            background: #28a745;
-            color: white;
-            padding: 10px 20px;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
-            font-weight: bold;
-        }
-        
-        .btn-accept:hover {
-            background: #218838;
-        }
-        
-        .btn-reject {
-            background: #dc3545;
-            color: white;
-            padding: 10px 20px;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
-            font-weight: bold;
-        }
-        
-        .btn-reject:hover {
-            background: #c82333;
-        }
-        
-        .btn-skip {
-            background: #6c757d;
-            color: white;
-            padding: 10px 20px;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
-            font-weight: bold;
-        }
-        
-        .btn-skip:hover {
-            background: #5a6268;
+            flex-shrink: 0;
+            background: var(--bg-tertiary);
         }
 
-        .btn-update-db {
-            background: #14532d; /* dark green */
-            color: #ffffff;
-            padding: 10px 20px;
+        .cosearch-footer-info {
+            font-size: 0.85em;
+            color: var(--text-muted);
+        }
+
+        .cosearch-footer-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        /* ============================================================
+           PIPELINE TABS
+           ============================================================ */
+        .pipeline-tabs {
+            display: flex;
+            gap: 0;
+            margin-bottom: 25px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .pipeline-tab {
+            padding: 12px 28px;
             border: none;
-            border-radius: 6px;
+            background: transparent;
+            color: var(--text-muted);
+            font-size: 0.95em;
+            font-weight: 600;
             cursor: pointer;
-            font-weight: bold;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -1px;
+            transition: all 0.15s ease;
+            font-family: var(--font-sans);
         }
-        .btn-update-db:hover {
-            background: #0f3f22;
+
+        .pipeline-tab.active {
+            color: var(--accent);
+            border-bottom-color: var(--accent);
         }
-        
-        .verification-complete {
-            background: #d4edda;
-            border: 2px solid #c3e6cb;
-            border-radius: 10px;
-            padding: 20px;
-            text-align: center;
-            color: #155724;
+
+        .pipeline-tab:hover:not(.active) {
+            color: var(--text-secondary);
         }
-        
-        .verification-summary {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 15px;
-            margin-top: 15px;
-        }
-        
-        .summary-item {
-            background: white;
-            padding: 15px;
-            border-radius: 6px;
-            text-align: center;
-        }
-        
-        .summary-count {
-            font-size: 1.5em;
-            font-weight: bold;
-            color: #28a745;
-        }
-        
-        .loading {
-            display: inline-block;
-            width: 20px;
-            height: 20px;
-            border: 3px solid #f3f3f3;
-            border-top: 3px solid #3498db;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-        }
-        
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-        
-        .hidden {
+
+        .pipeline-section {
             display: none;
         }
-        /* Temporarily hide Steps 3–5 without removing markup */
-        .step-coming-soon#step3,
-        .step-coming-soon#step4,
-        .step-coming-soon#step5 {
-            display: none !important;
+
+        .pipeline-section.active {
+            display: block;
         }
-        /* CSV Export widget styling */
+
+        /* ============================================================
+           BUSINESS SEARCH FIELDS
+           ============================================================ */
+        .biz-search-fields {
+            background: var(--bg-tertiary);
+            padding: 12px 16px;
+            border-radius: var(--radius);
+            margin-bottom: 12px;
+            border: 1px solid var(--border);
+        }
+
+        .biz-search-fields label {
+            cursor: pointer;
+            color: var(--text-secondary);
+        }
+
+        .biz-search-fields input[type="checkbox"] {
+            margin-right: 4px;
+            accent-color: var(--accent);
+        }
+
+        /* ============================================================
+           EXPORT WIDGET & TABLE
+           ============================================================ */
         .export-widget {
             margin: 24px auto 32px;
             max-width: 1100px;
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 8px;
-            box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
             padding: 16px 20px;
         }
+
         .export-widget h3 {
             margin: 0 0 12px 0;
-            font-size: 18px;
+            font-size: 1em;
             font-weight: 600;
-            color: #2c3e50;
+            color: var(--text-primary);
             display: flex;
             align-items: center;
             gap: 8px;
         }
+
+        .export-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
         .export-table {
             width: 100%;
             border-collapse: collapse;
@@ -926,22 +1454,26 @@
 
         .export-table th,
         .export-table td {
-            border: 1px solid #e5e7eb;
+            border: 1px solid var(--border);
             padding: 10px 12px;
             text-align: center;
         }
 
         .export-table thead th {
-            background: #f8f9fb;
+            background: var(--bg-tertiary);
             font-weight: 600;
-            color: #2c3e50;
+            font-size: 0.85em;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
         }
 
         .export-table tbody th {
             text-align: left;
-            background: #f8fafc;
+            background: var(--bg-tertiary);
             font-weight: 600;
             width: 180px;
+            color: var(--text-primary);
         }
 
         .export-table .export-cell {
@@ -954,20 +1486,75 @@
             justify-content: center;
             align-items: center;
             gap: 6px;
-            font-size: 0.95em;
-            padding: 10px 14px;
+            font-size: 0.88em;
+            padding: 8px 12px;
         }
 
         .export-cell .btn:disabled {
-            background: #e9ecef;
-            color: #a0a4a8;
+            background: var(--bg-tertiary);
+            color: var(--text-muted);
+        }
+
+        /* ============================================================
+           LOADING SPINNER
+           ============================================================ */
+        .loading {
+            display: inline-block;
+            width: 18px;
+            height: 18px;
+            border: 2px solid var(--border);
+            border-top: 2px solid var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* ============================================================
+           UTILITY
+           ============================================================ */
+        .hidden {
+            display: none;
+        }
+
+        /* Hide Steps 3-5 */
+        .step-coming-soon#step3,
+        .step-coming-soon#step4,
+        .step-coming-soon#step5 {
+            display: none !important;
+        }
+
+        /* ============================================================
+           SCROLLBAR (dark theme)
+           ============================================================ */
+        [data-theme="dark"] ::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        [data-theme="dark"] ::-webkit-scrollbar-track {
+            background: var(--bg-tertiary);
+        }
+
+        [data-theme="dark"] ::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 999px;
+        }
+
+        [data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
         }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🔬 Patent Processing Pipeline</h1>
+            <button class="theme-toggle" onclick="toggleTheme()" id="themeToggle" title="Toggle light/dark mode">
+                🌙
+            </button>
+            <h1>Patent Processing Pipeline</h1>
             <p>Download, process, and enrich patent data through automated pipeline steps</p>
             <!-- Moved CSV export buttons to bottom widget
             <div style="margin-top:12px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap;">
@@ -984,6 +1571,19 @@
         </div>
 
         <div class="content">
+            <!-- Pipeline Tab Switcher -->
+            <div class="pipeline-tabs" id="pipelineTabs">
+                <button class="pipeline-tab active" onclick="switchPipeline('people')" id="tabPeople">
+                    People Enrichment
+                </button>
+                <button class="pipeline-tab" onclick="switchPipeline('business')" id="tabBusiness">
+                    Business Enrichment
+                </button>
+            </div>
+
+            <!-- ===== PEOPLE ENRICHMENT PIPELINE ===== -->
+            <div class="pipeline-section active" id="peoplePipeline">
+
             <!-- Status Overview -->
             <div class="status-bar">
                 <h3>📊 Current Status</h3>
@@ -1019,9 +1619,6 @@
                         </button>
                         <button class="btn btn-success" onclick="triggerXmlUpload()" id="step0XmlUploadBtn">
                             ⬆️ Upload XML
-                        </button>
-                        <button class="btn btn-secondary" onclick="showSample('step0')" id="step0Sample">
-                            📋 View Sample
                         </button>
                     </div>
 
@@ -1116,10 +1713,16 @@
                     <div class="file-info hidden" id="step0Files">
                         <!-- File information will be populated by JavaScript -->
                     </div>
-                    <div class="output-section hidden" id="step0Output"></div>
-                    <div class="sample-data hidden" id="step0SampleData"></div>
+                    <details class="collapsible hidden" id="step0OutputWrap">
+                        <summary>Logs</summary>
+                        <div class="output-section" id="step0Output"></div>
+                    </details>
+                    <details class="collapsible hidden" id="step0SampleWrap">
+                        <summary>View Sample</summary>
+                        <div class="sample-data" id="step0SampleData"></div>
+                    </details>
                 </div>
-                
+
                 <!-- Step 1: Integrate Existing Data (was Step 0) -->
                 <div class="step" id="step1">
                     <div class="step-header">
@@ -1138,12 +1741,6 @@
                         </button>
                         <button class="btn btn-success" onclick="runStep1DevEnrichAllUSA()" id="step1DevEnrichAllUSABtn">
                             🇺🇸 Enrich All USA
-                        </button>
-                        <button class="btn btn-secondary" onclick="showSample('step1-people')" id="step1SamplePeople">
-                            👥 View Sample People
-                        </button>
-                        <button class="btn btn-secondary" onclick="showSample('step1-patents')" id="step1SamplePatents">
-                            📋 View Sample Patents
                         </button>
                         <button class="btn btn-test hidden" onclick="startVerification()" id="step1VerifyBtn">
                             🔍 Review Potential Matches (optional)
@@ -1210,8 +1807,14 @@
                         </div>
                     </div>
                     
-                    <div class="output-section hidden" id="step1Output"></div>
-                    <div class="sample-data hidden" id="step1Sample"></div>
+                    <details class="collapsible hidden" id="step1OutputWrap">
+                        <summary>Logs</summary>
+                        <div class="output-section" id="step1Output"></div>
+                    </details>
+                    <details class="collapsible hidden" id="step1SampleWrap">
+                        <summary>View Sample</summary>
+                        <div class="sample-data" id="step1Sample"></div>
+                    </details>
                 </div>
                 
                 <!-- Step 2: Data Enrichment -->
@@ -1236,9 +1839,6 @@
                         <button class="btn btn-secondary" onclick="rebuildCsvs()" id="step2RebuildBtn">
                             🧱 Rebuild CSVs (no API calls)
                         </button>
-                        <button class="btn btn-secondary" onclick="showSample('step2')" id="step2Sample">
-                            👥 View Enriched Sample
-                        </button>
                     </div>
                     
                     <div class="dev-mode-panel dev-only hidden" id="step2DevPanel">
@@ -1260,20 +1860,26 @@
                             <div class="progress-fill" style="width: 0%" id="step2ProgressBar"></div>
                         </div>
                         <div class="elapsed-time" id="step2ElapsedTime">Elapsed: 0s</div>
-                        <div id="step2LiveProgress" class="hidden" style="margin-top:6px; color:#2c3e50; font-weight:600;"></div>
+                        <div id="step2LiveProgress" class="hidden" style="margin-top:6px; color:var(--text-primary); font-weight:600;"></div>
                     </div>
                     
                     <div class="file-info hidden" id="step2Files">
                         <!-- File information will be populated by JavaScript -->
                     </div>
-                    <div class="output-section hidden" id="step2Output"></div>
-                    <div class="sample-data hidden" id="step2SampleData"></div>
+                    <details class="collapsible hidden" id="step2OutputWrap">
+                        <summary>Logs</summary>
+                        <div class="output-section" id="step2Output"></div>
+                    </details>
+                    <details class="collapsible hidden" id="step2SampleWrap">
+                        <summary>View Sample</summary>
+                        <div class="sample-data" id="step2SampleData"></div>
+                    </details>
                 </div>
 
                 <!-- Generate All & Current CSVs -->
-                <div id="allCurrentWidget" style="margin: 16px 24px; padding: 16px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #6c757d;">
-                    <h4 style="margin: 0 0 8px 0; color: #495057;">📊 Generate Complete Database Exports</h4>
-                    <p style="margin: 0 0 12px 0; color: #6c757d; font-size: 14px;">
+                <div id="allCurrentWidget" style="margin: 16px 24px; padding: 16px; background: var(--bg-tertiary); border-radius: var(--radius); border: 1px solid var(--border);">
+                    <h4 style="margin: 0 0 8px 0; color: var(--text-primary);">Generate Complete Database Exports</h4>
+                    <p style="margin: 0 0 12px 0; color: var(--text-secondary); font-size: 14px;">
                         Generate 'all' and 'current' base CSV files. These files include all enriched data from the database and take longer to process.
                     </p>
                     <button class="btn btn-secondary" onclick="generateAllCurrentCsvs()" id="generateAllCurrentBtn">
@@ -1289,7 +1895,10 @@
                         <div class="elapsed-time" id="allCurrentElapsedTime">Elapsed: 0s</div>
                     </div>
 
-                    <div class="output-section hidden" id="allCurrentOutput" style="margin-top: 12px;"></div>
+                    <details class="collapsible hidden" id="allCurrentOutputWrap">
+                        <summary>Logs</summary>
+                        <div class="output-section" id="allCurrentOutput"></div>
+                    </details>
                 </div>
 
                 <!-- HIDE START: Steps 3-5 commented out -->
@@ -1358,119 +1967,265 @@
                         </button>
                     </div>
                 </div> <!-- end step5 -->
-            </div>
-        </div>
+            </div> <!-- end pipeline-steps -->
 
-        <!-- CSV Export Widget (Bottom) -->
-        <div class="export-widget">
-            <h3>⬇️ CSV Export Matrix</h3>
-            <table class="export-table">
-                <thead>
-                    <tr>
-                        <th scope="col">Dataset</th>
-                        <th scope="col">New</th>
-                        <th scope="col">New &amp; Existing</th>
-                        <th scope="col">Current</th>
-                        <th scope="col">All</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <th scope="row">Formatted</th>
-                        <td class="export-cell">
-                            <button class="btn btn-success export-btn" onclick="exportNewEnrichmentsFormatted()">
-                                ⬇️ Download
+            <!-- CSV Export Widget (Bottom) -->
+            <div class="export-widget">
+                <h3>⬇️ CSV Export Matrix</h3>
+                <table class="export-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">Dataset</th>
+                            <th scope="col">New</th>
+                            <th scope="col">New &amp; Existing</th>
+                            <th scope="col">Current</th>
+                            <th scope="col">All</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <th scope="row">Formatted</th>
+                            <td class="export-cell">
+                                <button class="btn btn-success export-btn" onclick="exportNewEnrichmentsFormatted()">
+                                    ⬇️ Download
+                                </button>
+                            </td>
+                            <td class="export-cell">
+                                <button class="btn btn-success export-btn" onclick="exportNewAndExistingEnrichmentsFormatted()">
+                                    ⬇️ Download
+                                </button>
+                            </td>
+                            <td class="export-cell">
+                                <button class="btn btn-success export-btn" onclick="exportCurrentEnrichmentsFormatted()">
+                                    ⬇️ Download
+                                </button>
+                            </td>
+                            <td class="export-cell">
+                                <button class="btn btn-success export-btn" onclick="exportAllEnrichmentsFormatted()">
+                                    ⬇️ Download
+                                </button>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Contacts</th>
+                            <td class="export-cell">
+                                <button class="btn btn-primary export-btn" onclick="exportContactNew()">
+                                    ⬇️ Download
+                                </button>
+                            </td>
+                            <td class="export-cell">
+                                <button class="btn btn-primary export-btn" onclick="exportContactNewAndExisting()">
+                                    ⬇️ Download
+                                </button>
+                            </td>
+                            <td class="export-cell">
+                                <button class="btn btn-primary export-btn" onclick="exportContactCurrent()">
+                                    ⬇️ Download
+                                </button>
+                            </td>
+                            <td class="export-cell">
+                                <button class="btn export-btn" type="button" disabled>
+                                    N/A
+                                </button>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Addresses</th>
+                            <td class="export-cell">
+                                <button class="btn btn-danger export-btn" onclick="exportContactNewAddresses()">
+                                    ⬇️ Download
+                                </button>
+                            </td>
+                            <td class="export-cell">
+                                <button class="btn btn-danger export-btn" onclick="exportContactNewAndExistingAddresses()">
+                                    ⬇️ Download
+                                </button>
+                            </td>
+                            <td class="export-cell">
+                                <button class="btn btn-danger export-btn" onclick="exportContactCurrentAddresses()">
+                                    ⬇️ Download
+                                </button>
+                            </td>
+                            <td class="export-cell">
+                                <button class="btn export-btn" type="button" disabled>
+                                    N/A
+                                </button>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Raw (Full)</th>
+                            <td class="export-cell">
+                                <button class="btn btn-secondary export-btn" onclick="exportNewEnrichments()">
+                                    ⬇️ Download
+                                </button>
+                            </td>
+                            <td class="export-cell">
+                                <button class="btn btn-secondary export-btn" onclick="exportNewAndExistingEnrichments()">
+                                    ⬇️ Download
+                                </button>
+                            </td>
+                            <td class="export-cell">
+                                <button class="btn btn-secondary export-btn" onclick="exportCurrentEnrichments()">
+                                    ⬇️ Download
+                                </button>
+                            </td>
+                            <td class="export-cell">
+                                <button class="btn btn-secondary export-btn" onclick="exportAllEnrichments()">
+                                    ⬇️ Download
+                                </button>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            </div> <!-- end peoplePipeline -->
+
+            <!-- ===== BUSINESS ENRICHMENT PIPELINE ===== -->
+            <div class="pipeline-section" id="businessPipeline">
+
+                <!-- Business Status Bar -->
+                <div class="status-bar">
+                    <h3>🏢 Business Pipeline Status</h3>
+                    <div class="status-grid" id="bizStatusGrid">
+                        <!-- Populated by JavaScript -->
+                    </div>
+                </div>
+
+                <div class="pipeline-link">
+                    <a class="btn btn-info" href="https://data.uspto.gov/bulkdata/datasets/trtdxfag" target="_blank" rel="noopener noreferrer" style="text-decoration: none;">
+                        🔗 Link to XML Download
+                    </a>
+                    <button class="btn btn-info" onclick="openCompanySearchOverlay()">
+                        🔍 Company Search
+                    </button>
+                </div>
+
+                <!-- Business Pipeline Steps -->
+                <div class="pipeline-steps">
+
+                    <!-- Business Step 1: Download/Extract Trademarks -->
+                    <div class="step" id="bizStep1">
+                        <div class="step-header">
+                            <div class="step-title">Step 1: Upload & Extract Trademarks</div>
+                            <div class="step-status status-ready" id="bizStep1Status">Ready</div>
+                        </div>
+                        <div class="step-description">
+                            Upload a USPTO Trademark Assignment XML file.
+                            Extracts assignee (business) data, filters to US addresses, and removes duplicates from past lists.
+                        </div>
+                        <div class="step-actions">
+                            <button class="btn btn-primary" onclick="triggerBizXmlUpload()" id="bizStep1UploadBtn">
+                                📥 Upload Trademark XML
                             </button>
-                        </td>
-                        <td class="export-cell">
-                            <button class="btn btn-success export-btn" onclick="exportNewAndExistingEnrichmentsFormatted()">
-                                ⬇️ Download
+                        </div>
+                        <div class="step-actions" style="margin-top: 10px;">
+                            <select id="bizDaysBack" style="padding: 8px 12px; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.9em; background: var(--bg-input); color: var(--text-primary); font-family: var(--font-sans);">
+                                <option value="1">1 day</option>
+                                <option value="3">3 days</option>
+                                <option value="7">7 days</option>
+                                <option value="14">14 days</option>
+                                <option value="21">21 days</option>
+                                <option value="30" selected>30 days</option>
+                            </select>
+                            <button class="btn btn-success" onclick="autoBizDownload()" id="bizStep1AutoBtn">
+                                🌐 Auto Download
                             </button>
-                        </td>
-                        <td class="export-cell">
-                            <button class="btn btn-success export-btn" onclick="exportCurrentEnrichmentsFormatted()">
-                                ⬇️ Download
+                        </div>
+                        <input type="file" id="bizStep1XmlInput" accept=".xml,text/xml,application/xml,.zip" style="display:none" />
+
+                        <!-- Progress display -->
+                        <div class="progress-info hidden" id="bizStep1Progress">
+                            <div class="progress-message" id="bizStep1ProgressMessage">Processing...</div>
+                            <div class="progress-bar">
+                                <div class="progress-fill" style="width: 0%" id="bizStep1ProgressBar"></div>
+                            </div>
+                            <div class="elapsed-time" id="bizStep1ElapsedTime">Elapsed: 0s</div>
+                        </div>
+
+                        <div class="file-info hidden" id="bizStep1Files"></div>
+                        <details class="collapsible hidden" id="bizStep1OutputWrap">
+                            <summary>Logs</summary>
+                            <div class="output-section" id="bizStep1Output"></div>
+                        </details>
+                        <details class="collapsible hidden" id="bizStep1SampleWrap">
+                            <summary>View Sample</summary>
+                            <div class="sample-data" id="bizStep1SampleData"></div>
+                        </details>
+                    </div>
+
+                    <!-- Business Step 2: PDL Company Enrichment -->
+                    <div class="step" id="bizStep2">
+                        <div class="step-header">
+                            <div class="step-title">Step 2: PDL Company Enrichment</div>
+                            <div class="step-status status-ready" id="bizStep2Status">Ready</div>
+                        </div>
+                        <div class="step-description">
+                            Enrich trademark contact data using PeopleDataLabs Company API.
+                            Choose which fields to search by and export results for CRM/Zapier import.
+                        </div>
+
+                        <!-- Search Field Selection -->
+                        <div class="biz-search-fields" id="bizSearchFields">
+                            <label><strong>Search By:</strong></label>
+                            <div style="display: flex; gap: 15px; flex-wrap: wrap; margin-top: 8px;">
+                                <label><input type="checkbox" id="bizFieldName" checked> Company Name</label>
+                                <label><input type="checkbox" id="bizFieldLocation" checked> Location</label>
+                                <label><input type="checkbox" id="bizFieldWebsite"> Website</label>
+                                <label><input type="checkbox" id="bizFieldTicker"> Ticker</label>
+                                <label><input type="checkbox" id="bizFieldLinkedin"> LinkedIn Profile</label>
+                            </div>
+                        </div>
+
+                        <div class="step-actions">
+                            <button class="btn btn-test" onclick="runBizStep2(true)" id="bizStep2TestBtn">
+                                🧪 Test (5 Records)
                             </button>
-                        </td>
-                        <td class="export-cell">
-                            <button class="btn btn-success export-btn" onclick="exportAllEnrichmentsFormatted()">
-                                ⬇️ Download
+                            <button class="btn btn-primary" onclick="runBizStep2(false)" id="bizStep2Btn">
+                                🚀 Run Full Enrichment
                             </button>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th scope="row">Contacts</th>
-                        <td class="export-cell">
-                            <button class="btn btn-primary export-btn" onclick="exportContactNew()">
-                                ⬇️ Download
-                            </button>
-                        </td>
-                        <td class="export-cell">
-                            <button class="btn btn-primary export-btn" onclick="exportContactNewAndExisting()">
-                                ⬇️ Download
-                            </button>
-                        </td>
-                        <td class="export-cell">
-                            <button class="btn btn-primary export-btn" onclick="exportContactCurrent()">
-                                ⬇️ Download
-                            </button>
-                        </td>
-                        <td class="export-cell">
-                            <button class="btn export-btn" type="button" disabled>
-                                N/A
-                            </button>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th scope="row">Addresses</th>
-                        <td class="export-cell">
-                            <button class="btn btn-danger export-btn" onclick="exportContactNewAddresses()">
-                                ⬇️ Download
-                            </button>
-                        </td>
-                        <td class="export-cell">
-                            <button class="btn btn-danger export-btn" onclick="exportContactNewAndExistingAddresses()">
-                                ⬇️ Download
-                            </button>
-                        </td>
-                        <td class="export-cell">
-                            <button class="btn btn-danger export-btn" onclick="exportContactCurrentAddresses()">
-                                ⬇️ Download
-                            </button>
-                        </td>
-                        <td class="export-cell">
-                            <button class="btn export-btn" type="button" disabled>
-                                N/A
-                            </button>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th scope="row">Raw (Full)</th>
-                        <td class="export-cell">
-                            <button class="btn btn-secondary export-btn" onclick="exportNewEnrichments()">
-                                ⬇️ Download
-                            </button>
-                        </td>
-                        <td class="export-cell">
-                            <button class="btn btn-secondary export-btn" onclick="exportNewAndExistingEnrichments()">
-                                ⬇️ Download
-                            </button>
-                        </td>
-                        <td class="export-cell">
-                            <button class="btn btn-secondary export-btn" onclick="exportCurrentEnrichments()">
-                                ⬇️ Download
-                            </button>
-                        </td>
-                        <td class="export-cell">
-                            <button class="btn btn-secondary export-btn" onclick="exportAllEnrichments()">
-                                ⬇️ Download
-                            </button>
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-    </div>
+                        </div>
+
+                        <!-- Progress display -->
+                        <div class="progress-info hidden" id="bizStep2Progress">
+                            <div class="progress-message" id="bizStep2ProgressMessage">Processing...</div>
+                            <div class="progress-bar">
+                                <div class="progress-fill" style="width: 0%" id="bizStep2ProgressBar"></div>
+                            </div>
+                            <div class="elapsed-time" id="bizStep2ElapsedTime">Elapsed: 0s</div>
+                        </div>
+
+                        <div class="file-info hidden" id="bizStep2Files"></div>
+                        <details class="collapsible hidden" id="bizStep2OutputWrap">
+                            <summary>Logs</summary>
+                            <div class="output-section" id="bizStep2Output"></div>
+                        </details>
+                        <details class="collapsible hidden" id="bizStep2SampleWrap">
+                            <summary>View Sample</summary>
+                            <div class="sample-data" id="bizStep2SampleData"></div>
+                        </details>
+                    </div>
+
+                </div> <!-- end business pipeline-steps -->
+
+                <!-- Business CSV Export Widget -->
+                <div class="export-widget">
+                    <h3>Business CSV Exports</h3>
+                    <div class="export-actions">
+                        <button class="btn btn-success" onclick="exportBizNewEnrichments()">
+                            New Enrichments
+                        </button>
+                        <button class="btn btn-primary" onclick="exportBizNewAndExisting()">
+                            New + Existing
+                        </button>
+                    </div>
+                </div>
+
+            </div> <!-- end businessPipeline -->
+
+        </div> <!-- end content -->
+
+    </div> <!-- end container -->
 
     <div class="bulk-overlay hidden" id="bulkUpdateOverlay">
         <div class="bulk-overlay-content">
@@ -1495,7 +2250,7 @@
             <div class="bulk-overlay-footer">
                 <span class="bulk-selection-count" id="bulkSelectionCount">Selected: 0</span>
                 <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-                    <span id="bulkOverlayStatus" style="color:#6c757d; font-size:0.9em;"></span>
+                    <span id="bulkOverlayStatus" style="color:var(--text-muted); font-size:0.9em;"></span>
                     <button class="btn btn-secondary" onclick="selectAllBulkMoved(true)">Select All</button>
                     <button class="btn btn-secondary" onclick="selectAllBulkMoved(false)">Clear All</button>
                     <button class="btn btn-success" id="bulkOverlayApplyBtn" onclick="applyMovedBulkUpdates()">⬆️ Update Selected</button>
@@ -1521,7 +2276,148 @@
         </div>
     </div>
 
+    <!-- Company Search Overlay -->
+    <div class="cosearch-overlay hidden" id="companySearchOverlay">
+        <div class="cosearch-overlay-content">
+            <div class="cosearch-overlay-header">
+                <h3>🔍 PDL Company Search</h3>
+                <button class="btn btn-secondary" onclick="closeCompanySearchOverlay()">✕ Close</button>
+            </div>
+            <div class="cosearch-overlay-body">
+                <div class="cosearch-form" id="cosearchForm">
+                    <div class="field-group">
+                        <label for="csName">Company Name</label>
+                        <input type="text" id="csName" placeholder="e.g. Apple, Compass Inc">
+                    </div>
+                    <div class="field-group">
+                        <label for="csWebsite">Website</label>
+                        <input type="text" id="csWebsite" placeholder="e.g. apple.com">
+                    </div>
+                    <div class="field-group">
+                        <label for="csIndustry">Industry</label>
+                        <input type="text" id="csIndustry" placeholder="e.g. computer software">
+                    </div>
+                    <div class="field-group">
+                        <label for="csCountry">Country</label>
+                        <input type="text" id="csCountry" placeholder="e.g. united states" value="united states">
+                    </div>
+                    <div class="field-group">
+                        <label for="csRegion">State / Region</label>
+                        <input type="text" id="csRegion" placeholder="e.g. california">
+                    </div>
+                    <div class="field-group">
+                        <label for="csLocality">City</label>
+                        <input type="text" id="csLocality" placeholder="e.g. san francisco">
+                    </div>
+                    <div class="field-group">
+                        <label for="csTags">Tags</label>
+                        <input type="text" id="csTags" placeholder="e.g. saas, big data">
+                    </div>
+                    <div class="field-group">
+                        <label for="csSize">Company Size</label>
+                        <select id="csSize">
+                            <option value="">Any</option>
+                            <option value="1-10">1-10</option>
+                            <option value="11-50">11-50</option>
+                            <option value="51-200">51-200</option>
+                            <option value="201-500">201-500</option>
+                            <option value="501-1000">501-1000</option>
+                            <option value="1001-5000">1001-5000</option>
+                            <option value="5001-10000">5001-10000</option>
+                            <option value="10001+">10001+</option>
+                        </select>
+                    </div>
+                    <div class="field-group">
+                        <label for="csTicker">Ticker Symbol</label>
+                        <input type="text" id="csTicker" placeholder="e.g. AAPL">
+                    </div>
+                    <div class="field-group">
+                        <label for="csMaxResults">Max Results</label>
+                        <select id="csMaxResults">
+                            <option value="10">10</option>
+                            <option value="25" selected>25</option>
+                            <option value="50">50</option>
+                            <option value="100">100</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="cosearch-actions">
+                    <button class="btn btn-primary" id="csSearchBtn" onclick="executeCompanySearch()">
+                        🔍 Search
+                    </button>
+                    <button class="btn btn-secondary" onclick="clearCompanySearchForm()">
+                        Clear Form
+                    </button>
+                    <span class="cosearch-status" id="csStatus"></span>
+                </div>
+
+                <div class="cosearch-results-wrap hidden" id="csResultsWrap">
+                    <table class="cosearch-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Website</th>
+                                <th>Industry</th>
+                                <th>Location</th>
+                                <th>Size</th>
+                                <th>Founded</th>
+                                <th>Type</th>
+                                <th>LinkedIn</th>
+                            </tr>
+                        </thead>
+                        <tbody id="csResultsBody">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="cosearch-footer hidden" id="csFooter">
+                <span class="cosearch-footer-info" id="csFooterInfo">0 results</span>
+                <div class="cosearch-footer-actions">
+                    <button class="btn btn-success" onclick="exportCompanySearchCsv()">
+                        ⬇️ Export CSV (CRM Format)
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Theme init: runs before render to prevent flash -->
     <script>
+        (function() {
+            const saved = localStorage.getItem('theme');
+            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const theme = saved || (prefersDark ? 'dark' : 'light');
+            document.documentElement.setAttribute('data-theme', theme);
+        })();
+    </script>
+
+    <script>
+        // ---- Theme toggle ----
+        function toggleTheme() {
+            const current = document.documentElement.getAttribute('data-theme');
+            const next = current === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', next);
+            localStorage.setItem('theme', next);
+            updateThemeIcon(next);
+        }
+
+        function updateThemeIcon(theme) {
+            const btn = document.getElementById('themeToggle');
+            if (btn) btn.textContent = theme === 'dark' ? '☀️' : '🌙';
+        }
+
+        // Set correct icon + restore saved tab on load
+        document.addEventListener('DOMContentLoaded', function() {
+            const theme = document.documentElement.getAttribute('data-theme') || 'light';
+            updateThemeIcon(theme);
+
+            const savedTab = localStorage.getItem('activeTab');
+            if (savedTab && savedTab !== 'people') {
+                switchPipeline(savedTab);
+            }
+        });
+
         // Global state
         let currentStatus = {};
         let potentialVerificationData = [];
@@ -1690,13 +2586,27 @@
                     }
                 });
             }
+
+            const csOverlay = document.getElementById('companySearchOverlay');
+            if (csOverlay) {
+                csOverlay.addEventListener('click', (event) => {
+                    if (event.target === csOverlay) {
+                        closeCompanySearchOverlay();
+                    }
+                });
+            }
         });
 
         document.addEventListener('keydown', (event) => {
             if (event.key === 'Escape') {
-                const overlay = document.getElementById('docsOverlay');
-                if (overlay && !overlay.classList.contains('hidden')) {
+                const docsOv = document.getElementById('docsOverlay');
+                if (docsOv && !docsOv.classList.contains('hidden')) {
                     closeDocsOverlay();
+                    return;
+                }
+                const csOv = document.getElementById('companySearchOverlay');
+                if (csOv && !csOv.classList.contains('hidden')) {
+                    closeCompanySearchOverlay();
                 }
             }
         });
@@ -1801,7 +2711,7 @@
                         span = document.createElement('span');
                         span.className = 'last-run';
                         span.style.fontSize = '0.8em';
-                        span.style.color = '#6c757d';
+                        span.style.color = 'var(--text-muted)';
                         span.style.marginLeft = '8px';
                         header.appendChild(span);
                     }
@@ -2826,7 +3736,7 @@
                                     <div><strong>Location:</strong> ${m.city || ''}, ${m.state || ''}</div>
                                     <div><strong>Source:</strong> ${m.source_file || m.source || 'Unknown'}</div>
                                 </div>
-                                <div style="color:#6c757d; font-size:0.9em;">Same name with different address. You can enrich using the new address and later update the existing record.</div>
+                                <div style="color:var(--text-muted); font-size:0.9em;">Same name with different address. You can enrich using the new address and later update the existing record.</div>
                             </div>
                         </div>
                         <div class="verification-actions">
@@ -2851,7 +3761,7 @@
                         `;
                     });
                 } else {
-                    matchesHtml = '<div style="color: #6c757d; font-style: italic;">No specific matches found (scored 10-24)</div>';
+                    matchesHtml = '<div style="color: var(--text-muted); font-style: italic;">No specific matches found (scored 10-24)</div>';
                 }
                 content.innerHTML = `
                     <div class="person-card">
@@ -3130,7 +4040,7 @@
 
             if (statusEl) {
                 statusEl.textContent = `Updated ${successCount} of ${indices.length} selected${failures.length ? ` • Failed: ${failures.length}` : ''}`;
-                statusEl.style.color = failures.length ? '#c0392b' : '#2c3e50';
+                statusEl.style.color = failures.length ? 'var(--danger)' : 'var(--text-primary)';
             }
 
             if (successIndexes.length > 0) {
@@ -3289,18 +4199,22 @@
         function showOutput(stepId, output) {
             const outputEl = document.getElementById(stepId + 'Output');
             if (!outputEl) return;
+            const wrapEl = document.getElementById(stepId + 'OutputWrap');
             if (stepId === 'step1' || stepId === 'step2') {
                 const stepEl = document.getElementById(stepId);
                 const allowDisplay = stepEl && (stepEl.classList.contains('completed') || stepEl.classList.contains('error'));
                 if (!allowDisplay) {
-                    // Hide output if not completed for steps 1 and 2
                     outputEl.textContent = '';
-                    outputEl.classList.add('hidden');
+                    if (wrapEl) wrapEl.classList.add('hidden');
                     return;
                 }
             }
             outputEl.textContent = output;
-            outputEl.classList.remove('hidden');
+            if (wrapEl) {
+                wrapEl.classList.remove('hidden');
+            } else {
+                outputEl.classList.remove('hidden');
+            }
         }
 
         async function showLatestOutput(stepId, fallback = '') {
@@ -3425,16 +4339,16 @@
                     
                     if (result.sample && result.sample.note) {
                         // Special handling for Step 2 when skipped
-                        content += `<div style="background: #e8f4f8; padding: 10px; border-radius: 5px; margin-bottom: 15px; border-left: 4px solid #3498db;">`;
+                        content += `<div style="background: var(--accent-subtle); padding: 10px; border-radius: var(--radius); margin-bottom: 15px; border-left: 3px solid var(--accent);">`;
                         content += `<strong>ℹ️ ${result.sample.note}</strong><br>`;
-                        content += `<small>📄 Source: ${result.sample.source}</small>`;
+                        content += `<small>Source: ${result.sample.source}</small>`;
                         content += `</div>`;
-                        
+
                         // Show the actual data in a clean format
                         if (result.sample.data && result.sample.data.length > 0) {
-                            content += `<div style="background: white; padding: 15px; border-radius: 5px; border: 1px solid #ddd;">`;
+                            content += `<div style="background: var(--bg-secondary); padding: 15px; border-radius: var(--radius); border: 1px solid var(--border);">`;
                             result.sample.data.slice(0, 3).forEach((item, index) => {
-                                content += `<div style="margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px solid #eee;">`;
+                                content += `<div style="margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px solid var(--border);">`;
                                 content += `<strong>Patent ${index + 1}:</strong><br>`;
                                 content += `📋 Number: ${item.patent_number || item.patent_id || 'Unknown'}<br>`;
                                 content += `📝 Title: ${item.patent_title || 'Unknown'}<br>`;
@@ -3453,11 +4367,18 @@
                         }
                     } else {
                         // Regular sample data display
-                        content += `<pre style="background: white; padding: 15px; border-radius: 5px; border: 1px solid #ddd; white-space: pre-wrap; max-height: 400px; overflow-y: auto;">${JSON.stringify(result.sample, null, 2)}</pre>`;
+                        content += `<pre style="background: var(--bg-secondary); padding: 15px; border-radius: var(--radius); border: 1px solid var(--border); white-space: pre-wrap; max-height: 400px; overflow-y: auto; color: var(--text-primary); font-family: var(--font-mono);">${JSON.stringify(result.sample, null, 2)}</pre>`;
                     }
                     
                     sampleEl.innerHTML = content;
-                    sampleEl.classList.remove('hidden');
+                    const wrapId = stepId + 'SampleWrap';
+                    const wrapEl = document.getElementById(wrapId);
+                    if (wrapEl) {
+                        wrapEl.classList.remove('hidden');
+                        wrapEl.open = true;
+                    } else {
+                        sampleEl.classList.remove('hidden');
+                    }
                 }
             } catch (error) {
                 console.error('Error fetching sample:', error);
@@ -3549,17 +4470,19 @@
                 const barDiv = document.getElementById('allCurrentProgressBar');
                 const timeDiv = document.getElementById('allCurrentElapsedTime');
                 const outputDiv = document.getElementById('allCurrentOutput');
+                const outputWrap = document.getElementById('allCurrentOutputWrap');
 
-                // Set pending state with yellow styling
+                // Set pending state
                 if (widgetDiv) {
-                    widgetDiv.style.background = '#fff3cd';
-                    widgetDiv.style.borderLeft = '4px solid #ffc107';
+                    widgetDiv.style.background = 'var(--accent-subtle)';
+                    widgetDiv.style.borderLeft = '4px solid var(--warning)';
                 }
                 if (btn) { btn.disabled = true; btn.textContent = 'Generating...'; }
                 if (progressDiv) progressDiv.classList.remove('hidden');
                 if (messageDiv) messageDiv.textContent = 'Starting generation...';
                 if (barDiv) barDiv.style.width = '10%';
-                if (outputDiv) { outputDiv.textContent = ''; outputDiv.classList.add('hidden'); }
+                if (outputDiv) { outputDiv.textContent = ''; }
+                if (outputWrap) { outputWrap.classList.add('hidden'); }
 
                 const startTime = Date.now();
                 const timeInterval = setInterval(() => {
@@ -3577,8 +4500,8 @@
 
                     // Reset to default styling
                     if (widgetDiv) {
-                        widgetDiv.style.background = '#f8f9fa';
-                        widgetDiv.style.borderLeft = '4px solid #6c757d';
+                        widgetDiv.style.background = 'var(--bg-tertiary)';
+                        widgetDiv.style.borderLeft = '4px solid var(--border)';
                     }
                     if (progressDiv) progressDiv.classList.add('hidden');
                     if (btn) { btn.disabled = false; btn.textContent = '🗂️ Generate All & Current CSVs'; }
@@ -3627,24 +4550,24 @@
                                     const filesMatch = logText.match(/📁 OUTPUT FILES:([\s\S]*?)(?=\n\n|$)/);
                                     if (filesMatch && outputDiv) {
                                         outputDiv.innerHTML = '<div style="font-family: monospace; white-space: pre-wrap; font-size: 13px;">✅ Generation completed!\n\n' + filesMatch[0] + '</div>';
-                                        outputDiv.classList.remove('hidden');
+                                        if (outputWrap) outputWrap.classList.remove('hidden');
                                     } else if (outputDiv) {
                                         outputDiv.textContent = '✅ All & Current CSV generation completed successfully! Check the output directory for the files.';
-                                        outputDiv.classList.remove('hidden');
+                                        if (outputWrap) outputWrap.classList.remove('hidden');
                                     }
                                 }
                             } catch (logError) {
                                 console.error('Could not fetch log:', logError);
                                 if (outputDiv) {
                                     outputDiv.textContent = '✅ All & Current CSV generation completed successfully! Check the output directory for the files.';
-                                    outputDiv.classList.remove('hidden');
+                                    if (outputWrap) outputWrap.classList.remove('hidden');
                                 }
                             }
 
                             // Set success state with green styling
                             if (widgetDiv) {
-                                widgetDiv.style.background = '#d4edda';
-                                widgetDiv.style.borderLeft = '4px solid #28a745';
+                                widgetDiv.style.background = 'var(--accent-subtle)';
+                                widgetDiv.style.borderLeft = '4px solid var(--success)';
                             }
 
                             updateStatus();
@@ -3664,8 +4587,8 @@
 
                 // Reset to default styling on error
                 if (widgetDiv) {
-                    widgetDiv.style.background = '#f8f9fa';
-                    widgetDiv.style.borderLeft = '4px solid #6c757d';
+                    widgetDiv.style.background = 'var(--bg-tertiary)';
+                    widgetDiv.style.borderLeft = '4px solid var(--border)';
                 }
                 if (btn) { btn.disabled = false; btn.textContent = '🗂️ Generate All & Current CSVs'; }
                 if (progressDiv) progressDiv.classList.add('hidden');
@@ -3998,6 +4921,456 @@
             };
             inp.click();
         }
+
+        // ===== BUSINESS ENRICHMENT PIPELINE FUNCTIONS =====
+
+        // Pipeline tab switching
+        function switchPipeline(pipeline) {
+            document.querySelectorAll('.pipeline-section').forEach(el => {
+                el.classList.remove('active');
+            });
+            document.querySelectorAll('.pipeline-tab').forEach(el => {
+                el.classList.remove('active');
+            });
+
+            if (pipeline === 'business') {
+                document.getElementById('businessPipeline').classList.add('active');
+                document.getElementById('tabBusiness').classList.add('active');
+                updateBizStatus();
+            } else {
+                document.getElementById('peoplePipeline').classList.add('active');
+                document.getElementById('tabPeople').classList.add('active');
+            }
+
+            localStorage.setItem('activeTab', pipeline);
+        }
+
+        // Business Status Update
+        async function updateBizStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                const bizGrid = document.getElementById('bizStatusGrid');
+                if (bizGrid) {
+                    const extractedCount = data.biz_counts ? data.biz_counts.extractedTrademarks : 0;
+                    const enrichedCount = data.biz_counts ? data.biz_counts.enrichedCompanies : 0;
+                    bizGrid.innerHTML = `
+                        <div class="status-item">
+                            <h4>Trademarks Extracted</h4>
+                            <div class="count">${extractedCount}</div>
+                        </div>
+                        <div class="status-item">
+                            <h4>Companies Enriched</h4>
+                            <div class="count">${enrichedCount}</div>
+                        </div>
+                    `;
+                }
+                // Update step statuses
+                const bizStep1Exists = data.biz_step1 && data.biz_step1.extractedTrademarks && data.biz_step1.extractedTrademarks.exists;
+                const bizStep1Running = data.biz_step1 && data.biz_step1.running;
+                const bizStep2Exists = data.biz_step2 && data.biz_step2.enrichedCompanies && data.biz_step2.enrichedCompanies.exists;
+                const bizStep2Running = data.biz_step2 && data.biz_step2.running;
+
+                updateStepStatus('bizStep1', bizStep1Exists, bizStep1Running);
+                updateStepStatus('bizStep2', bizStep2Exists, bizStep2Running);
+            } catch (error) {
+                console.error('Error updating business status:', error);
+            }
+        }
+
+        // Business Step 1: Upload XML
+        function triggerBizXmlUpload() {
+            const inp = document.getElementById('bizStep1XmlInput');
+            if (!inp) return;
+            inp.value = '';
+            inp.onchange = async (e) => {
+                const file = e.target.files && e.target.files[0];
+                if (!file) return;
+                const stepId = 'bizStep1';
+                setStepRunning(stepId);
+
+                try {
+                    const buf = await file.arrayBuffer();
+                    const response = await fetch('/api/biz/step1/upload-xml', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/xml' },
+                        body: buf
+                    });
+                    const result = await response.json();
+
+                    if (result.success && (result.status === 'started' || result.processing === true)) {
+                        console.log('Business Step 1 (upload) started, beginning polling...');
+                        startPolling('biz_step1', {
+                            domStepId: 'bizStep1',
+                            statusEndpoint: '/api/biz/step1/status',
+                            pollingKey: 'bizStep1'
+                        });
+                    } else if (result.success) {
+                        setStepCompleted(stepId, true);
+                        showOutput(stepId, result.output || 'Trademark XML uploaded and processed');
+                        if (result.files) showFileInfo(stepId, result.files);
+                        updateBizStatus();
+                    } else {
+                        setStepCompleted(stepId, false);
+                        showOutput(stepId, `Error: ${result.error}`);
+                    }
+                } catch (error) {
+                    setStepCompleted(stepId, false);
+                    showOutput(stepId, `Upload error: ${error.message}`);
+                    console.error('Business upload error:', error);
+                }
+            };
+            inp.click();
+        }
+
+        // Business Step 1: Auto-download from USPTO
+        async function autoBizDownload() {
+            const stepId = 'bizStep1';
+            const daysBack = parseInt(document.getElementById('bizDaysBack').value) || 7;
+            setStepRunning(stepId);
+
+            try {
+                const response = await fetch('/api/biz/step1/auto-download', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ daysBack })
+                });
+                const result = await response.json();
+
+                if (result.success && (result.status === 'started' || result.processing === true)) {
+                    console.log(`Business Step 1 (auto-download ${daysBack} days) started, polling...`);
+                    startPolling('biz_step1', {
+                        domStepId: 'bizStep1',
+                        statusEndpoint: '/api/biz/step1/status',
+                        pollingKey: 'bizStep1'
+                    });
+                } else if (result.success) {
+                    setStepCompleted(stepId, true);
+                    showOutput(stepId, result.output || 'Trademarks downloaded and processed');
+                    if (result.files) showFileInfo(stepId, result.files);
+                    updateBizStatus();
+                } else {
+                    setStepCompleted(stepId, false);
+                    showOutput(stepId, `Error: ${result.error}`);
+                }
+            } catch (error) {
+                setStepCompleted(stepId, false);
+                showOutput(stepId, `Download error: ${error.message}`);
+                console.error('Business auto-download error:', error);
+            }
+        }
+
+        // Business Step 2: Company Enrichment
+        async function runBizStep2(testMode) {
+            testMode = testMode === true;
+            const stepId = 'bizStep2';
+            setStepRunning(stepId);
+
+            // Gather selected search fields
+            const searchFields = [];
+            if (document.getElementById('bizFieldName') && document.getElementById('bizFieldName').checked) searchFields.push('name');
+            if (document.getElementById('bizFieldLocation') && document.getElementById('bizFieldLocation').checked) searchFields.push('location');
+            if (document.getElementById('bizFieldWebsite') && document.getElementById('bizFieldWebsite').checked) searchFields.push('website');
+            if (document.getElementById('bizFieldTicker') && document.getElementById('bizFieldTicker').checked) searchFields.push('ticker');
+            if (document.getElementById('bizFieldLinkedin') && document.getElementById('bizFieldLinkedin').checked) searchFields.push('profile');
+
+            if (searchFields.length === 0) {
+                setStepCompleted(stepId, false);
+                showOutput(stepId, 'Error: Please select at least one search field.');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/biz/step2', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ testMode, searchFields })
+                });
+                const result = await response.json();
+
+                if (result.success && (result.status === 'started' || result.processing === true)) {
+                    console.log('Business Step 2 started, beginning polling...');
+                    startPolling('biz_step2', {
+                        domStepId: 'bizStep2',
+                        statusEndpoint: '/api/biz/step2/status',
+                        pollingKey: 'bizStep2'
+                    });
+                } else if (result.success) {
+                    setStepCompleted(stepId, true);
+                    showOutput(stepId, result.output);
+                    if (result.files) showFileInfo(stepId, result.files);
+                    updateBizStatus();
+                } else {
+                    setStepCompleted(stepId, false);
+                    showOutput(stepId, `Error: ${result.error}`);
+                }
+            } catch (error) {
+                setStepCompleted(stepId, false);
+                showOutput(stepId, `Network error: ${error.message}`);
+                console.error('Business Step 2 error:', error);
+            }
+        }
+
+        // Business Sample Viewer
+        async function showBizSample(sampleType) {
+            try {
+                const response = await fetch(`/api/biz/sample/${sampleType}`);
+                const result = await response.json();
+                const stepId = sampleType === 'biz-step1' ? 'bizStep1' : 'bizStep2';
+                const sampleEl = document.getElementById(stepId + 'SampleData');
+                const wrapEl = document.getElementById(stepId + 'SampleWrap');
+                if (sampleEl && result.sample) {
+                    sampleEl.innerHTML = '<h4>Sample Data</h4><pre style="max-height:400px;overflow:auto;background:var(--bg-tertiary);padding:12px;border-radius:var(--radius);font-size:0.85em;color:var(--text-primary);font-family:var(--font-mono);border:1px solid var(--border);">' +
+                        JSON.stringify(result.sample, null, 2) + '</pre>';
+                    if (wrapEl) { wrapEl.classList.remove('hidden'); wrapEl.open = true; }
+                    else sampleEl.classList.remove('hidden');
+                } else if (sampleEl) {
+                    sampleEl.innerHTML = '<p style="color:var(--text-muted);">No data available yet. Run the step first.</p>';
+                    if (wrapEl) { wrapEl.classList.remove('hidden'); wrapEl.open = true; }
+                    else sampleEl.classList.remove('hidden');
+                }
+            } catch (error) {
+                console.error('Error loading business sample:', error);
+            }
+        }
+
+        // Business CSV Export Functions
+        function exportBizNewEnrichments() {
+            window.location.href = '/api/biz/export/new-enrichments';
+        }
+        function exportBizNewAndExisting() {
+            window.location.href = '/api/biz/export/new-and-existing';
+        }
+
+        // ============================================================
+        // COMPANY SEARCH OVERLAY
+        // ============================================================
+        let _csResults = [];
+
+        function openCompanySearchOverlay() {
+            document.getElementById('companySearchOverlay').classList.remove('hidden');
+        }
+
+        function closeCompanySearchOverlay() {
+            document.getElementById('companySearchOverlay').classList.add('hidden');
+        }
+
+        function clearCompanySearchForm() {
+            ['csName', 'csWebsite', 'csIndustry', 'csRegion', 'csLocality', 'csTags', 'csTicker'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.value = '';
+            });
+            document.getElementById('csCountry').value = 'united states';
+            document.getElementById('csSize').value = '';
+            document.getElementById('csMaxResults').value = '25';
+            document.getElementById('csStatus').textContent = '';
+            document.getElementById('csResultsWrap').classList.add('hidden');
+            document.getElementById('csFooter').classList.add('hidden');
+            _csResults = [];
+        }
+
+        async function executeCompanySearch() {
+            const btn = document.getElementById('csSearchBtn');
+            const statusEl = document.getElementById('csStatus');
+
+            const params = {
+                name:       (document.getElementById('csName').value || '').trim(),
+                website:    (document.getElementById('csWebsite').value || '').trim(),
+                industry:   (document.getElementById('csIndustry').value || '').trim(),
+                country:    (document.getElementById('csCountry').value || '').trim(),
+                region:     (document.getElementById('csRegion').value || '').trim(),
+                locality:   (document.getElementById('csLocality').value || '').trim(),
+                tags:       (document.getElementById('csTags').value || '').trim(),
+                size:       (document.getElementById('csSize').value || '').trim(),
+                ticker:     (document.getElementById('csTicker').value || '').trim(),
+                maxResults: parseInt(document.getElementById('csMaxResults').value) || 25
+            };
+
+            const hasFilter = [params.name, params.website, params.industry, params.country,
+                               params.region, params.locality, params.tags, params.size, params.ticker]
+                               .some(v => v.length > 0);
+            if (!hasFilter) {
+                statusEl.textContent = 'Please enter at least one search criterion.';
+                statusEl.className = 'cosearch-status error';
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = 'Searching...';
+            statusEl.textContent = '';
+            statusEl.className = 'cosearch-status';
+
+            try {
+                const response = await fetch('/api/biz/company-search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(params)
+                });
+                const result = await response.json();
+
+                if (!response.ok || result.error) {
+                    statusEl.textContent = result.error || `Server error (HTTP ${response.status})`;
+                    statusEl.className = 'cosearch-status error';
+                    return;
+                }
+
+                _csResults = result.data || [];
+                const total = result.total || _csResults.length;
+                renderCompanySearchResults(_csResults);
+
+                statusEl.textContent = `Found ${total.toLocaleString()} total matches. Showing ${_csResults.length}.`;
+                statusEl.className = 'cosearch-status';
+
+            } catch (err) {
+                statusEl.textContent = 'Network error: ' + err.message;
+                statusEl.className = 'cosearch-status error';
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '🔍 Search';
+            }
+        }
+
+        function renderCompanySearchResults(companies) {
+            const tbody = document.getElementById('csResultsBody');
+            const wrap = document.getElementById('csResultsWrap');
+            const footer = document.getElementById('csFooter');
+            const footerInfo = document.getElementById('csFooterInfo');
+
+            if (!companies || companies.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; padding:20px; color:var(--text-muted);">No results found. Try broadening your search.</td></tr>';
+                wrap.classList.remove('hidden');
+                footer.classList.add('hidden');
+                return;
+            }
+
+            tbody.innerHTML = companies.map(c => {
+                const loc = c.location || {};
+                const locationStr = [loc.locality, loc.region, loc.country]
+                    .filter(Boolean)
+                    .join(', ');
+                const linkedinUrl = c.linkedin_url || '';
+                const linkedinLink = linkedinUrl
+                    ? `<a href="${csEscHtml(linkedinUrl)}" target="_blank" rel="noopener" style="color:var(--accent);">View</a>`
+                    : '';
+                return `<tr>
+                    <td><strong>${csEscHtml(c.display_name || c.name || '')}</strong></td>
+                    <td>${c.website ? `<a href="https://${csEscHtml(c.website)}" target="_blank" rel="noopener" style="color:var(--accent);">${csEscHtml(c.website)}</a>` : ''}</td>
+                    <td class="wrap-cell">${csEscHtml(c.industry || '')}</td>
+                    <td class="wrap-cell">${csEscHtml(locationStr)}</td>
+                    <td>${csEscHtml(c.size || '')}</td>
+                    <td>${csEscHtml(c.founded ? String(c.founded) : '')}</td>
+                    <td>${csEscHtml(c.type || '')}</td>
+                    <td>${linkedinLink}</td>
+                </tr>`;
+            }).join('');
+
+            wrap.classList.remove('hidden');
+            footer.classList.remove('hidden');
+            footerInfo.textContent = `${companies.length} result${companies.length !== 1 ? 's' : ''} loaded`;
+        }
+
+        function csEscHtml(str) {
+            if (!str) return '';
+            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        function exportCompanySearchCsv() {
+            if (!_csResults || _csResults.length === 0) {
+                alert('No results to export. Run a search first.');
+                return;
+            }
+
+            const headers = [
+                'Company Name', 'Display Name', 'Website', 'LinkedIn URL',
+                'Industry', 'Sub-Industry', 'Tags',
+                'Street Address', 'City', 'State/Region', 'Country', 'Postal Code', 'Metro',
+                'Employee Count', 'Employee Count Range', 'Company Size',
+                'Founded Year', 'Type',
+                'Summary',
+                'Phone', 'Ticker', 'NAICS Code', 'SIC Code',
+                'Facebook URL', 'Twitter URL', 'Crunchbase URL'
+            ];
+
+            const csvEsc = (val) => {
+                if (val === null || val === undefined) return '';
+                const s = String(val);
+                if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+                return s;
+            };
+
+            const rows = _csResults.map(c => {
+                const loc = c.location || {};
+                const profiles = Array.isArray(c.profiles) ? c.profiles : [];
+                const naics = Array.isArray(c.naics) ? c.naics.map(n => n.naics_code || n).join('; ') : '';
+                const sic = Array.isArray(c.sic) ? c.sic.map(s => s.sic_code || s).join('; ') : '';
+                const tags = Array.isArray(c.tags) ? c.tags.join('; ') : (c.tags || '');
+                const facebook = profiles.find(p => p.includes('facebook')) || c.facebook_url || '';
+                const twitter = profiles.find(p => p.includes('twitter')) || c.twitter_url || '';
+                const crunchbase = profiles.find(p => p.includes('crunchbase')) || '';
+
+                return [
+                    c.name || '', c.display_name || '', c.website || '', c.linkedin_url || '',
+                    c.industry || '', c.sub_industry || '', tags,
+                    loc.street_address || '', loc.locality || '', loc.region || '',
+                    loc.country || '', loc.postal_code || '', loc.metro || '',
+                    c.employee_count || '', c.employee_count_range || '', c.size || '',
+                    c.founded || '', c.type || '',
+                    c.summary || '',
+                    '', c.ticker || '', naics, sic,
+                    facebook, twitter, crunchbase
+                ];
+            });
+
+            let csv = headers.map(csvEsc).join(',') + '\n';
+            for (const row of rows) {
+                csv += row.map(csvEsc).join(',') + '\n';
+            }
+
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `pdl_company_search_${new Date().toISOString().slice(0, 10)}.csv`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        // Load business latest output on page load (if business tab was last active)
+        async function loadBizLatestOutputs() {
+            try {
+                // Try to load step 1 output
+                const s1 = await fetch('/api/biz/step1/latest-output');
+                const s1Data = await s1.json();
+                if (s1Data.success && s1Data.output && s1Data.output.trim()) {
+                    showOutput('bizStep1', s1Data.output);
+                    if (s1Data.files) showFileInfo('bizStep1', s1Data.files);
+                    const hasData = s1Data.files && s1Data.files.extractedTrademarks &&
+                                    s1Data.files.extractedTrademarks.stats && s1Data.files.extractedTrademarks.stats.exists;
+                    if (hasData) {
+                        updateStepStatus('bizStep1', true, false);
+                    }
+                }
+            } catch (_) {}
+            try {
+                // Try to load step 2 output
+                const s2 = await fetch('/api/biz/step2/latest-output');
+                const s2Data = await s2.json();
+                if (s2Data.success && s2Data.output && s2Data.output.trim()) {
+                    showOutput('bizStep2', s2Data.output);
+                    if (s2Data.files) showFileInfo('bizStep2', s2Data.files);
+                    const hasData = s2Data.files && s2Data.files.enrichedCompanies &&
+                                    s2Data.files.enrichedCompanies.stats && s2Data.files.enrichedCompanies.stats.exists;
+                    if (hasData) {
+                        updateStepStatus('bizStep2', true, false);
+                    }
+                }
+            } catch (_) {}
+        }
+
+        // Initialize business outputs on page load
+        loadBizLatestOutputs();
     </script>
 </body>
 </html>

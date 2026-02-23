@@ -5,6 +5,8 @@ Activate python venv: `source patent_env/bin/activate`
 
 install python dependencies: `pip3 install -r requirements.txt`
 
+start backend: `python3 main.py`
+
 ## Project Structure
 ```
 Patent Grants/                          # Your main project folder

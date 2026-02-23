@@ -2969,9 +2969,595 @@ app.get('/api/status', (req, res) => {
         .map(([key]) => key);
 
     // Step 2 now represents enrichment; no extraction status
-    
+
+    // ===== BUSINESS PIPELINE STATUS =====
+    const bizExtracted = readJsonFile('output/business/extracted_trademarks.json');
+    const bizEnriched = readJsonFile('output/business/enriched_companies.json');
+    const bizEnrichmentResults = readJsonFile('output/business/enrichment_results.json');
+    status.biz_step1 = {
+        extractedTrademarks: getFileStats('output/business/extracted_trademarks.json'),
+        running: runningProcesses.has('biz_step1')
+    };
+    status.biz_step2 = {
+        enrichedCompanies: getFileStats('output/business/enriched_companies.json'),
+        enrichmentResults: getFileStats('output/business/enrichment_results.json'),
+        enrichedCsv: getFileStats('output/business/enriched_companies.csv'),
+        running: runningProcesses.has('biz_step2')
+    };
+    status.biz_counts = {
+        extractedTrademarks: bizExtracted ? bizExtracted.length : 0,
+        enrichedCompanies: bizEnriched ? bizEnriched.length : 0
+    };
+
     res.json(status);
 });
+
+// ===== BUSINESS ENRICHMENT PIPELINE ROUTES =====
+
+// Business Step 1: Upload XML
+app.post('/api/biz/step1/upload-xml', express.raw({ type: ['application/xml', 'text/xml', 'application/octet-stream'], limit: '500mb' }), async (req, res) => {
+    const stepId = 'biz_step1';
+
+    if (runningProcesses.has(stepId)) {
+        return res.json({ success: false, error: 'Business Step 1 is already running' });
+    }
+
+    try {
+        console.log('Business trademark XML upload. content-type=', req.headers['content-type'], 'length=', req.headers['content-length']);
+        const buf = req.body;
+        if (!buf || !buf.length) {
+            return res.status(400).json({ success: false, error: 'No XML data received' });
+        }
+
+        // Save uploaded XML to output/business/
+        const outDir = path.join(__dirname, '..', 'output', 'business');
+        if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+        const xmlPath = path.join(outDir, 'uploaded_trademarks.xml');
+        fs.writeFileSync(xmlPath, buf);
+        console.log(`Saved uploaded XML (${buf.length} bytes) to ${xmlPath}`);
+
+        // Run the wrapper in upload mode
+        const args = ['--mode', 'upload', '--xml-path', xmlPath];
+        runPythonScriptAsync('front-end/run_biz_step1_wrapper.py', args, stepId)
+            .then((result) => {
+                console.log('Business Step 1 (upload) completed successfully');
+                try {
+                    fs.writeFileSync(path.join(outDir, 'last_biz_step1_output.txt'), (result && result.output) ? String(result.output) : '');
+                } catch (e) { /* ignore */ }
+                const extracted = readJsonFile('output/business/extracted_trademarks.json');
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: true,
+                    output: result.output,
+                    completedAt: new Date(),
+                    files: {
+                        extractedTrademarks: {
+                            count: extracted ? extracted.length : 0,
+                            stats: getFileStats('output/business/extracted_trademarks.json')
+                        },
+                        extractedCsv: getFileStats('output/business/extracted_trademarks.csv')
+                    }
+                });
+            })
+            .catch((error) => {
+                console.error('Business Step 1 (upload) failed:', error);
+                try {
+                    const msg = [error.error || error.message || 'Upload failed', error.stderr || '', error.stdout || ''].filter(Boolean).join('\n\n');
+                    fs.writeFileSync(path.join(outDir, 'last_biz_step1_output.txt'), msg);
+                } catch (e) { /* ignore */ }
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: false,
+                    error: error.error || error.message,
+                    stderr: error.stderr,
+                    stdout: error.stdout,
+                    completedAt: new Date()
+                });
+            });
+
+        res.json({
+            success: true,
+            status: 'started',
+            processing: true,
+            message: 'Trademark XML uploaded. Processing started.'
+        });
+    } catch (error) {
+        console.error('Business upload XML failed:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Business Step 1: Auto-download from USPTO
+app.post('/api/biz/step1/auto-download', express.json(), async (req, res) => {
+    const stepId = 'biz_step1';
+
+    if (runningProcesses.has(stepId)) {
+        return res.json({ success: false, error: 'Business Step 1 is already running' });
+    }
+
+    try {
+        const daysBack = Math.min(Math.max(parseInt(req.body.daysBack) || 7, 1), 30);
+        console.log(`Business auto-download requested: ${daysBack} days back`);
+
+        const outDir = path.join(__dirname, '..', 'output', 'business');
+        if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+
+        const args = ['--mode', 'download', '--days-back', String(daysBack)];
+        runPythonScriptAsync('front-end/run_biz_step1_wrapper.py', args, stepId)
+            .then((result) => {
+                console.log('Business Step 1 (auto-download) completed successfully');
+                try {
+                    fs.writeFileSync(path.join(outDir, 'last_biz_step1_output.txt'), (result && result.output) ? String(result.output) : '');
+                } catch (e) { /* ignore */ }
+                const extracted = readJsonFile('output/business/extracted_trademarks.json');
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: true,
+                    output: result.output,
+                    completedAt: new Date(),
+                    files: {
+                        extractedTrademarks: {
+                            count: extracted ? extracted.length : 0,
+                            stats: getFileStats('output/business/extracted_trademarks.json')
+                        },
+                        extractedCsv: getFileStats('output/business/extracted_trademarks.csv')
+                    }
+                });
+            })
+            .catch((error) => {
+                console.error('Business Step 1 (auto-download) failed:', error);
+                try {
+                    const msg = [error.error || error.message || 'Download failed', error.stderr || '', error.stdout || ''].filter(Boolean).join('\n\n');
+                    fs.writeFileSync(path.join(outDir, 'last_biz_step1_output.txt'), msg);
+                } catch (e) { /* ignore */ }
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: false,
+                    error: error.error || error.message,
+                    stderr: error.stderr,
+                    stdout: error.stdout,
+                    completedAt: new Date()
+                });
+            });
+
+        res.json({
+            success: true,
+            status: 'started',
+            processing: true,
+            message: `Auto-downloading trademark XMLs (${daysBack} days back). Processing started.`
+        });
+    } catch (error) {
+        console.error('Business auto-download failed:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Business Step 1: Status polling
+app.get('/api/biz/step1/status', (req, res) => {
+    const stepId = 'biz_step1';
+
+    const completedInfo = runningProcesses.get(stepId + '_completed');
+    if (completedInfo) {
+        runningProcesses.delete(stepId + '_completed');
+        return res.json({
+            completed: true,
+            success: completedInfo.success,
+            output: completedInfo.output,
+            error: completedInfo.error,
+            stderr: completedInfo.stderr,
+            stdout: completedInfo.stdout,
+            files: completedInfo.files
+        });
+    }
+
+    const runningInfo = runningProcesses.get(stepId);
+    if (runningInfo) {
+        const elapsed = Math.round((new Date() - runningInfo.startTime) / 1000);
+        return res.json({
+            completed: false,
+            running: true,
+            progress: runningInfo.progress,
+            elapsedSeconds: elapsed
+        });
+    }
+
+    res.json({ completed: false, running: false });
+});
+
+// Business Step 1: Latest output (persist after refresh)
+app.get('/api/biz/step1/latest-output', (req, res) => {
+    try {
+        const outPath = path.join(__dirname, '..', 'output', 'business', 'last_biz_step1_output.txt');
+        let output = '';
+        if (fs.existsSync(outPath)) {
+            output = fs.readFileSync(outPath, 'utf8');
+        }
+        const extracted = readJsonFile('output/business/extracted_trademarks.json');
+        const files = {
+            extractedTrademarks: {
+                count: extracted ? extracted.length : 0,
+                stats: getFileStats('output/business/extracted_trademarks.json')
+            },
+            extractedCsv: getFileStats('output/business/extracted_trademarks.csv')
+        };
+        return res.json({ success: true, output, files });
+    } catch (e) {
+        return res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+// Business Step 2: PDL Company Enrichment
+app.post('/api/biz/step2', async (req, res) => {
+    const stepId = 'biz_step2';
+    const { testMode = false, searchFields = ['name', 'location'] } = req.body;
+
+    if (runningProcesses.has(stepId)) {
+        return res.json({ success: false, error: 'Business Step 2 is already running' });
+    }
+
+    try {
+        console.log(`Starting Business Step 2: Company Enrichment${testMode ? ' (TEST MODE)' : ''} (Async)`);
+        const args = [];
+        if (testMode) args.push('--test');
+        args.push('--search-fields', searchFields.join(','));
+
+        runPythonScriptAsync('front-end/run_biz_step2_wrapper.py', args, stepId)
+            .then((result) => {
+                console.log('Business Step 2 completed successfully');
+                const enriched = readJsonFile('output/business/enriched_companies.json');
+                const enrichmentResults = readJsonFile('output/business/enrichment_results.json');
+                const files = {
+                    enrichedCompanies: {
+                        count: enriched ? enriched.length : 0,
+                        stats: getFileStats('output/business/enriched_companies.json')
+                    },
+                    enrichedCsv: getFileStats('output/business/enriched_companies.csv'),
+                    crmCsv: getFileStats('output/business/companies_crm_import.csv'),
+                    zapierCsv: getFileStats('output/business/companies_zapier.csv')
+                };
+                try {
+                    const outDir = path.join(__dirname, '..', 'output', 'business');
+                    fs.writeFileSync(path.join(outDir, 'last_biz_step2_output.txt'), (result && result.output) ? String(result.output) : '');
+                } catch (e) { console.warn('Could not persist last_biz_step2_output.txt:', e.message); }
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: true,
+                    output: result.output,
+                    files: files,
+                    results: enrichmentResults,
+                    completedAt: new Date()
+                });
+            })
+            .catch((error) => {
+                console.error('Business Step 2 failed:', error);
+                try {
+                    const outDir = path.join(__dirname, '..', 'output', 'business');
+                    if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+                    const msg = [error.error || error.message || 'Business Step 2 failed', error.stderr || '', error.stdout || ''].filter(Boolean).join('\n\n');
+                    fs.writeFileSync(path.join(outDir, 'last_biz_step2_output.txt'), msg);
+                } catch (e) { /* ignore */ }
+                runningProcesses.set(stepId + '_completed', {
+                    completed: true,
+                    success: false,
+                    error: error.error || error.message,
+                    stderr: error.stderr,
+                    stdout: error.stdout,
+                    completedAt: new Date()
+                });
+            });
+
+        res.json({
+            success: true,
+            status: 'started',
+            processing: true,
+            message: `Business Step 2 started${testMode ? ' (test mode)' : ''}. Use /api/biz/step2/status to check progress.`
+        });
+    } catch (error) {
+        console.error('Business Step 2 startup error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Business Step 2: Status polling
+app.get('/api/biz/step2/status', (req, res) => {
+    const stepId = 'biz_step2';
+
+    const completedInfo = runningProcesses.get(stepId + '_completed');
+    if (completedInfo) {
+        runningProcesses.delete(stepId + '_completed');
+        return res.json({
+            completed: true,
+            success: completedInfo.success,
+            output: completedInfo.output,
+            error: completedInfo.error,
+            stderr: completedInfo.stderr,
+            stdout: completedInfo.stdout,
+            files: completedInfo.files,
+            results: completedInfo.results
+        });
+    }
+
+    const runningInfo = runningProcesses.get(stepId);
+    if (runningInfo) {
+        const elapsed = Math.round((new Date() - runningInfo.startTime) / 1000);
+        return res.json({
+            completed: false,
+            running: true,
+            progress: runningInfo.progress,
+            elapsedSeconds: elapsed
+        });
+    }
+
+    res.json({ completed: false, running: false });
+});
+
+// Business Step 2: Latest output (persist after refresh)
+app.get('/api/biz/step2/latest-output', (req, res) => {
+    try {
+        const outPath = path.join(__dirname, '..', 'output', 'business', 'last_biz_step2_output.txt');
+        let output = '';
+        if (fs.existsSync(outPath)) {
+            output = fs.readFileSync(outPath, 'utf8');
+        }
+        const enriched = readJsonFile('output/business/enriched_companies.json');
+        const files = {
+            enrichedCompanies: {
+                count: enriched ? enriched.length : 0,
+                stats: getFileStats('output/business/enriched_companies.json')
+            },
+            enrichedCsv: getFileStats('output/business/enriched_companies.csv'),
+            crmCsv: getFileStats('output/business/companies_crm_import.csv'),
+            zapierCsv: getFileStats('output/business/companies_zapier.csv')
+        };
+        return res.json({ success: true, output, files });
+    } catch (e) {
+        return res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+// Business Sample Data
+app.get('/api/biz/sample/:step', (req, res) => {
+    const { step } = req.params;
+    let sampleData;
+    try {
+        switch(step) {
+            case 'biz-step1':
+                sampleData = readJsonFile('output/business/extracted_trademarks.json');
+                if (sampleData) sampleData = sampleData.slice(0, 5);
+                break;
+            case 'biz-step2':
+                sampleData = readJsonFile('output/business/enriched_companies.json');
+                if (sampleData) sampleData = sampleData.slice(0, 3);
+                break;
+            default:
+                return res.status(400).json({ error: 'Invalid business step' });
+        }
+        res.json({ sample: sampleData });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Business CSV Downloads
+// New Enrichments only (from this run's CSV file)
+app.get('/api/biz/export/new-enrichments', (req, res) => {
+    const filePath = path.join(__dirname, '..', 'output', 'business', 'enriched_companies.csv');
+    if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: 'No enriched companies CSV available. Run Business Step 2 first.' });
+    }
+    res.setHeader('Content-Disposition', 'attachment; filename="new_enrichments.csv"');
+    res.setHeader('Content-Type', 'text/csv');
+    fs.createReadStream(filePath).pipe(res);
+});
+
+// New and Existing: query DB for all enriched companies matching current trademark list
+app.get('/api/biz/export/new-and-existing', async (req, res) => {
+    let conn;
+    try {
+        // Load current trademark list to know which companies to include
+        const tmFile = path.join(__dirname, '..', 'output', 'business', 'extracted_trademarks.json');
+        if (!fs.existsSync(tmFile)) {
+            return res.status(404).json({ error: 'No trademark data found. Run Business Step 1 first.' });
+        }
+        const trademarks = JSON.parse(fs.readFileSync(tmFile, 'utf8'));
+        if (!trademarks || trademarks.length === 0) {
+            return res.status(404).json({ error: 'Trademark data is empty.' });
+        }
+
+        // Build lookup keys from trademarks (company_name, city, state)
+        const tmKeys = trademarks.map(tm => ({
+            name: (tm.contact_name || '').trim().toLowerCase(),
+            city: (tm.city || '').trim().toLowerCase(),
+            state: (tm.state || '').trim().toLowerCase()
+        })).filter(k => k.name);
+
+        if (tmKeys.length === 0) {
+            return res.status(404).json({ error: 'No valid company names in trademark data.' });
+        }
+
+        // Query DB for all enriched companies
+        const mysql = require('mysql2/promise');
+        conn = await mysql.createConnection({
+            host: process.env.DB_HOST || 'localhost',
+            port: Number(process.env.DB_PORT || 3306),
+            database: process.env.DB_NAME || 'patent_data',
+            user: process.env.DB_USER || 'root',
+            password: process.env.DB_PASSWORD || 'password'
+        });
+
+        // Get all enriched companies that match any trademark in the current set
+        const [rows] = await conn.execute(
+            'SELECT company_name, city, state, country, trademark_number, legal_entity_type, enrichment_data, api_cost, enriched_at FROM enriched_companies'
+        );
+
+        // Filter to only those matching current trademark list
+        const tmKeySet = new Set(tmKeys.map(k => `${k.name}|${k.city}|${k.state}`));
+        const matched = rows.filter(r => {
+            const key = `${(r.company_name || '').trim().toLowerCase()}|${(r.city || '').trim().toLowerCase()}|${(r.state || '').trim().toLowerCase()}`;
+            return tmKeySet.has(key);
+        });
+
+        if (matched.length === 0) {
+            return res.status(404).json({ error: 'No enriched companies found matching current trademarks.' });
+        }
+
+        // Build CSV
+        const csvEsc = (val) => {
+            if (val === null || val === undefined) return '';
+            const s = String(val);
+            if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+            return s;
+        };
+
+        const headers = [
+            'trademark_number', 'original_name', 'match_score',
+            'original_city', 'original_state', 'original_country', 'original_legal_entity_type',
+            'company_name', 'company_display_name', 'company_size',
+            'company_industry', 'company_website', 'company_linkedin_url',
+            'company_founded', 'company_type', 'company_ticker',
+            'company_location_locality', 'company_location_region',
+            'company_location_country', 'company_location_street_address',
+            'company_location_postal_code',
+            'company_employee_count', 'company_description'
+        ];
+
+        let csv = headers.map(csvEsc).join(',') + '\n';
+
+        for (const row of matched) {
+            let enrichData = {};
+            try {
+                enrichData = typeof row.enrichment_data === 'string'
+                    ? JSON.parse(row.enrichment_data)
+                    : (row.enrichment_data || {});
+            } catch (e) { /* ignore parse errors */ }
+
+            const pdl = enrichData.enrichment_result?.pdl_data || {};
+            const original = enrichData.original_trademark || {};
+            const loc = (typeof pdl.location === 'object' && pdl.location) || {};
+
+            const csvRow = [
+                row.trademark_number || original.trademark_number || '',
+                row.company_name || '',
+                pdl.likelihood || '',
+                row.city || '',
+                row.state || '',
+                row.country || '',
+                row.legal_entity_type || '',
+                pdl.name || '',
+                pdl.display_name || '',
+                pdl.size || '',
+                pdl.industry || '',
+                pdl.website || '',
+                pdl.linkedin_url || '',
+                pdl.founded || '',
+                pdl.type || '',
+                pdl.ticker || '',
+                loc.locality || '',
+                loc.region || '',
+                loc.country || '',
+                loc.street_address || '',
+                loc.postal_code || '',
+                pdl.employee_count || '',
+                (pdl.summary || '').substring(0, 500)
+            ];
+            csv += csvRow.map(csvEsc).join(',') + '\n';
+        }
+
+        console.log(`[export/new-and-existing] Exporting ${matched.length} records (from ${rows.length} total in DB, ${trademarks.length} trademarks)`);
+
+        res.setHeader('Content-Disposition', 'attachment; filename="enriched_new_and_existing.csv"');
+        res.setHeader('Content-Type', 'text/csv');
+        res.send(csv);
+
+    } catch (err) {
+        console.error('[export/new-and-existing] Error:', err);
+        res.status(500).json({ error: 'Failed to export: ' + err.message });
+    } finally {
+        if (conn) await conn.end().catch(() => {});
+    }
+});
+
+// Company Search: synchronous PDL Company Search API call
+app.post('/api/biz/company-search', async (req, res) => {
+    try {
+        const apiKey = process.env.PEOPLEDATALABS_API_KEY;
+        if (!apiKey || apiKey === 'YOUR_PDL_API_KEY') {
+            return res.status(400).json({ error: 'PEOPLEDATALABS_API_KEY is not configured.' });
+        }
+
+        const { name, website, industry, country, region, locality, tags, size, ticker, maxResults } = req.body;
+        const resultSize = Math.min(Math.max(parseInt(maxResults) || 25, 1), 100);
+
+        // Build Elasticsearch bool/must query from provided fields
+        const mustClauses = [];
+
+        if (name)     mustClauses.push({ match: { name: name.toLowerCase() } });
+        if (website)  mustClauses.push({ term:  { website: website.toLowerCase() } });
+        if (industry) mustClauses.push({ term:  { industry: industry.toLowerCase() } });
+        if (country)  mustClauses.push({ term:  { 'location.country': country.toLowerCase() } });
+        if (region)   mustClauses.push({ term:  { 'location.region': region.toLowerCase() } });
+        if (locality) mustClauses.push({ term:  { 'location.locality': locality.toLowerCase() } });
+        if (ticker)   mustClauses.push({ term:  { ticker: ticker.toUpperCase() } });
+        if (size)     mustClauses.push({ term:  { size: size } });
+
+        // Tags: support comma-separated, each as a separate term clause
+        if (tags) {
+            const tagList = tags.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+            for (const tag of tagList) {
+                mustClauses.push({ term: { tags: tag } });
+            }
+        }
+
+        if (mustClauses.length === 0) {
+            return res.status(400).json({ error: 'At least one search field must be provided.' });
+        }
+
+        const esQuery = {
+            query: {
+                bool: {
+                    must: mustClauses
+                }
+            }
+        };
+
+        console.log('[company-search] Query:', JSON.stringify(esQuery));
+        console.log('[company-search] Size:', resultSize);
+
+        const pdlResponse = await fetch('https://api.peopledatalabs.com/v5/company/search', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Api-Key': apiKey
+            },
+            body: JSON.stringify({
+                query: esQuery,
+                size: resultSize
+            })
+        });
+
+        const pdlData = await pdlResponse.json();
+
+        if (pdlData.status === 200) {
+            console.log(`[company-search] Success: ${pdlData.data?.length || 0} results, total=${pdlData.total}`);
+            res.json({
+                data: pdlData.data || [],
+                total: pdlData.total || 0,
+                scroll_token: pdlData.scroll_token || null
+            });
+        } else {
+            console.warn('[company-search] PDL error:', pdlData);
+            res.status(pdlData.status || 500).json({
+                error: pdlData.error?.message || pdlData.error || 'PDL API error',
+                status: pdlData.status
+            });
+        }
+    } catch (err) {
+        console.error('[company-search] Server error:', err);
+        res.status(500).json({ error: 'Internal server error: ' + err.message });
+    }
+});
+
+// ===== END BUSINESS ENRICHMENT PIPELINE ROUTES =====
 
 // Get sample data from files
 app.get('/api/sample/:step', (req, res) => {
@@ -3027,6 +3613,15 @@ app.listen(PORT, () => {
     console.log('   GET  /api/sample/:step - Get sample data');
     console.log('');
     console.log('🔧 RESTRUCTURED: All steps moved up +1, new Step 0 for patent download!');
+    console.log('');
+    console.log('🏢 BUSINESS ENRICHMENT PIPELINE:');
+    console.log('   POST /api/biz/step1/upload-xml - Upload trademark XML');
+    console.log('   GET  /api/biz/step1/status - Check Business Step 1 progress');
+    console.log('   POST /api/biz/step2 - PDL Company enrichment');
+    console.log('   GET  /api/biz/step2/status - Check Business Step 2 progress');
+    console.log('   GET  /api/biz/export/new-enrichments - Download new enrichments CSV');
+    console.log('   GET  /api/biz/export/new-and-existing - Download new + existing enrichments from DB');
+    console.log('   POST /api/biz/company-search - Interactive PDL Company Search');
 });
 // Utility: CSV escaping
 function csvEscape(val) {

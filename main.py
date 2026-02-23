@@ -17,7 +17,7 @@ load_dotenv()
 # Import all runner functions
 from runners.integrate_existing_data import run_existing_data_integration
 from runners.extract_patents import run_patent_extraction
-from runners.enrich import run_enrichment
+from runners.enrich import run_sql_data_enrichment
 from runners.integrate_dynamics import run_dynamics_integration
 from runners.automate_email import run_email_automation
 from runners.monitor_report import run_monitoring_report
@@ -328,7 +328,7 @@ def step2_enrich_data(config: Dict[str, Any], patents_data=None) -> Dict[str, An
     
     # Run enrichment
     logger.info(f"\n🔄 STARTING ENRICHMENT PROCESS...")
-    result = run_enrichment(config)
+    result = run_sql_data_enrichment(config)
     
     # Log enrichment results
     if result['success']:
