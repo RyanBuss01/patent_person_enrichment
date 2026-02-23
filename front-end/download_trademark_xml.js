@@ -28,7 +28,9 @@ for (let i = 0; i < args.length; i++) {
     if (args[i] === '--output-dir' && args[i + 1]) outputDir = args[i + 1];
 }
 
-const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const CHROME_PATH = process.platform === 'darwin'
+    ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+    : (process.env.CHROME_PATH || '/usr/bin/google-chrome-stable' || '/usr/bin/chromium-browser' || '/usr/bin/chromium');
 const USPTO_PAGE = 'https://data.uspto.gov/bulkdata/datasets/trtdxfag';
 
 async function main() {
