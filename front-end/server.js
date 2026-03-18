@@ -3340,6 +3340,48 @@ app.get('/api/biz/sample/:step', (req, res) => {
 
 // Business CSV Downloads
 // New Enrichments only (from this run's CSV file)
+// Trademark XML data export (pre-enrichment: names & addresses from uploaded XML)
+app.get('/api/biz/export/trademark-xml-data', (req, res) => {
+    const jsonPath = path.join(__dirname, '..', 'output', 'business', 'extracted_trademarks.json');
+    if (!fs.existsSync(jsonPath)) {
+        return res.status(404).json({ error: 'No trademark data found. Run Business Step 1 first.' });
+    }
+
+    try {
+        const trademarks = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+        if (!trademarks || trademarks.length === 0) {
+            return res.status(404).json({ error: 'Trademark data is empty.' });
+        }
+
+        const csvEsc = (val) => {
+            if (val === null || val === undefined) return '';
+            const s = String(val);
+            if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+            return s;
+        };
+
+        const headers = [
+            'contact_name', 'address_1', 'address_2', 'city', 'state', 'zip_code',
+            'country', 'legal_entity_type', 'nationality',
+            'trademark_number', 'all_serial_numbers', 'all_registration_numbers'
+        ];
+
+        let csv = headers.map(csvEsc).join(',') + '\n';
+        for (const tm of trademarks) {
+            const row = headers.map(h => csvEsc(tm[h] || ''));
+            csv += row.join(',') + '\n';
+        }
+
+        console.log(`[export/trademark-xml-data] Exporting ${trademarks.length} trademark records`);
+        res.setHeader('Content-Disposition', 'attachment; filename="trademark_xml_data.csv"');
+        res.setHeader('Content-Type', 'text/csv');
+        res.send(csv);
+    } catch (err) {
+        console.error('[export/trademark-xml-data] Error:', err);
+        res.status(500).json({ error: 'Failed to export: ' + err.message });
+    }
+});
+
 app.get('/api/biz/export/new-enrichments', (req, res) => {
     const filePath = path.join(__dirname, '..', 'output', 'business', 'enriched_companies.csv');
     res.setHeader('Content-Disposition', 'attachment; filename="new_enrichments.csv"');
@@ -3527,7 +3569,7 @@ app.post('/api/biz/company-search', async (req, res) => {
             return res.status(400).json({ error: 'PEOPLEDATALABS_API_KEY is not configured.' });
         }
 
-        const { name, website, industry, country, region, locality, tags, size, ticker, maxResults } = req.body;
+        const { name, website, industry, country, region, locality, tags, size, ticker, summary, avgTenureMin, avgTenureMax, maxResults } = req.body;
         const resultSize = Math.min(Math.max(parseInt(maxResults) || 25, 1), 100);
 
         // Build Elasticsearch bool/must query from provided fields
@@ -3541,6 +3583,17 @@ app.post('/api/biz/company-search', async (req, res) => {
         if (locality) mustClauses.push({ term:  { 'location.locality': locality.toLowerCase() } });
         if (ticker)   mustClauses.push({ term:  { ticker: ticker.toUpperCase() } });
         if (size)     mustClauses.push({ term:  { size: size } });
+
+        // Summary: keyword match against company summary/description
+        if (summary)  mustClauses.push({ match: { summary: summary.toLowerCase() } });
+
+        // Average Employee Tenure: range filter
+        if (avgTenureMin || avgTenureMax) {
+            const rangeClause = {};
+            if (avgTenureMin) rangeClause.gte = parseFloat(avgTenureMin);
+            if (avgTenureMax) rangeClause.lte = parseFloat(avgTenureMax);
+            mustClauses.push({ range: { average_employee_tenure: rangeClause } });
+        }
 
         // Tags: support comma-separated, each as a separate term clause
         if (tags) {

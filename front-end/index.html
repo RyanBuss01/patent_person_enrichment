@@ -2154,6 +2154,19 @@
                         </details>
                     </div>
 
+                    <!-- Trademark Data Export (pre-enrichment) -->
+                    <div class="export-widget" id="bizTrademarkExportWidget" style="margin: 12px 0;">
+                        <h3>Trademark Data Export</h3>
+                        <p style="font-size: 0.85em; color: var(--text-muted); margin: 4px 0 8px;">
+                            Export extracted names &amp; addresses directly from the uploaded XML (no enrichment needed).
+                        </p>
+                        <div class="export-actions">
+                            <button class="btn btn-success" onclick="exportTrademarkXmlData()">
+                                Export Trademark Data
+                            </button>
+                        </div>
+                    </div>
+
                     <!-- Business Step 2: PDL Company Enrichment -->
                     <div class="step" id="bizStep2">
                         <div class="step-header">
@@ -2322,6 +2335,18 @@
                         <input type="text" id="csTicker" placeholder="e.g. AAPL">
                     </div>
                     <div class="field-group">
+                        <label for="csSummary">Summary (keyword)</label>
+                        <input type="text" id="csSummary" placeholder="e.g. logistics, real estate">
+                    </div>
+                    <div class="field-group">
+                        <label for="csAvgTenureMin">Avg Employee Tenure (min years)</label>
+                        <input type="number" id="csAvgTenureMin" placeholder="e.g. 2" step="0.5" min="0">
+                    </div>
+                    <div class="field-group">
+                        <label for="csAvgTenureMax">Avg Employee Tenure (max years)</label>
+                        <input type="number" id="csAvgTenureMax" placeholder="e.g. 10" step="0.5" min="0">
+                    </div>
+                    <div class="field-group">
                         <label for="csMaxResults">Max Results</label>
                         <select id="csMaxResults">
                             <option value="10">10</option>
@@ -2353,6 +2378,7 @@
                                 <th>Size</th>
                                 <th>Founded</th>
                                 <th>Type</th>
+                                <th>Avg Tenure</th>
                                 <th>LinkedIn</th>
                             </tr>
                         </thead>
@@ -5112,6 +5138,11 @@
             }
         }
 
+        // Trademark XML Data Export (pre-enrichment)
+        function exportTrademarkXmlData() {
+            window.location.href = '/api/biz/export/trademark-xml-data';
+        }
+
         // Business CSV Export Functions
         function exportBizNewEnrichments() {
             window.location.href = '/api/biz/export/new-enrichments';
@@ -5137,7 +5168,7 @@
         }
 
         function clearCompanySearchForm() {
-            ['csName', 'csWebsite', 'csIndustry', 'csRegion', 'csLocality', 'csTags', 'csTicker'].forEach(id => {
+            ['csName', 'csWebsite', 'csIndustry', 'csRegion', 'csLocality', 'csTags', 'csTicker', 'csSummary', 'csAvgTenureMin', 'csAvgTenureMax'].forEach(id => {
                 const el = document.getElementById(id);
                 if (el) el.value = '';
             });
@@ -5164,11 +5195,15 @@
                 tags:       (document.getElementById('csTags').value || '').trim(),
                 size:       (document.getElementById('csSize').value || '').trim(),
                 ticker:     (document.getElementById('csTicker').value || '').trim(),
+                summary:    (document.getElementById('csSummary').value || '').trim(),
+                avgTenureMin: (document.getElementById('csAvgTenureMin').value || '').trim(),
+                avgTenureMax: (document.getElementById('csAvgTenureMax').value || '').trim(),
                 maxResults: parseInt(document.getElementById('csMaxResults').value) || 25
             };
 
             const hasFilter = [params.name, params.website, params.industry, params.country,
-                               params.region, params.locality, params.tags, params.size, params.ticker]
+                               params.region, params.locality, params.tags, params.size, params.ticker,
+                               params.summary, params.avgTenureMin, params.avgTenureMax]
                                .some(v => v.length > 0);
             if (!hasFilter) {
                 statusEl.textContent = 'Please enter at least one search criterion.';
@@ -5218,7 +5253,7 @@
             const footerInfo = document.getElementById('csFooterInfo');
 
             if (!companies || companies.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; padding:20px; color:var(--text-muted);">No results found. Try broadening your search.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:20px; color:var(--text-muted);">No results found. Try broadening your search.</td></tr>';
                 wrap.classList.remove('hidden');
                 footer.classList.add('hidden');
                 return;
@@ -5233,6 +5268,7 @@
                 const linkedinLink = linkedinUrl
                     ? `<a href="${csEscHtml(linkedinUrl)}" target="_blank" rel="noopener" style="color:var(--accent);">View</a>`
                     : '';
+                const avgTenure = c.average_employee_tenure != null ? `${c.average_employee_tenure} yr` : '';
                 return `<tr>
                     <td><strong>${csEscHtml(c.display_name || c.name || '')}</strong></td>
                     <td>${c.website ? `<a href="https://${csEscHtml(c.website)}" target="_blank" rel="noopener" style="color:var(--accent);">${csEscHtml(c.website)}</a>` : ''}</td>
@@ -5241,6 +5277,7 @@
                     <td>${csEscHtml(c.size || '')}</td>
                     <td>${csEscHtml(c.founded ? String(c.founded) : '')}</td>
                     <td>${csEscHtml(c.type || '')}</td>
+                    <td>${csEscHtml(avgTenure)}</td>
                     <td>${linkedinLink}</td>
                 </tr>`;
             }).join('');
@@ -5267,7 +5304,7 @@
                 'Street Address', 'City', 'State/Region', 'Country', 'Postal Code', 'Metro',
                 'Employee Count', 'Employee Count Range', 'Company Size',
                 'Founded Year', 'Type',
-                'Summary',
+                'Summary', 'Average Employee Tenure',
                 'Phone', 'Ticker', 'NAICS Code', 'SIC Code',
                 'Facebook URL', 'Twitter URL', 'Crunchbase URL'
             ];
@@ -5296,7 +5333,7 @@
                     loc.country || '', loc.postal_code || '', loc.metro || '',
                     c.employee_count || '', c.employee_count_range || '', c.size || '',
                     c.founded || '', c.type || '',
-                    c.summary || '',
+                    c.summary || '', c.average_employee_tenure != null ? c.average_employee_tenure : '',
                     '', c.ticker || '', naics, sic,
                     facebook, twitter, crunchbase
                 ];

@@ -28,9 +28,33 @@ for (let i = 0; i < args.length; i++) {
     if (args[i] === '--output-dir' && args[i + 1]) outputDir = args[i + 1];
 }
 
-const CHROME_PATH = process.platform === 'darwin'
-    ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-    : (process.env.CHROME_PATH || '/usr/bin/google-chrome-stable' || '/usr/bin/chromium-browser' || '/usr/bin/chromium');
+function resolveChromePath() {
+    if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
+    if (process.platform === 'darwin') return '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+    if (process.platform === 'win32') {
+        const winPaths = [
+            'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+            'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+            process.env.LOCALAPPDATA + '\\Google\\Chrome\\Application\\chrome.exe',
+        ];
+        for (const p of winPaths) {
+            try { if (fs.existsSync(p)) return p; } catch (e) {}
+        }
+        return winPaths[0]; // fallback
+    }
+    // Linux
+    const linuxPaths = [
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/google-chrome',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+    ];
+    for (const p of linuxPaths) {
+        try { if (fs.existsSync(p)) return p; } catch (e) {}
+    }
+    return linuxPaths[0]; // fallback
+}
+const CHROME_PATH = resolveChromePath();
 const USPTO_PAGE = 'https://data.uspto.gov/bulkdata/datasets/trtdxfag';
 
 async function main() {
