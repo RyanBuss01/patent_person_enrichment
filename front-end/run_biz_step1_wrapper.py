@@ -10,6 +10,8 @@ import json
 import logging
 import time
 import argparse
+import zipfile
+import re
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -98,14 +100,60 @@ def main():
             xml_path = download_result['output_files']['xml']
             print(f"Downloaded {download_result['trademarks_downloaded']} files, combined XML at: {xml_path}")
         else:
-            # Upload mode: use provided XML path
-            xml_path = args.xml_path
-            if not xml_path or not os.path.exists(xml_path):
-                error_msg = f"XML file not found: {xml_path}"
+            # Upload mode: use provided file path (XML or ZIP)
+            upload_path = args.xml_path
+            if not upload_path or not os.path.exists(upload_path):
+                error_msg = f"File not found: {upload_path}"
                 write_progress_update("Error", error_msg)
                 print(f"\nBUSINESS STEP 1 FAILED: {error_msg}")
                 return 1
-            print(f"Using uploaded XML file: {xml_path}")
+
+            # Handle ZIP files: extract XML from inside
+            if upload_path.lower().endswith('.zip'):
+                write_progress_update("Extracting ZIP", "Extracting XML from uploaded ZIP file")
+                print(f"Extracting XML from ZIP: {upload_path}")
+                try:
+                    xml_files = []
+                    with zipfile.ZipFile(upload_path, 'r') as zf:
+                        for name in zf.namelist():
+                            if name.lower().endswith('.xml'):
+                                zf.extract(name, BIZ_OUTPUT_DIR)
+                                xml_files.append(os.path.join(BIZ_OUTPUT_DIR, name))
+                                print(f"  Extracted: {name}")
+
+                    if not xml_files:
+                        error_msg = "No XML files found inside ZIP archive"
+                        write_progress_update("Error", error_msg)
+                        print(f"\nBUSINESS STEP 1 FAILED: {error_msg}")
+                        return 1
+
+                    if len(xml_files) == 1:
+                        xml_path = xml_files[0]
+                    else:
+                        # Combine multiple XMLs into one
+                        xml_path = os.path.join(BIZ_OUTPUT_DIR, 'uploaded_trademarks.xml')
+                        with open(xml_path, 'w', encoding='utf-8') as out:
+                            out.write('<trademark-assignments>\n')
+                            for xf in xml_files:
+                                with open(xf, 'r', encoding='utf-8', errors='replace') as f:
+                                    content = f.read()
+                                content = re.sub(r'<!DOCTYPE[^[>]*\[.*?\]>', '', content, flags=re.DOTALL)
+                                content = re.sub(r'<!DOCTYPE[^>]*>', '', content)
+                                content = re.sub(r'<\?xml[^>]*\?>', '', content)
+                                content = re.sub(r'</?trademark-assignments[^>]*>', '', content)
+                                out.write(content + '\n')
+                            out.write('</trademark-assignments>\n')
+                        print(f"Combined {len(xml_files)} XML files into {xml_path}")
+
+                except zipfile.BadZipFile:
+                    error_msg = "Invalid ZIP file"
+                    write_progress_update("Error", error_msg)
+                    print(f"\nBUSINESS STEP 1 FAILED: {error_msg}")
+                    return 1
+            else:
+                xml_path = upload_path
+
+            print(f"Using uploaded file: {xml_path}")
 
         # Parse the XML
         write_progress_update("Parsing XML", "Extracting trademark assignee data from XML")

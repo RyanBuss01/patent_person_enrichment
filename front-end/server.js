@@ -2995,7 +2995,7 @@ app.get('/api/status', (req, res) => {
 // ===== BUSINESS ENRICHMENT PIPELINE ROUTES =====
 
 // Business Step 1: Upload XML
-app.post('/api/biz/step1/upload-xml', express.raw({ type: ['application/xml', 'text/xml', 'application/octet-stream'], limit: '500mb' }), async (req, res) => {
+app.post('/api/biz/step1/upload-xml', express.raw({ type: ['application/xml', 'text/xml', 'application/octet-stream', 'application/zip', 'application/x-zip-compressed'], limit: '500mb' }), async (req, res) => {
     const stepId = 'biz_step1';
 
     if (runningProcesses.has(stepId)) {
@@ -3009,15 +3009,26 @@ app.post('/api/biz/step1/upload-xml', express.raw({ type: ['application/xml', 't
             return res.status(400).json({ success: false, error: 'No XML data received' });
         }
 
-        // Save uploaded XML to output/business/
+        // Save uploaded file to output/business/
         const outDir = path.join(__dirname, '..', 'output', 'business');
         if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
-        const xmlPath = path.join(outDir, 'uploaded_trademarks.xml');
-        fs.writeFileSync(xmlPath, buf);
-        console.log(`Saved uploaded XML (${buf.length} bytes) to ${xmlPath}`);
+
+        // Detect ZIP files by magic bytes (PK\x03\x04) and save with correct extension
+        const isZip = buf.length >= 4 && buf[0] === 0x50 && buf[1] === 0x4B && buf[2] === 0x03 && buf[3] === 0x04;
+        let uploadPath;
+
+        if (isZip) {
+            uploadPath = path.join(outDir, 'uploaded_trademarks.zip');
+            fs.writeFileSync(uploadPath, buf);
+            console.log(`Saved uploaded ZIP (${buf.length} bytes) to ${uploadPath}`);
+        } else {
+            uploadPath = path.join(outDir, 'uploaded_trademarks.xml');
+            fs.writeFileSync(uploadPath, buf);
+            console.log(`Saved uploaded XML (${buf.length} bytes) to ${uploadPath}`);
+        }
 
         // Run the wrapper in upload mode
-        const args = ['--mode', 'upload', '--xml-path', xmlPath];
+        const args = ['--mode', 'upload', '--xml-path', uploadPath];
         runPythonScriptAsync('front-end/run_biz_step1_wrapper.py', args, stepId)
             .then((result) => {
                 console.log('Business Step 1 (upload) completed successfully');
@@ -3608,10 +3619,8 @@ app.post('/api/biz/company-search', async (req, res) => {
         }
 
         const esQuery = {
-            query: {
-                bool: {
-                    must: mustClauses
-                }
+            bool: {
+                must: mustClauses
             }
         };
 

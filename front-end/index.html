@@ -5007,9 +5007,11 @@
 
                 try {
                     const buf = await file.arrayBuffer();
+                    const isZip = file.name.toLowerCase().endsWith('.zip');
+                    const contentType = isZip ? 'application/octet-stream' : 'application/xml';
                     const response = await fetch('/api/biz/step1/upload-xml', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/xml' },
+                        headers: { 'Content-Type': contentType },
                         body: buf
                     });
                     const result = await response.json();
