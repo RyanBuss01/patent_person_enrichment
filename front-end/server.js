@@ -3580,7 +3580,7 @@ app.post('/api/biz/company-search', async (req, res) => {
             return res.status(400).json({ error: 'PEOPLEDATALABS_API_KEY is not configured.' });
         }
 
-        const { name, website, industry, country, region, locality, tags, size, ticker, summary, avgTenureMin, avgTenureMax, maxResults } = req.body;
+        const { name, website, industry, country, region, locality, tags, size, ticker, summary, foundedMin, foundedMax, naicsCode, maxResults } = req.body;
         const resultSize = Math.min(Math.max(parseInt(maxResults) || 25, 1), 100);
 
         // Build Elasticsearch bool/must query from provided fields
@@ -3598,12 +3598,17 @@ app.post('/api/biz/company-search', async (req, res) => {
         // Summary: keyword match against company summary/description
         if (summary)  mustClauses.push({ match: { summary: summary.toLowerCase() } });
 
-        // Average Employee Tenure: range filter
-        if (avgTenureMin || avgTenureMax) {
+        // Founded year: range filter
+        if (foundedMin || foundedMax) {
             const rangeClause = {};
-            if (avgTenureMin) rangeClause.gte = parseFloat(avgTenureMin);
-            if (avgTenureMax) rangeClause.lte = parseFloat(avgTenureMax);
-            mustClauses.push({ range: { average_employee_tenure: rangeClause } });
+            if (foundedMin) rangeClause.gte = parseInt(foundedMin);
+            if (foundedMax) rangeClause.lte = parseInt(foundedMax);
+            mustClauses.push({ range: { founded: rangeClause } });
+        }
+
+        // NAICS Code: term filter
+        if (naicsCode) {
+            mustClauses.push({ term: { 'naics.naics_code': naicsCode.trim() } });
         }
 
         // Tags: support comma-separated, each as a separate term clause
